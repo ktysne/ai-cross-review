@@ -74,9 +74,11 @@ describe('cross-review parseArgs', () => {
     });
   });
 
-  it('--instructions に値が無ければエラー', () => {
+  it('--instructions に値が無ければエラー (--instructions= 空値も含む)', () => {
     expect(parseArgs(['codex', '--instructions']).error).toMatch(/--instructions/);
     expect(parseArgs(['codex', '--instructions', '--fix']).error).toMatch(/--instructions/);
+    expect(parseArgs(['codex', '--instructions=']).error).toMatch(/--instructions/);
+    expect(parseArgs(['codex', '--instructions=']).instructionsPath).toBeNull();
   });
 
   it('既定では instructionsPath は null', () => {

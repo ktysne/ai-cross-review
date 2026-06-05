@@ -193,7 +193,12 @@ function parseArgs(argv) {
         i++;
       }
     } else if (a.startsWith('--instructions=')) {
-      out.instructionsPath = a.slice('--instructions='.length);
+      const v = a.slice('--instructions='.length);
+      if (!v) {
+        out.error = '--instructions にはファイルパスが必要です'; // `--instructions=` 空値は黙って素通りさせない。
+      } else {
+        out.instructionsPath = v;
+      }
     } else if (a === '--base') {
       const v = args[i + 1];
       if (!v || v.startsWith('-')) {
@@ -258,14 +263,16 @@ function collectReviewDiff(opts, gitRun) {
   }
   // --instructions の申し送りファイルが untracked のままリポジトリ内に置かれていても、
   // レビュー対象 (実コード差分) に紛れ込まないよう除外する。絶対パスで突き合わせる。
-  const excludeAbs = opts.instructionsPath ? path.resolve(opts.instructionsPath) : null;
+  // Windows はパスが大文字小文字を区別しないため、比較時のみ lowercase 正規化して取りこぼさない。
+  const normCmp = (p) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
+  const excludeAbs = opts.instructionsPath ? normCmp(opts.instructionsPath) : null;
   const parts = [];
   const tracked = gitRun(['diff', 'HEAD'], { allowDiffExit: true });
   if (tracked.trim()) parts.push(tracked.replace(/\n$/, ''));
   const listed = gitRun(['ls-files', '--others', '--exclude-standard', '-z'], {});
   const untracked = listed.split('\0').filter(Boolean);
   for (const file of untracked) {
-    if (excludeAbs && path.resolve(file) === excludeAbs) continue; // 申し送りファイル自体は対象外。
+    if (excludeAbs && normCmp(file) === excludeAbs) continue; // 申し送りファイル自体は対象外。
     // /dev/null は git が全 OS で空ファイルとして解釈する。差分ありで exit 1 になる。
     const added = gitRun(['diff', '--no-index', '--', '/dev/null', file], { allowDiffExit: true });
     if (added.trim()) parts.push(added.replace(/\n$/, ''));
