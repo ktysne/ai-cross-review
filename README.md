@@ -2,8 +2,7 @@
 
 **Claude ↔ Codex を git の差分で交互にレビューさせる、依存ゼロの CLI ブリッジ。**
 
-「片方の AI で実装 → もう片方の AI でレビュー」という往復を、チャットログを手でコピーせず、
-git の差分を直接レビュアー CLI（`codex` / `claude`）へ渡して 1 コマンドで回します。
+「片方の AI で実装 → もう片方の AI でレビュー」という往復を、チャットログを手でコピーせず、git の差分を直接レビュアー CLI（`codex` / `claude`）へ渡して 1 コマンドで回します。  
 レビュー観点はプロジェクトごとに `.cross-review.md` へ書くだけで差し替えられます。
 
 ## 特徴
@@ -19,7 +18,7 @@ git の差分を直接レビュアー CLI（`codex` / `claude`）へ渡して 1 
 ## 前提
 
 - Node.js >= 20
-- `codex` / `claude` の **スタンドアロン CLI** が PATH にあること（VS Code 拡張やデスクトップアプリとは別物）。
+- `codex` / `claude` の **スタンドアロン CLI** が PATH にあること（VS Code 拡張やデスクトップアプリとは別物）。  
   レビューを実際に走らせるのに必要。CLI が無くても引数解析や差分生成は動く。
 
 ## 使い方
@@ -48,12 +47,12 @@ node tools/cross-review.js --help
 
 ## レビュー観点（`.cross-review.md`）
 
-レビュアーへ渡す「観点プロンプト」は、リポジトリ直下の `.cross-review.md` を単一ソースとして読み込みます。
+レビュアーへ渡す「観点プロンプト」は、リポジトリ直下の `.cross-review.md` を単一ソースとして読み込みます。  
 解決順は次のとおりで、どれも無くても汎用観点で動きます（その際は起動時に stderr へ警告）。
 
 1. 環境変数 `CROSS_REVIEW_CHECKLIST`（ファイルパス）
 2. `<cwd>/.cross-review.md`（`npm run review:*` の通常経路）
-3. `<スクリプト>/../.cross-review.md`（`tools/cross-review.js` の 1 つ上 = リポジトリ直下。
+3. `<スクリプト>/../.cross-review.md`（`tools/cross-review.js` の 1 つ上 = リポジトリ直下。  
    cwd がリポ直下でなくても絶対パス等で起動すれば拾える）
 4. 組み込みの汎用観点（`GENERIC_CHECKLIST`）
 
