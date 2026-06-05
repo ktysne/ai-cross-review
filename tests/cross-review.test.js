@@ -15,10 +15,12 @@ const {
   buildReviewPrompt,
   runReview,
   loadChecklist,
+  loadInstructions,
   CHECKLIST_FILENAME,
   GENERIC_CHECKLIST,
   REVIEW_ONLY_INSTRUCTION,
   FIX_INSTRUCTION,
+  REVIEWER_NOTES_HEADER,
 } = require('../tools/cross-review.js');
 
 describe('cross-review parseArgs', () => {
@@ -58,6 +60,27 @@ describe('cross-review parseArgs', () => {
 
   it('--base に値が無ければエラー', () => {
     expect(parseArgs(['codex', '--base']).error).toMatch(/--base/);
+  });
+
+  it('--instructions <path> / --instructions=path で申し送りファイルを取り込む', () => {
+    expect(parseArgs(['codex', '--fix', '--instructions', 'notes.md'])).toMatchObject({
+      reviewer: 'codex',
+      fix: true,
+      instructionsPath: 'notes.md',
+      error: null,
+    });
+    expect(parseArgs(['codex', '--instructions=../notes.md'])).toMatchObject({
+      instructionsPath: '../notes.md',
+    });
+  });
+
+  it('--instructions に値が無ければエラー', () => {
+    expect(parseArgs(['codex', '--instructions']).error).toMatch(/--instructions/);
+    expect(parseArgs(['codex', '--instructions', '--fix']).error).toMatch(/--instructions/);
+  });
+
+  it('既定では instructionsPath は null', () => {
+    expect(parseArgs(['codex']).instructionsPath).toBeNull();
   });
 
   it('未知のレビュアーはエラー', () => {
@@ -152,6 +175,30 @@ describe('cross-review collectReviewDiff', () => {
     };
     expect(collectReviewDiff({ mode: 'uncommitted' }, fakeGit)).toBe('TRACKED_ONLY');
   });
+
+  it('uncommitted で --instructions の申し送りファイルは untracked 差分から除外する', () => {
+    const fakeGit = (args) => {
+      if (args[0] === 'diff' && args[1] === 'HEAD') return '';
+      if (args[0] === 'ls-files') return 'review-notes.md\0real-new.js\0';
+      if (args[0] === 'diff' && args[3] === '/dev/null') return `NEWFILE(${args[4]})\n`;
+      return '';
+    };
+    // instructionsPath と untracked 候補は同一相対パス文字列なので path.resolve 後も一致し、除外される。
+    const out = collectReviewDiff({ mode: 'uncommitted', instructionsPath: 'review-notes.md' }, fakeGit);
+    expect(out).toContain('NEWFILE(real-new.js)');
+    expect(out).not.toContain('review-notes.md');
+  });
+});
+
+describe('cross-review loadInstructions', () => {
+  it('ファイル本文を読み、末尾空白を除いて返す', () => {
+    const out = loadInstructions('/tmp/notes.md', { readFile: (p) => (p === '/tmp/notes.md' ? '指摘A\n指摘B\n\n' : 'OTHER') });
+    expect(out).toBe('指摘A\n指摘B');
+  });
+
+  it('読めなければ例外を投げる (呼び出し側でエラー終了させる)', () => {
+    expect(() => loadInstructions('/missing.md', { readFile: () => { throw new Error('ENOENT'); } })).toThrow();
+  });
 });
 
 describe('cross-review buildReviewPrompt', () => {
@@ -178,6 +225,19 @@ describe('cross-review buildReviewPrompt', () => {
     const prompt = buildReviewPrompt('diff', { mode: 'uncommitted', fix: true }, 'CL');
     expect(prompt).toContain(FIX_INSTRUCTION);
     expect(prompt).not.toContain(REVIEW_ONLY_INSTRUCTION);
+  });
+
+  it('instructions を渡すと申し送り見出しと本文を観点に加えて含める', () => {
+    const prompt = buildReviewPrompt('diff', { mode: 'base', baseRef: 'main', fix: true }, 'CL', 'これを直して');
+    expect(prompt).toContain('CL');                      // 観点は残る (置き換えない)
+    expect(prompt).toContain(REVIEWER_NOTES_HEADER);     // 申し送り見出し
+    expect(prompt).toContain('これを直して');             // 申し送り本文
+    expect(prompt).toContain(FIX_INSTRUCTION);
+  });
+
+  it('instructions が空/未指定なら申し送り見出しを含めない', () => {
+    expect(buildReviewPrompt('diff', { mode: 'base', baseRef: 'main' }, 'CL')).not.toContain(REVIEWER_NOTES_HEADER);
+    expect(buildReviewPrompt('diff', { mode: 'base', baseRef: 'main' }, 'CL', '   ')).not.toContain(REVIEWER_NOTES_HEADER);
   });
 });
 
@@ -310,6 +370,21 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     expect(captured.cmd).toBe('claude');
     expect(captured.args).toEqual(['-p']);
     expect(captured.stdin).toContain('CLAUDE_DIFF');
+  });
+
+  it('codex --fix + instructions: 申し送り本文を stdin に乗せる (指摘の受け渡し)', () => {
+    const captured = {};
+    const spawnFn = (cmd, args, stdin) => { Object.assign(captured, { cmd, args, stdin }); return null; };
+    const gitRun = (args) => (args[0] === 'diff' && args[1] === 'HEAD' ? 'DIFF_BODY\n' : '');
+    runReview(
+      { reviewer: 'codex', mode: 'uncommitted', fix: true, instructionsPath: 'notes.md' },
+      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', instructions: 'レビュアーの指摘: X を直す' },
+    );
+    expect(captured.args).toContain('workspace-write');
+    expect(captured.stdin).toContain('CHECKLIST_MARKER');           // 観点は残る
+    expect(captured.stdin).toContain(REVIEWER_NOTES_HEADER);         // 申し送り見出し
+    expect(captured.stdin).toContain('レビュアーの指摘: X を直す');   // 申し送り本文
+    expect(captured.stdin).toContain('DIFF_BODY');
   });
 
   it('差分が空ならレビュアーを起動しない', () => {
