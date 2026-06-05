@@ -9,6 +9,7 @@
 //   node tools/cross-review.js codex            # 現在のブランチ (main との差分) を Codex がレビュー
 //   node tools/cross-review.js claude           # 同上を Claude がレビュー
 //   node tools/cross-review.js codex --fix      # Codex がレビューに加え検出事項を直接修正 (作業ツリー編集)
+//   node tools/cross-review.js codex --fix --instructions notes.md  # レビュアーの指摘 (notes.md) を渡して Codex に修正させる
 //   node tools/cross-review.js codex --uncommitted    # 未コミットの作業ツリー差分をレビュー
 //   node tools/cross-review.js claude --base develop  # 比較先ブランチを変更
 //   npm run review:codex                        # = node tools/cross-review.js codex
@@ -29,6 +30,10 @@
 //   フォールバック)。この CLI は engine 部分が完全に汎用なので、他リポへ `tools/cross-review.js` を
 //   コピーし `.cross-review.md` を置くだけで観点を差し替えて再利用できる。観点を更新したら
 //   `.cross-review.md` を直す。
+// - レビュアー個別の「申し送り・重点指摘」は `--instructions <path>` で渡す。これは観点
+//   (.cross-review.md) を置き換えず、それに加えてプロンプトへ添える別系統。一方のレビュアーが
+//   出した指摘をファイルに書き、`codex --fix --instructions <path>` で他方に直接修正させる用途を
+//   一級でサポートする (この目的で CROSS_REVIEW_CHECKLIST を流用すると観点が消えるため非推奨)。
 // - claude の --uncommitted は Codex の --uncommitted (staged+unstaged+untracked) と結果を
 //   揃えるため、tracked 変更 (git diff HEAD) に加えて未追跡ファイルも new file 差分として含める。
 // - 前提: codex / claude の「スタンドアロン CLI」が PATH にあること
@@ -104,6 +109,15 @@ function loadChecklist(deps = {}) {
   return GENERIC_CHECKLIST;
 }
 
+// `--instructions <path>` のファイル本文を読む。観点 (.cross-review.md) とは別系統で、
+// 「レビュアーからの申し送り・重点指摘」をプロンプトへ追加で添えるためのもの。
+// 読めなければ例外を投げ、呼び出し側 (runReview) がエラー終了させる。
+// deps.readFile でテストから差し替え可能。
+function loadInstructions(instructionsPath, deps = {}) {
+  const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
+  return String(readFile(instructionsPath)).replace(/\s+$/, '');
+}
+
 // レビューのみ (既定) の追加指示。ファイルを変更させない。
 const REVIEW_ONLY_INSTRUCTION = [
   '【モード: レビューのみ】',
@@ -122,16 +136,28 @@ const FIX_INSTRUCTION = [
   '構文チェック / lint / テスト / プロジェクト固有の整合性チェックは呼び出し側が後で実行する。',
 ].join('\n');
 
+// `--instructions <path>` で渡された「レビュアーからの申し送り・重点指摘」をプロンプトへ
+// 添えるときの見出し。観点 (.cross-review.md) を置き換えず、それに加える位置づけ。
+// 主用途: 一方のレビュアーが出した指摘を他方に渡して `--fix` で直接修正させる。
+const REVIEWER_NOTES_HEADER = [
+  '【レビュアーからの申し送り・重点指摘】',
+  '以下は、もう一方のレビュアー (Claude 等) が既に検出した重点事項です。',
+  'レビュー時は最優先で検証し、--fix 時はこれらの修正を最優先で行ってください。',
+  '（仕様判断・設計選択が要る事項は修正せず指摘として残すルールは従来どおり）',
+].join('\n');
+
 const USAGE = [
   'Claude ↔ Codex 相互レビュー CLI ブリッジ',
   '',
   '使い方: node tools/cross-review.js <codex|claude> [options]',
   '',
   'options:',
-  '  --fix             検出事項を作業ツリーへ直接修正させる (codex のみ。-s workspace-write)',
-  '  --uncommitted     未コミットの作業ツリー差分 (tracked + untracked) をレビュー',
-  '  --base <ref>      比較先ブランチを指定 (既定: main)',
-  '  -h, --help        このヘルプを表示',
+  '  --fix                 検出事項を作業ツリーへ直接修正させる (codex のみ。-s workspace-write)',
+  '  --uncommitted         未コミットの作業ツリー差分 (tracked + untracked) をレビュー',
+  '  --base <ref>          比較先ブランチを指定 (既定: main)',
+  '  --instructions <path> レビュアーからの申し送り・重点指摘ファイルをプロンプトへ添付',
+  '                        (観点 .cross-review.md は置き換えず追加。--fix と併用で指摘を直接修正させる)',
+  '  -h, --help            このヘルプを表示',
   '',
   'レビュー観点: リポジトリ直下の .cross-review.md を読み込みます',
   '  (環境変数 CROSS_REVIEW_CHECKLIST でパス指定可。スクリプト位置からも解決。無ければ汎用観点)。',
@@ -141,12 +167,14 @@ const USAGE = [
   '  npm run review:codex:fix',
   '  npm run review:claude -- --uncommitted',
   '  node tools/cross-review.js codex --base develop',
+  '  node tools/cross-review.js codex --fix --uncommitted --instructions notes.md',
+  '      (レビュー指摘 notes.md を渡し、未コミット差分を Codex に修正させる)',
 ].join('\n');
 
 // process.argv.slice(2) を受け取り、レビュアーと差分スコープを解釈する。
 function parseArgs(argv) {
   const args = argv.slice();
-  const out = { reviewer: null, mode: 'base', baseRef: 'main', fix: false, help: false, error: null };
+  const out = { reviewer: null, mode: 'base', baseRef: 'main', fix: false, instructionsPath: null, help: false, error: null };
   const rest = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -156,6 +184,21 @@ function parseArgs(argv) {
       out.fix = true;
     } else if (a === '--uncommitted') {
       out.mode = 'uncommitted';
+    } else if (a === '--instructions') {
+      const v = args[i + 1];
+      if (!v || v.startsWith('-')) {
+        out.error = '--instructions にはファイルパスが必要です';
+      } else {
+        out.instructionsPath = v;
+        i++;
+      }
+    } else if (a.startsWith('--instructions=')) {
+      const v = a.slice('--instructions='.length);
+      if (!v) {
+        out.error = '--instructions にはファイルパスが必要です'; // `--instructions=` 空値は黙って素通りさせない。
+      } else {
+        out.instructionsPath = v;
+      }
     } else if (a === '--base') {
       const v = args[i + 1];
       if (!v || v.startsWith('-')) {
@@ -218,12 +261,18 @@ function collectReviewDiff(opts, gitRun) {
   if (opts.mode !== 'uncommitted') {
     return gitRun(['diff', `${opts.baseRef}...HEAD`], { allowDiffExit: true }).replace(/\n$/, '');
   }
+  // --instructions の申し送りファイルが untracked のままリポジトリ内に置かれていても、
+  // レビュー対象 (実コード差分) に紛れ込まないよう除外する。絶対パスで突き合わせる。
+  // Windows はパスが大文字小文字を区別しないため、比較時のみ lowercase 正規化して取りこぼさない。
+  const normCmp = (p) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
+  const excludeAbs = opts.instructionsPath ? normCmp(opts.instructionsPath) : null;
   const parts = [];
   const tracked = gitRun(['diff', 'HEAD'], { allowDiffExit: true });
   if (tracked.trim()) parts.push(tracked.replace(/\n$/, ''));
   const listed = gitRun(['ls-files', '--others', '--exclude-standard', '-z'], {});
   const untracked = listed.split('\0').filter(Boolean);
   for (const file of untracked) {
+    if (excludeAbs && normCmp(file) === excludeAbs) continue; // 申し送りファイル自体は対象外。
     // /dev/null は git が全 OS で空ファイルとして解釈する。差分ありで exit 1 になる。
     const added = gitRun(['diff', '--no-index', '--', '/dev/null', file], { allowDiffExit: true });
     if (added.trim()) parts.push(added.replace(/\n$/, ''));
@@ -231,28 +280,30 @@ function collectReviewDiff(opts, gitRun) {
   return parts.join('\n');
 }
 
-// レビュアー CLI へ渡すプロンプト (観点 + スコープ + モード別指示 + 差分本文)。
+// レビュアー CLI へ渡すプロンプト (観点 + スコープ + モード別指示 + 申し送り + 差分本文)。
 // codex / claude 共通。opts.fix で「修正まで依頼」と「レビューのみ」を切り替える。
 // checklist は loadChecklist() の戻り値 (未指定/空なら GENERIC_CHECKLIST を使う)。
-function buildReviewPrompt(diffText, opts, checklist) {
+// instructions は --instructions の本文 (任意)。観点とは別に「重点指摘」として添える。
+function buildReviewPrompt(diffText, opts, checklist, instructions) {
   const reviewPoints = (checklist != null && String(checklist).trim())
     ? checklist
     : GENERIC_CHECKLIST;
   const scope = opts.mode === 'uncommitted'
     ? '未コミットの作業ツリー差分 (tracked: git diff HEAD ＋ untracked 新規ファイル)'
     : `現在のブランチと ${opts.baseRef} の差分 (git diff ${opts.baseRef}...HEAD)`;
-  return [
+  const parts = [
     reviewPoints,
     '',
     `レビュー対象: ${scope}`,
     '必要なら作業ディレクトリのファイルを読んで文脈を補ってください。',
     '',
     opts.fix ? FIX_INSTRUCTION : REVIEW_ONLY_INSTRUCTION,
-    '',
-    '--- DIFF START ---',
-    diffText,
-    '--- DIFF END ---',
-  ].join('\n');
+  ];
+  if (instructions != null && String(instructions).trim()) {
+    parts.push('', REVIEWER_NOTES_HEADER, String(instructions).trim());
+  }
+  parts.push('', '--- DIFF START ---', diffText, '--- DIFF END ---');
+  return parts.join('\n');
 }
 
 // reviewer / fix から「起動コマンド・引数・端末通知」を決める純粋関数。
@@ -304,6 +355,18 @@ function runReview(opts, deps = {}) {
   const spawnFn = deps.spawnFn || spawnReviewer;
   // 観点は deps.checklist 指定があれば優先、無ければ .cross-review.md / 汎用観点を解決する。
   const checklist = deps.checklist != null ? deps.checklist : loadChecklist(deps);
+  // 申し送り (--instructions) は観点とは別系統。deps.instructions 指定があれば優先、
+  // 無ければ opts.instructionsPath からファイルを読む (読めなければエラー終了)。
+  let instructions = deps.instructions != null ? deps.instructions : null;
+  if (instructions == null && opts.instructionsPath) {
+    try {
+      instructions = loadInstructions(opts.instructionsPath, deps);
+    } catch (err) {
+      process.stderr.write(`--instructions のファイルを読めません: ${opts.instructionsPath} (${(err && err.message) || 'read error'})\n`);
+      process.exitCode = 1;
+      return null;
+    }
+  }
   // codex / claude いずれも自前で差分を取り出し、プロンプトへ同梱する (untracked も含める)。
   let diffText;
   try {
@@ -317,7 +380,7 @@ function runReview(opts, deps = {}) {
     process.stdout.write('レビュー対象の差分がありません。\n');
     return null;
   }
-  const prompt = buildReviewPrompt(diffText, opts, checklist);
+  const prompt = buildReviewPrompt(diffText, opts, checklist, instructions);
   const { cmd, args, notice } = reviewerInvocation(opts);
   process.stdout.write(notice);
   return spawnFn(cmd, args, prompt);
@@ -345,10 +408,12 @@ module.exports = {
   buildReviewPrompt,
   runReview,
   loadChecklist,
+  loadInstructions,
   CHECKLIST_FILENAME,
   GENERIC_CHECKLIST,
   REVIEW_ONLY_INSTRUCTION,
   FIX_INSTRUCTION,
+  REVIEWER_NOTES_HEADER,
 };
 
 if (require.main === module) main();

@@ -32,16 +32,30 @@ CLI ブリッジ（`npm run review:*`）を使う場合は `codex` / `claude` �
 
 各ステップで受け渡すのは **差分（と前ステップの指摘）** であり、チャットログではない。
 
-## 実装完了後の起点（Claude 主導・選択肢の提示）
+## 実装完了後の起点（Claude 主導・必須）
 
-Claude が実装を完了したら、手で Codex へ切り替えず、Claude が端末から `npm run review:codex*` を実行し、
-その出力を読んで後続まで自走できるようにする。Claude は次の 3 択をユーザに提示する。
+**Claude が改修（実装・修正）を一区切りしたら、作業を完了扱いにする前に必ず次の 3 択を
+`AskUserQuestion` で提示する**。「コミットして終わり」「PR を作って終わり」と勝手に締めない。
+反復的に複数回改修するときも論理的な区切りごとに確認する（最後の 1 回だけではない）。
+手で Codex へ切り替えず、Claude が端末から `npm run review:codex*` を実行し、その出力を読んで
+後続まで自走できるようにする。
 
 | 選択肢 | 何が起きるか |
 |--------|--------------|
 | **A. Codex にレビューを依頼** | Codex は**レビューのみ**（ファイルは変更しない）。Claude が結果を読み、修正を適用する。 |
 | **B. Codex にレビューと検出事項の修正を依頼** | Codex が**レビュー + 修正を作業ツリーへ直接適用**する。Claude は Codex の修正内容をレビューする。 |
 | **C. 何もしない** | レビューを回さず終了。 |
+
+### 確認を省略してよい「軽微で明らかにレビュー不要」な例外
+
+次のような変更は確認を省略してそのまま進めてよい（ただし省略した旨は一言添える）。
+
+- 誤字脱字 / コメントのみ / ドキュメントの文言調整
+- フォーマット・lint 整形のみ（挙動を変えない）
+- **既にレビュー済みのパターンを 1 箇所そのまま踏襲しただけ**の 1〜数行
+- 直前のレビュー済み状態への単純な revert
+
+判断に迷う規模・影響なら**省略せず確認する**（省略の可否自体を迷ったら確認する側に倒す）。
 
 ### A.「レビューを依頼」を選んだ場合
 
@@ -58,6 +72,33 @@ Claude が実装を完了したら、手で Codex へ切り替えず、Claude �
 
 > Claude から `npm run review:codex*` を実行する際は、**codex がネットワークを使う**ため、サンドボックス内では
 > API 接続が失敗しうる。ネットワーク許可付きで実行すること。
+
+### レビュアーの指摘を渡して直させる（`--instructions`）
+
+**「一方のレビュアー（または直前のレビュー結果）で既に具体的な指摘が出ていて、それを Codex に
+直接修正させたい」** ケースの一級フロー。Codex に一から再レビューさせるのではなく、確定済みの
+指摘を渡して `--fix` で直させる。
+
+1. 指摘をファイル（例: `review-notes.md`）に Markdown で書く。各項目に「修正対象 / 判断保留」と
+   優先度を付け、対象ファイル・行・期待する直し方を具体的に書く。
+2. 次を実行（`--fix` と `--instructions` を併用）:
+
+   ```bash
+   # 未コミットの作業ツリーを対象に、指摘を渡して Codex に直接修正させる
+   node tools/cross-review.js codex --fix --uncommitted --instructions review-notes.md
+   # コミット済み差分が対象なら --uncommitted を外す（既定 = main との差分）
+   ```
+
+3. `--instructions` の本文は **観点 `.cross-review.md` を置き換えず**、「レビュアーからの申し送り・
+   重点指摘」としてプロンプトへ追加で添えられる（観点は従来どおり自動添付）。**この用途で
+   `CROSS_REVIEW_CHECKLIST` を流用しない**（観点が消える。手動連結や env 差し替えは不要）。
+4. 修正後、`git diff` で内容をレビューし、`npm run lint` / `npm test` 等を実行して整合を確認する。
+
+補足:
+- 申し送りファイルは**リポジトリ外か `.gitignore` 済みパス**に置くのが無難（`--uncommitted` の untracked
+  収集に紛れ込まないため）。万一リポジトリ内の untracked に置いても、`--instructions` のファイル自体は
+  レビュー差分から自動除外される（[../tools/cross-review.js](../tools/cross-review.js) の `collectReviewDiff`）。
+- 「Codex に自前でレビューもさせたうえで、加えて重点指摘も渡したい」場合も同じく `--instructions` を足すだけ。
 
 ## サーキットブレーカー（無限ループ防止・必須）
 
@@ -93,10 +134,13 @@ npm run review:codex:fix                 # 同上 + 検出事項を Codex が作
 npm run review:claude                    # 現在のブランチを Claude がレビュー (read-only)
 npm run review:codex -- --uncommitted    # 未コミット差分 (tracked + untracked) をレビュー
 npm run review:claude -- --base develop  # 比較先ブランチを変更
+npm run review:codex:fix -- --instructions review-notes.md  # レビュアーの指摘 (ファイル) を渡して直させる
 ```
 
 `--uncommitted` は **未追跡（git 未 add）の新規ファイルも含める**（コミット前チェックでも取りこぼさない）。  
-`--fix` は **codex 専用**で、レビューに加えて検出事項を作業ツリーへ直接修正させる（claude 側の自動修正は未対応）。
+`--fix` は **codex 専用**で、レビューに加えて検出事項を作業ツリーへ直接修正させる（claude 側の自動修正は未対応）。  
+`--instructions <path>` は**レビュアーからの申し送り・重点指摘**をプロンプトへ添える（観点 `.cross-review.md` は
+置き換えず追加。指摘を渡して直させる用途。詳細は前掲「レビュアーの指摘を渡して直させる」）。
 
 ### 指摘対応
 
@@ -119,7 +163,10 @@ npm run review:claude -- --base develop  # 比較先ブランチを変更
   - `--uncommitted`: tracked（`git diff HEAD`）＋ untracked
     （`git ls-files --others --exclude-standard -z` の各ファイルを `git diff --no-index` で
     new file 差分化。`-z` NUL 区切りで空白入りパスでも壊れない）
-- 引数解析・差分生成・プロンプト生成・観点解決は `tests/cross-review.test.js` が担保する。
+- 申し送り（`--instructions <path>`）: レビュアー個別の重点指摘を**観点とは別系統**で添える
+  （`REVIEWER_NOTES_HEADER` 見出し付きでプロンプトへ追加。`.cross-review.md` は置き換えない）。
+  `--uncommitted` の untracked 収集からは申し送りファイル自体を**絶対パス突き合わせで除外**する。
+- 引数解析・差分生成・プロンプト生成・観点解決・申し送り注入は `tests/cross-review.test.js` が担保する。
 
 ## 観点チェックリスト（.cross-review.md）
 

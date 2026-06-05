@@ -29,6 +29,7 @@ npm run review:codex:fix                  # 同上 + 検出事項を Codex が�
 npm run review:claude                     # 現在のブランチを Claude がレビュー
 npm run review:codex -- --uncommitted     # 未コミット差分 (tracked + untracked) をレビュー
 npm run review:claude -- --base develop   # 比較先ブランチを変更
+npm run review:codex:fix -- --instructions review-notes.md  # レビュアーの指摘 (ファイル) を渡して Codex に直させる
 ```
 
 `npm run` を介さず直接呼ぶこともできます。
@@ -43,6 +44,7 @@ node tools/cross-review.js --help
 | `--fix` | 検出事項を作業ツリーへ直接修正させる（`codex` のみ。`-s workspace-write`） |
 | `--uncommitted` | 未コミットの作業ツリー差分（tracked + untracked）をレビュー |
 | `--base <ref>` | 比較先ブランチを指定（既定: `main`） |
+| `--instructions <path>` | レビュアーからの申し送り・重点指摘ファイルをプロンプトへ添付（観点 `.cross-review.md` は置き換えず追加。`--fix` と併用で指摘を直接修正させる） |
 | `-h`, `--help` | ヘルプを表示 |
 
 ## レビュー観点（`.cross-review.md`）
@@ -78,7 +80,7 @@ node tools/cross-review.js --help
 
 ```bash
 npm install        # devDependencies (vitest / eslint) を入れる
-npm test           # ユニットテスト (引数解析・差分生成・プロンプト生成・観点解決)
+npm test           # ユニットテスト (引数解析・差分生成・プロンプト生成・観点解決・申し送り注入)
 npm run lint       # ESLint
 ```
 
