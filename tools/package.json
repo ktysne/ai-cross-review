@@ -1,0 +1,6 @@
+{
+  "name": "ai-cross-review-tools",
+  "private": true,
+  "description": "tools/*.js は CommonJS (require) で書かれているため、ルート package.json の type:\"module\" の影響を受けないようサブディレクトリで type:\"commonjs\" を明示する。",
+  "type": "commonjs"
+}

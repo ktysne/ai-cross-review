@@ -1,0 +1,27 @@
+{
+  "name": "ai-cross-review",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude ↔ Codex を git の差分で交互にレビューさせる、依存ゼロの CLI ブリッジ。",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "cross-review": "tools/cross-review.js"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "review:codex": "node tools/cross-review.js codex",
+    "review:codex:fix": "node tools/cross-review.js codex --fix",
+    "review:claude": "node tools/cross-review.js claude"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "eslint": "^9.39.4",
+    "globals": "^16.5.0",
+    "vitest": "^4.1.8"
+  }
+}
