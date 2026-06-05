@@ -1,6 +1,8 @@
 ## AI 相互レビュー（Claude ↔ Codex）
+> 詳細フローの正本は [docs/cross-review.md](docs/cross-review.md)（本ファイルは運用要点の要約）。
+
 基本フローは **実装 → レビュー → 指摘対応 → 妥当性確認** の 4 ステップを Claude / Codex を入れ替えて回す（Claude 実装 → Codex レビュー → Claude 対応 → Codex 妥当性確認 / およびその逆）。  
-**指摘・対応・妥当性確認は PR コメントに残す**（揮発させない）。
+**指摘・対応・妥当性確認は PR コメントに残す**（揮発させない。PR 未作成なら先に作り、`gh pr comment` で記録）。
 
 ### 実装完了後の起点（Claude 主導・必須）
 Claude が実装を完了したら、Codex へ手で切り替えず、Claude が端末から `npm run review:codex*` を実行して自走する。`AskUserQuestion` で次の 3 択を提示する。
@@ -17,11 +19,11 @@ Claude が実装を完了したら、Codex へ手で切り替えず、Claude が
 
 ### 実行上の注意
 - `npm run review:codex*` は codex がネットワークを使うため **Bash をサンドボックス無効で実行**する。
-- `-- --uncommitted` は未追跡込みの未コミット差分、`--fix` は codex 専用（claude 側の自動修正は未対応）。
+- 既定のレビュー対象は **main とのコミット済み差分**（`--base <ref>` で変更）。未コミットの実装を見るなら `-- --uncommitted`（未追跡込み）。`--fix` は codex 専用（claude 側の自動修正は未対応）。
 - レビュー観点は `.cross-review.md` を自動添付（解決順は env `CROSS_REVIEW_CHECKLIST` → `<cwd>/.cross-review.md`
   → `<スクリプト>/../.cross-review.md` → 汎用フォールバック）。
 
-## 日本語で書くもの（コミット・PR・コメント）
+### 日本語で書くもの（コミット・PR・コメント）
 コミットメッセージ・PR タイトル / 本文 / コメント・コードコメントは **日本語** で書く。
 `feat:` / `fix:` などの prefix（Conventional Commits 風）、コード識別子、ファイルパス、技術用語は
 必要に応じて英語で良いが、説明文は日本語にする。
