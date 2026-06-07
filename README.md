@@ -13,7 +13,7 @@
 - **既定は安全側**: レビューのみは `codex` を read-only で起動しファイルを書き換えさせない。
   `--fix` のときだけ workspace-write で検出事項を作業ツリーへ直接修正させる。
 - **観点を外部化**: プロジェクト固有のレビュー観点は `.cross-review.md` に分離。エンジンは完全に汎用で、
-  他プロジェクトへは `tools/cross-review.js` をコピーして `.cross-review.md` を置くだけ。
+  導入時は vendored ファイル一式をコピーし、`.cross-review.md` だけをプロジェクト固有に編集する。
 
 ## 前提
 
