@@ -13,7 +13,7 @@
 - **既定は安全側**: レビューのみは `codex` を read-only で起動しファイルを書き換えさせない。
   `--fix` のときだけ workspace-write で検出事項を作業ツリーへ直接修正させる。
 - **観点を外部化**: プロジェクト固有のレビュー観点は `.cross-review.md` に分離。エンジンは完全に汎用で、
-  他プロジェクトへは `tools/cross-review.js` をコピーして `.cross-review.md` を置くだけ。
+  導入時は vendored ファイル一式をコピーし、`.cross-review.md` だけをプロジェクト固有に編集する。
 
 ## 前提
 
@@ -79,14 +79,37 @@ spawn できないことがあります。その場合はレビュアーに `sub
 無限ループを防ぐサーキットブレーカー（最大 3 往復）など、運用フローの詳細は
 [docs/cross-review.md](docs/cross-review.md) を参照してください。
 
-## 他プロジェクトへの導入
+## 他プロジェクトへの導入（vendoring）
 
-1. `tools/cross-review.js` をコピーする（`tools/*.js` は CommonJS。コピー先のルート `package.json` が
-   `"type": "module"` の場合は `tools/package.json` に `"type": "commonjs"` を置く）。
-2. リポジトリ直下に `.cross-review.md` を作り、そのプロジェクトで壊れやすい不変条件を書く。
-   雛形は [.cross-review.example.md](.cross-review.example.md)。
+このリポジトリは「**汎用部分は取り込み先へ verbatim コピー / プロジェクト固有部分は取り込み先が所有・編集**」
+という前提で設計している。取り込み先では下表の **取り込み（vendored）** をそのままコピーし、
+**取り込み側が所有** する側だけを編集する。更新時は vendored を再コピー（上書き）するだけでよく、複雑なマージを避けられる。
+
+### 取り込み（vendored・そのままコピー / 更新時は上書き・取り込み先で編集しない）
+| ファイル | 役割 | 取り込み時の調整 |
+|----------|------|------------------|
+| `tools/cross-review.js` | CLI 本体（engine） | なし（verbatim） |
+| `tests/cross-review.test.js` | engine のユニットテスト | require パスのみ取り込み先のテスト配置に合わせる |
+| `.cross-review.example.md` | 観点テンプレート | なし。**コピーして `.cross-review.md` を作り、そちらを編集** |
+| `docs/cross-review.md` | 相互レビュー フロー doc（汎用） | なし（verbatim）。リポ内ファイルはインラインコード・節参照は名前で書いてあり階層に非依存 |
+
+### 取り込み側が所有・編集（同期で上書きしない）
+| ファイル | 役割 |
+|----------|------|
+| `.cross-review.md` | そのプロジェクトのレビュー観点（`.cross-review.example.md` を雛形に作成） |
+| `CLAUDE.md` / `AGENTS.md`（あれば） | そのリポの運用要約。フロー詳細は取り込んだ `docs/cross-review.md` へリンク |
+| 任意のアプリ固有 doc | フロー doc に書かない、そのアプリ固有の運用メモ（検証コマンド・CI・例 など） |
+| `tools/package.json` | `tools/*.js` を CommonJS にする（`"type": "commonjs"`）。そのリポのツール依存はここに足す |
+| 取り込み自動化ツール（任意） | vendored の再コピー・require パス調整を自動化する sync スクリプト等。取り込み側が用意・所有する（このリポには持たない。例: 取り込み側の `tools/sync-*.js`） |
+
+### 手順
+1. 上の vendored をすべて取り込み先へコピーする（`tools/*.js` は CommonJS なので、取り込み先のルート
+   `package.json` が `"type": "module"` の場合は `tools/package.json` に `"type": "commonjs"` を置く）。
+   `tests/cross-review.test.js` の require パスだけ取り込み先のテスト配置に合わせる。
+2. `.cross-review.example.md` を `.cross-review.md` にコピーし、そのプロジェクトで壊れやすい不変条件を書く。
 3. ルート `package.json` の `scripts` に `review:codex` / `review:codex:fix` / `review:claude` を追加する。
-4. `codex` / `claude` のスタンドアロン CLI を PATH に通す。
+4. `codex` / `claude` のスタンドアロン CLI を PATH に通す（リモート等で spawn できない場合は `subagent` モード）。
+5. 更新時は vendored を再コピー（上書き）するだけ。取り込み側が所有するファイルは触らない。
 
 ## 開発
 
