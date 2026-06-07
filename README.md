@@ -100,6 +100,7 @@ spawn できないことがあります。その場合はレビュアーに `sub
 | `CLAUDE.md` / `AGENTS.md`（あれば） | そのリポの運用要約。フロー詳細は取り込んだ `docs/cross-review.md` へリンク |
 | 任意のアプリ固有 doc | フロー doc に書かない、そのアプリ固有の運用メモ（検証コマンド・CI・例 など） |
 | `tools/package.json` | `tools/*.js` を CommonJS にする（`"type": "commonjs"`）。そのリポのツール依存はここに足す |
+| 取り込み自動化ツール（任意） | vendored の再コピー・require パス調整を自動化する sync スクリプト等。取り込み側が用意・所有する（このリポには持たない。例: 取り込み側の `tools/sync-*.js`） |
 
 ### 手順
 1. 上の vendored をすべて取り込み先へコピーする（`tools/*.js` は CommonJS なので、取り込み先のルート
