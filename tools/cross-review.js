@@ -46,7 +46,7 @@
 //   揃えるため、tracked 変更 (git diff HEAD) に加えて未追跡ファイルも new file 差分として含める。
 // - 前提: codex / claude レビュアーは「スタンドアロン CLI」が PATH にあること
 //   (VS Code プラグイン / デスクトップアプリとは別物)。Claude Code から実行する場合は
-//   codex がネットワークを使うため Bash をサンドボックス無効で起動する (docs/cross-review.md 参照)。
+//   codex がネットワークを使うため Bash をサンドボックス無効で起動する (cross-review フロー ドキュメント参照)。
 //   subagent レビュアーは外部 CLI を起動しない (プロンプトを stdout に出すだけ) ので CLI 不要。
 
 'use strict';
