@@ -6,6 +6,8 @@
 
 ### 実装完了後の起点（Claude 主導・必須）
 **Claude が改修（実装・修正）を一区切りしたら、完了扱いにする前に必ず次の 3 択を `AskUserQuestion` で提示する**（「コミット / PR で勝手に締めない」。反復改修時も区切りごとに確認し、最後の 1 回だけにしない）。Codex へ手で切り替えず、Claude が端末から `npm run review:codex*` を実行して自走する。
+
+**ブランチ・PR 運用（必須・レビューを回すなら先にここを満たす）**: 改修は main へ直接ではなく **feature ブランチ**で行う（main 上にいるなら着手時に切る）。A / B でレビューを回す前に **PR を作成**し（未作成なら先に作る）、以降は PR を共有ログにする。**各往復で出た指摘・対応・妥当性確認は、その都度 `gh pr comment` で PR に記録する**（チャットだけに残さない＝揮発させない）。リモートが無い等で PR を作れない場合のみ省略し、その旨を明記する。詳細は [docs/cross-review.md](docs/cross-review.md)。
 - **A. Codex にレビューを依頼** → `npm run review:codex`（codex は read-only）。結果を読み修正を適用（ユーザ判断が要る内容は確認してから）。  
 完了後に再度 `npm run review:codex` で妥当性確認。
 - **B. Codex にレビューと検出事項の修正を依頼** → `npm run review:codex:fix`（codex は workspace-write）。  
