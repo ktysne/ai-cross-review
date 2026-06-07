@@ -12,6 +12,8 @@
   Codex の検出内容・修正差分（`git diff`）・要約を Claude がレビューし、必要なら再修正。
 - **C. 何もしない** → レビューを回さず終了。
 
+**リモートコントロール環境（Codex CLI を spawn できない）では、レビュアーを「Codex」から「Claude の客観的な観点を持つサブエージェント」に切り替える**（A / B のレビュー先だけ差し替え、3 択の意味は不変。C は同じ）。判定は `codex` が PATH で解決できない（`Get-Command codex` 等が失敗）か、リモート実行と分かっているとき（`npm run review:codex` が CLI 不在で失敗したときも切替）。`node tools/cross-review.js subagent`（`--uncommitted` / `--fix` 可）で**外部 CLI を起動せず**レビュープロンプトを stdout に出し、それを `Agent` ツールの客観レビュー用サブエージェント（実装意図に引きずられない第三者として枠付け。`--fix` 相当は書込権限付き）へ渡してレビューさせる。Codex CLI が使える環境では従来どおり Codex を優先。詳細は [docs/cross-review.md](docs/cross-review.md)。
+
 **省略してよい軽微な例外**（省略時は一言添える）: 誤字・コメントのみ・ドキュメント文言調整 / フォーマット・lint 整形のみ / 既にレビュー済みパターンの 1 箇所踏襲（1〜数行）/ 直前のレビュー済み状態への単純 revert。規模・影響で迷ったら省略しない。
 
 **Claude の指摘を Codex に渡して直させる**場合は、指摘をファイルに書いて `node tools/cross-review.js codex --fix --uncommitted --instructions <path>`。`--instructions` は観点 `.cross-review.md` を置き換えず重点指摘として追加で添える（この用途で `CROSS_REVIEW_CHECKLIST` を流用しない）。詳細は [docs/cross-review.md](docs/cross-review.md)。
@@ -23,7 +25,7 @@
 
 ### 実行上の注意
 - `npm run review:codex*` は codex がネットワークを使うため **Bash をサンドボックス無効で実行**する。
-- 既定のレビュー対象は **main とのコミット済み差分**（`--base <ref>` で変更）。未コミットの実装を見るなら `-- --uncommitted`（未追跡込み）。`--fix` は codex 専用（claude 側の自動修正は未対応）。`--instructions <path>` でレビュアーの指摘ファイルを観点に加えて添付（置き換えない）。
+- 既定のレビュー対象は **main とのコミット済み差分**（`--base <ref>` で変更）。未コミットの実装を見るなら `-- --uncommitted`（未追跡込み）。`--fix` は codex / subagent 対応（claude CLI 経路は未対応）。`--instructions <path>` でレビュアーの指摘ファイルを観点に加えて添付（置き換えない）。
 - レビュー観点は `.cross-review.md` を自動添付（解決順は env `CROSS_REVIEW_CHECKLIST` → `<cwd>/.cross-review.md`
   → `<スクリプト>/../.cross-review.md` → 汎用フォールバック）。
 

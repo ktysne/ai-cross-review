@@ -19,7 +19,8 @@
 
 - Node.js >= 20
 - `codex` / `claude` の **スタンドアロン CLI** が PATH にあること（VS Code 拡張やデスクトップアプリとは別物）。  
-  レビューを実際に走らせるのに必要。CLI が無くても引数解析や差分生成は動く。
+  レビューを実際に走らせるのに必要。CLI が無くても引数解析や差分生成は動く。  
+  リモートコントロール環境など外部 CLI を spawn できない場合は `subagent` モード（後述）を使えば外部 CLI 無しでレビュープロンプトを出力できる。
 
 ## 使い方
 
@@ -36,12 +37,23 @@ npm run review:codex:fix -- --instructions review-notes.md  # レビュアーの
 
 ```bash
 node tools/cross-review.js codex --base origin/main
+node tools/cross-review.js subagent --uncommitted   # 外部 CLI を起動せずレビュープロンプトを stdout に出力 (リモートコントロール用)
 node tools/cross-review.js --help
 ```
 
+### リモートコントロール環境（`subagent` モード）
+
+Claude をリモートコントロール（クラウド実行）で動かすと `codex` / `claude` スタンドアロン CLI を
+spawn できないことがあります。その場合はレビュアーに `subagent` を指定すると、**外部プロセスを
+起動せず**、組み立てたレビュープロンプト（観点 + 差分本文 + モード別指示）を **stdout に出すだけ**に
+なります（通知は stderr に分離）。この出力を Claude が `Agent` ツールの客観レビュー用サブエージェント
+へ渡すことで、Codex の代わりに「Claude の客観的な観点を持つサブエージェント」がレビュアーになります。
+`--uncommitted` / `--base` / `--fix` / `--instructions` は他レビュアーと同じく使えます。詳細は
+[docs/cross-review.md](docs/cross-review.md) を参照してください。
+
 | オプション | 意味 |
 |------------|------|
-| `--fix` | 検出事項を作業ツリーへ直接修正させる（`codex` のみ。`-s workspace-write`） |
+| `--fix` | 修正まで依頼（`codex` は `-s workspace-write` で直接編集 / `subagent` は FIX 指示付きでプロンプト出力。`claude` CLI 経路は非対応） |
 | `--uncommitted` | 未コミットの作業ツリー差分（tracked + untracked）をレビュー |
 | `--base <ref>` | 比較先ブランチを指定（既定: `main`） |
 | `--instructions <path>` | レビュアーからの申し送り・重点指摘ファイルをプロンプトへ添付（観点 `.cross-review.md` は置き換えず追加。`--fix` と併用で指摘を直接修正させる） |

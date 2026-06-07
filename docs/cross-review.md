@@ -10,6 +10,7 @@ Claude と Codex を交互に使った相互レビューの運用ドキュメン
 | Claude（CLI / アプリ） | Claude 側の実装 / レビュー |
 | Codex（CLI / 拡張） | Codex 側の実装 / レビュー |
 | `codex` / `claude` スタンドアロン CLI | `npm run review:*` から呼ぶワンショットレビュー（拡張 / アプリとは別物） |
+| Agent ツールの客観サブエージェント | リモートコントロール環境で Codex の代わりに客観レビューを担う（同セッション内・[後述](#リモートコントロール環境でのフォールバックcodex-の代わりに客観サブエージェント)） |
 | git ブランチ・コミット・PR | 受け渡しメディア |
 
 CLI ブリッジ（`npm run review:*`）を使う場合は `codex` / `claude` が PATH にあること。  
@@ -46,6 +47,10 @@ CLI ブリッジ（`npm run review:*`）を使う場合は `codex` / `claude` �
 | **B. Codex にレビューと検出事項の修正を依頼** | Codex が**レビュー + 修正を作業ツリーへ直接適用**する。Claude は Codex の修正内容をレビューする。 |
 | **C. 何もしない** | レビューを回さず終了。 |
 
+> **リモートコントロール環境**では Codex CLI を spawn できないため、A / B のレビュアーを
+> 「Codex」から「Claude の客観的な観点を持つサブエージェント」に読み替える（C は同じ）。
+> 詳細は[リモートコントロール環境でのフォールバック](#リモートコントロール環境でのフォールバックcodex-の代わりに客観サブエージェント)。
+
 ### 確認を省略してよい「軽微で明らかにレビュー不要」な例外
 
 次のような変更は確認を省略してそのまま進めてよい（ただし省略した旨は一言添える）。
@@ -72,6 +77,46 @@ CLI ブリッジ（`npm run review:*`）を使う場合は `codex` / `claude` �
 
 > Claude から `npm run review:codex*` を実行する際は、**codex がネットワークを使う**ため、サンドボックス内では
 > API 接続が失敗しうる。ネットワーク許可付きで実行すること。
+
+## リモートコントロール環境でのフォールバック（Codex の代わりに客観サブエージェント）
+
+Claude を**リモートコントロール（クラウド実行）**で動かす環境では、ローカルの `codex` /
+`claude` スタンドアロン CLI を spawn できない（PATH に無い・起動できない）。この場合はレビュアーを
+**Codex ではなく「Claude の客観的な観点を持つサブエージェント」**に切り替える。
+
+**判定**: `codex` が PATH で解決できない（`Get-Command codex` / `which codex` が失敗する）か、
+リモートコントロール実行だと分かっているとき。`npm run review:codex` が CLI 不在で失敗した場合も
+このフォールバックへ切り替える。
+
+**仕組み**: CLI のプロンプト組み立て部（観点解決・差分収集・モード別指示の付与）は **node + git だけ**で
+動くので、リモート環境でもそのまま使える。spawn する外部 CLI の部分だけを「Agent ツールのサブエージェント」へ
+差し替える。レビュアー `subagent` は外部プロセスを起動せず、組み立てたレビュープロンプトを **stdout に出すだけ**
+（人向けの通知は stderr に分離するので、stdout はそのままサブエージェントへ渡せる）。
+
+1. レビュープロンプトを stdout に出す（外部 CLI は起動しない）:
+
+   ```bash
+   node tools/cross-review.js subagent                 # main との差分 (A 相当・レビューのみ)
+   node tools/cross-review.js subagent --uncommitted   # 未コミット差分 (tracked + untracked)
+   node tools/cross-review.js subagent --fix           # 修正指示付きプロンプト (B 相当)
+   ```
+
+2. その stdout を **Agent ツールで起動する客観レビュー用サブエージェント**の指示として渡す。
+   サブエージェントには「実装者とは独立した第三者レビュアーとして、実装意図に引きずられず差分自体を
+   批判的に検証する」よう枠付けする。レビューのみ（A 相当）は読み取り系（`Explore` 等）で十分、
+   `--fix`（B 相当）で修正まで任せるなら**書込権限のあるサブエージェント**を使う。
+3. サブエージェントのレビュー結果（または修正差分）を Claude が読み、A / B と同じく後続（修正適用・
+   妥当性確認）へ進める。妥当性確認も同じく `subagent` プロンプト + サブエージェントで回す。
+   サーキットブレーカー（最大 3 往復）の数え方も変わらない。
+
+**起点 3 択（A / B / C）の対応**: リモートでも 3 択の意味は変わらず、レビュアーだけが Codex →
+客観サブエージェントに替わる。A → `subagent`（修正なし）を読み取り系へ、B → `subagent --fix` を
+書込権限付きへ、C → そのまま。
+
+> 同じ Claude が実装とレビューを兼ねても、サブエージェントは**独立した文脈**で差分だけを見るため、
+> 「客観的な第三者レビュー」の利点（実装時の思い込みに引きずられない）は保てる。**Codex CLI が使える
+> 環境では従来どおり Codex を優先する**（別モデルの観点が得られるため、このフォールバックはあくまで
+> リモートコントロール等で Codex を起動できないときの代替）。
 
 ### レビュアーの指摘を渡して直させる（`--instructions`）
 
@@ -135,10 +180,12 @@ npm run review:claude                    # 現在のブランチを Claude が�
 npm run review:codex -- --uncommitted    # 未コミット差分 (tracked + untracked) をレビュー
 npm run review:claude -- --base develop  # 比較先ブランチを変更
 npm run review:codex:fix -- --instructions review-notes.md  # レビュアーの指摘 (ファイル) を渡して直させる
+node tools/cross-review.js subagent      # リモートコントロール用: レビュープロンプトを stdout に出力 (外部 CLI を起動しない)
 ```
 
 `--uncommitted` は **未追跡（git 未 add）の新規ファイルも含める**（コミット前チェックでも取りこぼさない）。  
-`--fix` は **codex 専用**で、レビューに加えて検出事項を作業ツリーへ直接修正させる（claude 側の自動修正は未対応）。  
+`--fix` は **codex / subagent 対応**で、レビューに加えて検出事項の修正まで依頼する（codex は workspace-write で直接編集、
+subagent は FIX 指示付きでプロンプト出力。`claude` CLI 経路の自動修正は未対応）。  
 `--instructions <path>` は**レビュアーからの申し送り・重点指摘**をプロンプトへ添える（観点 `.cross-review.md` は
 置き換えず追加。指摘を渡して直させる用途。詳細は前掲「レビュアーの指摘を渡して直させる」）。
 
@@ -152,6 +199,10 @@ npm run review:codex:fix -- --instructions review-notes.md  # レビュアーの
 
 - `codex` / `claude` いずれも **自前で差分を取り出し**、「観点 + スコープ + 差分本文 + モード別指示」を
   stdin で渡して汎用 `codex exec`（末尾 `-` で stdin をプロンプトにする）/ `claude -p` を起動する。
+- レビュアー `subagent` は**外部 CLI を起動しない**。同じプロンプトを組み立てて **stdout に出すだけ**で、
+  実際のレビューは呼び出し側（Claude）が Agent ツールで起動する客観サブエージェントが行う
+  （リモートコントロール環境で codex/claude CLI を spawn できないときのフォールバック）。
+  通知は stderr、プロンプト本文は stdout に分離する。`--fix` 指定時は FIX 指示付きで出力する。
 - codex のサンドボックスでモードを切り替える:
   - レビューのみ（既定）→ `codex exec -s read-only`（ファイルを変更させない）
   - `--fix` → `codex exec -s workspace-write`（検出事項を作業ツリーへ直接修正させる）

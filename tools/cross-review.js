@@ -8,6 +8,7 @@
 // 使い方:
 //   node tools/cross-review.js codex            # 現在のブランチ (main との差分) を Codex がレビュー
 //   node tools/cross-review.js claude           # 同上を Claude がレビュー
+//   node tools/cross-review.js subagent         # 外部 CLI を起動せずレビュープロンプトを stdout に出す (リモートコントロール用)
 //   node tools/cross-review.js codex --fix      # Codex がレビューに加え検出事項を直接修正 (作業ツリー編集)
 //   node tools/cross-review.js codex --fix --instructions notes.md  # レビュアーの指摘 (notes.md) を渡して Codex に修正させる
 //   node tools/cross-review.js codex --uncommitted    # 未コミットの作業ツリー差分をレビュー
@@ -24,9 +25,16 @@
 //   チェックリスト (.cross-review.md) を同時に渡せなくなったため、汎用 exec + 自前の差分埋め込みに統一した。
 // - レビューのみ (既定) は codex を `-s read-only` で起動し、ファイルを書き換えさせない。
 //   `--fix` 指定時のみ codex を `-s workspace-write` で起動し、検出事項を作業ツリーへ直接
-//   修正させる (相互レビューフローの 3B「レビュー + 修正を依頼」)。claude 側の自動修正は未対応。
+//   修正させる (相互レビューフローの 3B「レビュー + 修正を依頼」)。claude CLI 経路 (claude -p) の
+//   自動修正は未対応 (--fix は codex / subagent のみ)。
+// - リモートコントロール環境では codex/claude スタンドアロン CLI を spawn できない。その場合は
+//   reviewer に `subagent` を指定すると、外部プロセスを起動せず、組み立てたレビュープロンプト
+//   (観点 + スコープ + 差分本文 + モード別指示) を stdout に出すだけにする。呼び出し側 (Claude) が
+//   その出力を Agent ツールの客観レビュー用サブエージェントへ渡してレビューさせる
+//   (Codex の代わりに「Claude の客観的な観点を持つサブエージェント」がレビュアーになる)。
+//   プロンプト組み立て・観点解決・差分収集は codex/claude 経路と同一なので観点が揺れない。
 // - プロジェクト固有のレビュー観点は、リポジトリ直下の `.cross-review.md` を単一ソースとして
-//   読み込み、両レビュアーへ同じチェックリストとして添える (無ければ汎用観点 GENERIC_CHECKLIST へ
+//   読み込み、各レビュアー (codex / claude / subagent) へ同じチェックリストとして添える (無ければ汎用観点 GENERIC_CHECKLIST へ
 //   フォールバック)。この CLI は engine 部分が完全に汎用なので、他リポへ `tools/cross-review.js` を
 //   コピーし `.cross-review.md` を置くだけで観点を差し替えて再利用できる。観点を更新したら
 //   `.cross-review.md` を直す。
@@ -36,9 +44,10 @@
 //   一級でサポートする (この目的で CROSS_REVIEW_CHECKLIST を流用すると観点が消えるため非推奨)。
 // - claude の --uncommitted は Codex の --uncommitted (staged+unstaged+untracked) と結果を
 //   揃えるため、tracked 変更 (git diff HEAD) に加えて未追跡ファイルも new file 差分として含める。
-// - 前提: codex / claude の「スタンドアロン CLI」が PATH にあること
+// - 前提: codex / claude レビュアーは「スタンドアロン CLI」が PATH にあること
 //   (VS Code プラグイン / デスクトップアプリとは別物)。Claude Code から実行する場合は
 //   codex がネットワークを使うため Bash をサンドボックス無効で起動する (docs/cross-review.md 参照)。
+//   subagent レビュアーは外部 CLI を起動しない (プロンプトを stdout に出すだけ) ので CLI 不要。
 
 'use strict';
 
@@ -149,10 +158,17 @@ const REVIEWER_NOTES_HEADER = [
 const USAGE = [
   'Claude ↔ Codex 相互レビュー CLI ブリッジ',
   '',
-  '使い方: node tools/cross-review.js <codex|claude> [options]',
+  '使い方: node tools/cross-review.js <codex|claude|subagent> [options]',
+  '',
+  'レビュアー:',
+  '  codex      codex スタンドアロン CLI でレビュー (既定 read-only、--fix で workspace-write)',
+  '  claude     claude スタンドアロン CLI でレビュー (claude -p)',
+  '  subagent   外部 CLI を起動せず、レビュープロンプトを stdout に出力 (リモートコントロール用)。',
+  '             codex/claude CLI を spawn できない環境向け。出力を Agent ツールの客観レビュー用',
+  '             サブエージェントへ渡してレビューさせる。--fix も可 (FIX 指示付きで出力)。',
   '',
   'options:',
-  '  --fix                 検出事項を作業ツリーへ直接修正させる (codex のみ。-s workspace-write)',
+  '  --fix                 修正まで依頼 (codex: workspace-write で直接編集 / subagent: FIX 指示付きで出力。claude CLI 経路は非対応)',
   '  --uncommitted         未コミットの作業ツリー差分 (tracked + untracked) をレビュー',
   '  --base <ref>          比較先ブランチを指定 (既定: main)',
   '  --instructions <path> レビュアーからの申し送り・重点指摘ファイルをプロンプトへ添付',
@@ -169,6 +185,9 @@ const USAGE = [
   '  node tools/cross-review.js codex --base develop',
   '  node tools/cross-review.js codex --fix --uncommitted --instructions notes.md',
   '      (レビュー指摘 notes.md を渡し、未コミット差分を Codex に修正させる)',
+  '  node tools/cross-review.js subagent --uncommitted',
+  '      (リモートコントロール用: 未コミット差分のレビュープロンプトを stdout に出力し、',
+  '       Agent ツールの客観サブエージェントへ渡す)',
 ].join('\n');
 
 // process.argv.slice(2) を受け取り、レビュアーと差分スコープを解釈する。
@@ -217,10 +236,15 @@ function parseArgs(argv) {
   }
   if (!out.help && !out.error) {
     out.reviewer = rest[0] || null;
-    if (out.reviewer !== 'codex' && out.reviewer !== 'claude') {
-      out.error = `レビュアーは codex か claude を指定してください (指定: ${out.reviewer || 'なし'})`;
-    } else if (out.fix && out.reviewer !== 'codex') {
-      out.error = '--fix は codex のみ対応です (claude 側の自動修正は未対応)';
+    // reviewer: codex / claude は外部スタンドアロン CLI を起動する。subagent は外部 CLI を起動せず、
+    // 組み立てたレビュープロンプトを stdout に出すだけ (リモートコントロール環境で codex/claude CLI を
+    // spawn できないとき、その出力を Claude が Agent ツールの客観レビュー用サブエージェントへ渡す)。
+    if (out.reviewer !== 'codex' && out.reviewer !== 'claude' && out.reviewer !== 'subagent') {
+      out.error = `レビュアーは codex / claude / subagent を指定してください (指定: ${out.reviewer || 'なし'})`;
+    } else if (out.fix && out.reviewer === 'claude') {
+      // --fix は作業ツリーを書き換える。codex は workspace-write、subagent は FIX 指示付きプロンプトを出して
+      // 書込権限付きサブエージェントに直させる、で対応する。claude CLI 経路 (claude -p) のみ自動修正を未配線。
+      out.error = '--fix は codex か subagent のみ対応です (claude CLI 経路の自動修正は未対応)';
     }
   }
   return out;
@@ -280,8 +304,9 @@ function collectReviewDiff(opts, gitRun) {
   return parts.join('\n');
 }
 
-// レビュアー CLI へ渡すプロンプト (観点 + スコープ + モード別指示 + 申し送り + 差分本文)。
-// codex / claude 共通。opts.fix で「修正まで依頼」と「レビューのみ」を切り替える。
+// レビュアーへ渡すプロンプト (観点 + スコープ + モード別指示 + 申し送り + 差分本文)。
+// codex / claude / subagent 共通 (codex/claude は stdin、subagent は stdout へ出す)。
+// opts.fix で「修正まで依頼」と「レビューのみ」を切り替える。
 // checklist は loadChecklist() の戻り値 (未指定/空なら GENERIC_CHECKLIST を使う)。
 // instructions は --instructions の本文 (任意)。観点とは別に「重点指摘」として添える。
 function buildReviewPrompt(diffText, opts, checklist, instructions) {
@@ -319,6 +344,17 @@ function reviewerInvocation(opts) {
         : 'Codex でレビューを実行します...\n',
     };
   }
+  if (opts.reviewer === 'subagent') {
+    // 外部 CLI を起動しない (emit:true)。組み立てたレビュープロンプトを stdout に出すだけで、
+    // 実際のレビューは呼び出し側 (Claude) が Agent ツールで起動する客観サブエージェントが行う。
+    // リモートコントロール環境 (codex/claude CLI を spawn できない) のフォールバック。
+    return {
+      emit: true,
+      notice: opts.fix
+        ? 'リモートコントロール用: レビュー + 修正プロンプトを stdout に出力します (書込権限付きの客観サブエージェントへ渡してください)。\n'
+        : 'リモートコントロール用: レビュープロンプトを stdout に出力します (客観サブエージェントへ渡してください)。\n',
+    };
+  }
   return { cmd: 'claude', args: ['-p'], notice: 'Claude でレビューを実行します...\n' };
 }
 
@@ -353,6 +389,10 @@ function spawnReviewer(cmd, args, stdinText) {
 function runReview(opts, deps = {}) {
   const gitRun = deps.gitRun || defaultGitRunner;
   const spawnFn = deps.spawnFn || spawnReviewer;
+  // 人向け通知は writeErr、機械が拾う本文 (subagent のプロンプト) は writeOut に分離する。
+  // deps.out / deps.err で差し替え可能にし、subagent 経路の stdout 本文をテストから検証する。
+  const writeOut = deps.out || ((s) => process.stdout.write(s));
+  const writeErr = deps.err || ((s) => process.stderr.write(s));
   // 観点は deps.checklist 指定があれば優先、無ければ .cross-review.md / 汎用観点を解決する。
   const checklist = deps.checklist != null ? deps.checklist : loadChecklist(deps);
   // 申し送り (--instructions) は観点とは別系統。deps.instructions 指定があれば優先、
@@ -362,28 +402,37 @@ function runReview(opts, deps = {}) {
     try {
       instructions = loadInstructions(opts.instructionsPath, deps);
     } catch (err) {
-      process.stderr.write(`--instructions のファイルを読めません: ${opts.instructionsPath} (${(err && err.message) || 'read error'})\n`);
+      writeErr(`--instructions のファイルを読めません: ${opts.instructionsPath} (${(err && err.message) || 'read error'})\n`);
       process.exitCode = 1;
       return null;
     }
   }
-  // codex / claude いずれも自前で差分を取り出し、プロンプトへ同梱する (untracked も含める)。
+  // どのレビュアー (codex / claude / subagent) も自前で差分を取り出し、プロンプトへ同梱する (untracked も含める)。
   let diffText;
   try {
     diffText = collectReviewDiff(opts, gitRun).trim();
   } catch (err) {
-    process.stderr.write(`${(err && err.message) || 'git の実行に失敗しました'}\n`);
+    writeErr(`${(err && err.message) || 'git の実行に失敗しました'}\n`);
     process.exitCode = 1;
     return null;
   }
   if (!diffText) {
-    process.stdout.write('レビュー対象の差分がありません。\n');
+    // subagent は stdout を「サブエージェントへ渡すプロンプト」専用にするため、差分なしの通知も
+    // stderr 側へ出す (stdout は空のまま保ち、空通知をプロンプトと誤認させない)。codex/claude は従来どおり stdout。
+    (opts.reviewer === 'subagent' ? writeErr : writeOut)('レビュー対象の差分がありません。\n');
     return null;
   }
   const prompt = buildReviewPrompt(diffText, opts, checklist, instructions);
-  const { cmd, args, notice } = reviewerInvocation(opts);
-  process.stdout.write(notice);
-  return spawnFn(cmd, args, prompt);
+  const inv = reviewerInvocation(opts);
+  if (inv.emit) {
+    // subagent: 外部プロセスを起動せず、組み立てたプロンプト本文だけを stdout に出す。
+    // 通知は stderr に分けて、stdout を「そのまま客観サブエージェントへ渡せるプロンプト」に保つ。
+    writeErr(inv.notice);
+    writeOut(prompt + '\n');
+    return null;
+  }
+  writeOut(inv.notice);
+  return spawnFn(inv.cmd, inv.args, prompt);
 }
 
 function main() {

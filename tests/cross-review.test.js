@@ -49,8 +49,26 @@ describe('cross-review parseArgs', () => {
     });
   });
 
-  it('--fix を claude に付けるとエラー (claude の自動修正は未対応)', () => {
+  it('--fix を claude に付けるとエラー (claude CLI 経路の自動修正は未対応)', () => {
     expect(parseArgs(['claude', '--fix']).error).toMatch(/--fix/);
+  });
+
+  it('subagent を受け付ける (リモートコントロール用のプロンプト出力経路)', () => {
+    expect(parseArgs(['subagent'])).toMatchObject({
+      reviewer: 'subagent',
+      mode: 'base',
+      baseRef: 'main',
+      fix: false,
+      error: null,
+    });
+  });
+
+  it('subagent --fix は許可される (--fix は codex か subagent のみ)', () => {
+    expect(parseArgs(['subagent', '--fix'])).toMatchObject({
+      reviewer: 'subagent',
+      fix: true,
+      error: null,
+    });
   });
 
   it('--base / --base= でベースブランチを上書きする', () => {
@@ -136,6 +154,19 @@ describe('cross-review reviewerInvocation', () => {
     const inv = reviewerInvocation({ reviewer: 'claude', fix: false });
     expect(inv.cmd).toBe('claude');
     expect(inv.args).toEqual(['-p']);
+  });
+
+  it('subagent は外部 CLI を起動せず emit:true を返す (プロンプトを stdout に出すだけ)', () => {
+    const inv = reviewerInvocation({ reviewer: 'subagent', fix: false });
+    expect(inv.emit).toBe(true);
+    expect(inv.cmd).toBeUndefined();
+    expect(inv.notice).toMatch(/サブエージェント/);
+  });
+
+  it('subagent --fix も emit:true (修正プロンプトを出す旨を通知)', () => {
+    const inv = reviewerInvocation({ reviewer: 'subagent', fix: true });
+    expect(inv.emit).toBe(true);
+    expect(inv.notice).toMatch(/修正/);
   });
 });
 
@@ -389,6 +420,38 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     expect(captured.stdin).toContain('DIFF_BODY');
   });
 
+  it('subagent: 外部 CLI を起動せず、レビュープロンプトを stdout に出す (通知は stderr)', () => {
+    let called = false;
+    const spawnFn = () => { called = true; return null; };
+    const gitRun = (args) => (args[0] === 'diff' ? 'SUBAGENT_DIFF\n+x\n' : '');
+    let out = '';
+    let err = '';
+    const ret = runReview(
+      { reviewer: 'subagent', mode: 'base', baseRef: 'main', fix: false },
+      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', out: (s) => { out += s; }, err: (s) => { err += s; } },
+    );
+    expect(called).toBe(false);                  // 外部プロセスは起動しない
+    expect(ret).toBeNull();
+    expect(out).toContain('SUBAGENT_DIFF');      // 差分本文が stdout に乗る
+    expect(out).toContain('CHECKLIST_MARKER');   // 観点も stdout に乗る
+    expect(out).toContain(REVIEW_ONLY_INSTRUCTION);
+    expect(out).not.toContain(FIX_INSTRUCTION);
+    expect(err).toMatch(/サブエージェント/);      // 人向け通知は stderr 側に分離
+  });
+
+  it('subagent --fix: stdout のプロンプトに修正指示を含める', () => {
+    const spawnFn = () => { throw new Error('subagent では spawn してはいけない'); };
+    const gitRun = (args) => (args[0] === 'diff' && args[1] === 'HEAD' ? 'FIX_DIFF\n' : '');
+    let out = '';
+    runReview(
+      { reviewer: 'subagent', mode: 'uncommitted', fix: true },
+      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', out: (s) => { out += s; }, err: () => {} },
+    );
+    expect(out).toContain('FIX_DIFF');
+    expect(out).toContain(FIX_INSTRUCTION);
+    expect(out).not.toContain(REVIEW_ONLY_INSTRUCTION);
+  });
+
   it('差分が空ならレビュアーを起動しない', () => {
     let called = false;
     const spawnFn = () => { called = true; return null; };
@@ -399,5 +462,17 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     );
     expect(called).toBe(false);
     expect(ret).toBeNull();
+  });
+
+  it('subagent で差分が空なら stdout は空のまま、通知は stderr に出す (プロンプト契約を保つ)', () => {
+    let out = '';
+    let err = '';
+    const ret = runReview(
+      { reviewer: 'subagent', mode: 'base', baseRef: 'main', fix: false },
+      { gitRun: () => '', spawnFn: () => { throw new Error('起動しないはず'); }, checklist: 'CL', out: (s) => { out += s; }, err: (s) => { err += s; } },
+    );
+    expect(ret).toBeNull();
+    expect(out).toBe('');                    // stdout は空 (空通知をプロンプトと誤認させない)
+    expect(err).toContain('差分がありません'); // 通知は stderr 側
   });
 });
