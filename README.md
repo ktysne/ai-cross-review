@@ -93,7 +93,7 @@ Claude をクラウドで実行していると、`codex` / `claude` の CLI を�
 | ファイル | 役割 | コピー時の調整 |
 |----------|------|----------------|
 | `tools/cross-review.js` | CLI 本体 | なし（そのまま） |
-| `tests/cross-review.test.js` | 本体のユニットテスト | require のパスだけ、コピー先のテスト配置に合わせる |
+| `tests/cross-review.test.js`（任意） | 本体のユニットテスト（vitest） | **取り込み先が vitest のときだけ同梱**。require のパスをコピー先のテスト配置に合わせる（engine は upstream のテストが担保） |
 | `.cross-review.example.md` | 観点のテンプレート | なし。**コピーして `.cross-review.md` を作り、そちらを編集する** |
 | `docs/cross-review.md` | 相互レビューの手順書（汎用） | なし（そのまま）。ファイルは名前で参照していて、置き場所が変わっても壊れない |
 
@@ -108,12 +108,16 @@ Claude をクラウドで実行していると、`codex` / `claude` の CLI を�
 
 ### 手順
 1. 上の「そのままコピーするファイル」を全部コピー先へコピーする（`tools/*.js` は CommonJS なので、コピー先のルート `package.json` が `"type": "module"` のときは `tools/package.json` に `"type": "commonjs"` を置く）。  
-   `tests/cross-review.test.js` の require パスだけ、コピー先のテスト配置に合わせる。  
+   テスト `tests/cross-review.test.js` は任意で、取り込み先が vitest のときだけ require パスを合わせて同梱する。  
 2. `.cross-review.example.md` を `.cross-review.md` にコピーし、そのプロジェクトで壊れやすい注意点を書く。  
 3. ルート `package.json` の `scripts` に `review:codex` / `review:codex:fix` / `review:claude` を足す。  
 4. `codex` / `claude` の CLI を PATH に通す（CLI を起動できないときは `subagent` モードを使う）。  
 5. 更新するときは、コピーするファイルを上書きでコピーし直すだけ。  
    自分で編集するファイルは触らない。
+
+> **メモ（末尾空白）**: `docs/cross-review.md` などは Markdown のハード改行（行末スペース 2 つ）を使います。
+> `git diff --check` や CI で末尾空白を弾く場合は、コピー先の `.gitattributes` に
+> `*.md whitespace=-blank-at-eol` を足して許容してください（このリポジトリにも同じ設定があります）。
 
 ## 開発
 
