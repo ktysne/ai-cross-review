@@ -1,32 +1,37 @@
 # ai-cross-review
 
-**Claude ↔ Codex を git の差分で交互にレビューさせる、依存ゼロの CLI ブリッジ。**
+**Claude と Codex に、git の差分を使って交互にコードレビューさせる CLI ツールです。**
+追加の依存パッケージは要りません。
 
-「片方の AI で実装 → もう片方の AI でレビュー」という往復を、チャットログを手でコピーせず、git の差分を直接レビュアー CLI（`codex` / `claude`）へ渡して 1 コマンドで回します。  
-レビュー観点はプロジェクトごとに `.cross-review.md` へ書くだけで差し替えられます。
+「片方の AI で実装し、もう片方の AI でレビューする」という往復を回します。
+チャットの中身を手でコピーする必要はありません。
+git の差分をそのままレビュアー CLI（`codex` / `claude`）へ渡し、1 コマンドで実行します。
+レビューの観点は、プロジェクトごとに `.cross-review.md` へ書くだけで差し替えられます。
 
 ## 特徴
 
-- **依存ゼロ**: CLI 本体（`tools/cross-review.js`）は Node 標準 API のみ。`npm install` 不要で動く
-  （テスト・lint だけ devDependencies を使う）。
-- **git 差分が受け渡しメディア**: ブランチ vs ベース、または未コミット差分（未追跡ファイル含む）を渡す。
-- **既定は安全側**: レビューのみは `codex` を read-only で起動しファイルを書き換えさせない。
-  `--fix` のときだけ workspace-write で検出事項を作業ツリーへ直接修正させる。
-- **観点を外部化**: プロジェクト固有のレビュー観点は `.cross-review.md` に分離。エンジンは完全に汎用で、
-  導入時は vendored ファイル一式をコピーし、`.cross-review.md` だけをプロジェクト固有に編集する。
+- **追加インストール不要**: 本体（`tools/cross-review.js`）は Node 標準 API だけで動きます。
+  テストと lint のときだけ devDependencies を使います。
+- **git の差分でやり取り**: ブランチとベースの差分、または未コミットの差分（未追跡ファイルを含む）を渡します。
+- **既定は安全側**: レビューだけのときは `codex` を read-only で起動し、ファイルを書き換えさせません。
+  `--fix` を付けたときだけ workspace-write で起動し、見つかった問題を直接修正させます。
+- **観点を分離**: プロジェクト固有のレビュー観点は `.cross-review.md` に分けてあります。
+  本体は完全に汎用です。
+  導入するときは、決まったファイル一式をコピーし、`.cross-review.md` だけを自分のプロジェクト向けに編集します。
 
 ## 前提
 
-- Node.js >= 20
-- `codex` / `claude` の **スタンドアロン CLI** が PATH にあること（VS Code 拡張やデスクトップアプリとは別物）。  
-  レビューを実際に走らせるのに必要。CLI が無くても引数解析や差分生成は動く。  
-  リモートコントロール環境など外部 CLI を spawn できない場合は `subagent` モード（後述）を使えば外部 CLI 無しでレビュープロンプトを出力できる。
+- Node.js 20 以上。
+- `codex` / `claude` の **スタンドアロン CLI** が PATH にあること（VS Code 拡張やデスクトップアプリとは別物です）。
+  実際にレビューを走らせるのに必要です。
+  CLI が無くても、引数の解析や差分の生成は動きます。
+  クラウド実行などで CLI を起動できないときは、後述の `subagent` モードを使えば CLI 無しでレビュー用プロンプトを出力できます。
 
 ## 使い方
 
 ```bash
 npm run review:codex                      # 現在のブランチ (main との差分) を Codex がレビュー (read-only)
-npm run review:codex:fix                  # 同上 + 検出事項を Codex が作業ツリーへ直接修正 (workspace-write)
+npm run review:codex:fix                  # 同上 + 見つかった問題を Codex が直接修正 (workspace-write)
 npm run review:claude                     # 現在のブランチを Claude がレビュー
 npm run review:codex -- --uncommitted     # 未コミット差分 (tracked + untracked) をレビュー
 npm run review:claude -- --base develop   # 比較先ブランチを変更
@@ -37,79 +42,78 @@ npm run review:codex:fix -- --instructions review-notes.md  # レビュアーの
 
 ```bash
 node tools/cross-review.js codex --base origin/main
-node tools/cross-review.js subagent --uncommitted   # 外部 CLI を起動せずレビュープロンプトを stdout に出力 (リモートコントロール用)
+node tools/cross-review.js subagent --uncommitted   # CLI を起動せずレビュー用プロンプトを stdout に出力 (CLI を使えない環境用)
 node tools/cross-review.js --help
 ```
 
-### リモートコントロール環境（`subagent` モード）
+### CLI を起動できない環境（`subagent` モード）
 
-Claude をリモートコントロール（クラウド実行）で動かすと `codex` / `claude` スタンドアロン CLI を
-spawn できないことがあります。その場合はレビュアーに `subagent` を指定すると、**外部プロセスを
-起動せず**、組み立てたレビュープロンプト（観点 + 差分本文 + モード別指示）を **stdout に出すだけ**に
-なります（通知は stderr に分離）。この出力を Claude が `Agent` ツールの客観レビュー用サブエージェント
-へ渡すことで、Codex の代わりに「Claude の客観的な観点を持つサブエージェント」がレビュアーになります。
-`--uncommitted` / `--base` / `--fix` / `--instructions` は他レビュアーと同じく使えます。詳細は
-[docs/cross-review.md](docs/cross-review.md) を参照してください。
+Claude をクラウドで実行していると、`codex` / `claude` の CLI を起動できないことがあります。
+このときはレビュアーに `subagent` を指定します。
+すると外部プロセスを起動せず、組み立てたレビュー用プロンプト（観点 + 差分 + モード別の指示）を stdout に出力するだけになります（人向けの通知は stderr に分けます）。
+この出力を Claude が `Agent` ツールのサブエージェントへ渡します。
+こうして、Codex の代わりに「Claude の客観的なサブエージェント」がレビュアーになります。
+`--uncommitted` / `--base` / `--fix` / `--instructions` は他のレビュアーと同じように使えます。
+詳しくは [docs/cross-review.md](docs/cross-review.md) を参照してください。
 
 | オプション | 意味 |
 |------------|------|
-| `--fix` | 修正まで依頼（`codex` は `-s workspace-write` で直接編集 / `subagent` は FIX 指示付きでプロンプト出力。`claude` CLI 経路は非対応） |
+| `--fix` | 修正まで依頼する（`codex` は `-s workspace-write` で直接修正 / `subagent` は FIX 指示付きでプロンプト出力。`claude` CLI 経路は非対応） |
 | `--uncommitted` | 未コミットの作業ツリー差分（tracked + untracked）をレビュー |
 | `--base <ref>` | 比較先ブランチを指定（既定: `main`） |
-| `--instructions <path>` | レビュアーからの申し送り・重点指摘ファイルをプロンプトへ添付（観点 `.cross-review.md` は置き換えず追加。`--fix` と併用で指摘を直接修正させる） |
+| `--instructions <path>` | レビュアーへの申し送り・重点指摘ファイルをプロンプトに追加する（観点 `.cross-review.md` は置き換えず追加。`--fix` と併用すると、その指摘を直接修正させる） |
 | `-h`, `--help` | ヘルプを表示 |
 
 ## レビュー観点（`.cross-review.md`）
 
-レビュアーへ渡す「観点プロンプト」は、リポジトリ直下の `.cross-review.md` を単一ソースとして読み込みます。  
-解決順は次のとおりで、どれも無くても汎用観点で動きます（その際は起動時に stderr へ警告）。
+レビュアーへ渡す「観点プロンプト」は、リポジトリ直下の `.cross-review.md` から読み込みます。
+次の順で探し、どれも無ければ組み込みの汎用観点で動きます（そのときは起動時に stderr へ警告します）。
 
 1. 環境変数 `CROSS_REVIEW_CHECKLIST`（ファイルパス）
 2. `<cwd>/.cross-review.md`（`npm run review:*` の通常経路）
-3. `<スクリプト>/../.cross-review.md`（`tools/cross-review.js` の 1 つ上 = リポジトリ直下。  
-   cwd がリポ直下でなくても絶対パス等で起動すれば拾える）
+3. `<スクリプト>/../.cross-review.md`（`tools/cross-review.js` の 1 つ上 = リポジトリ直下。cwd がリポ直下でなくても、絶対パス等で起動すれば見つかります）
 4. 組み込みの汎用観点（`GENERIC_CHECKLIST`）
 
-`CROSS_REVIEW_CHECKLIST` を明示指定したのに読めない（存在しない / 空 / 読取不可）場合は、
-黙ってフォールバックせず警告を出します（誤ったパスや空ファイルで意図しない観点になる事故を検知するため）。
+`CROSS_REVIEW_CHECKLIST` を指定したのに読めない（存在しない / 空 / 読めない）ときは、黙って次へ進まず警告を出します。
+誤ったパスや空ファイルで観点が変わってしまう事故を防ぐためです。
 
 ## 相互レビューの回し方
 
-実装担当とレビュー担当を入れ替えながら **実装 → レビュー → 指摘対応 → 妥当性確認** の 4 ステップで回します。
-無限ループを防ぐサーキットブレーカー（最大 3 往復）など、運用フローの詳細は
-[docs/cross-review.md](docs/cross-review.md) を参照してください。
+実装担当とレビュー担当を入れ替えながら、**実装 → レビュー → 指摘対応 → 妥当性確認** の 4 ステップで回します。
+無限ループを防ぐ仕組み（レビューと修正の往復は最大 3 回まで）など、詳しい手順は [docs/cross-review.md](docs/cross-review.md) を参照してください。
 
-## 他プロジェクトへの導入（vendoring）
+## 他プロジェクトへの導入
 
-このリポジトリは「**汎用部分は取り込み先へ verbatim コピー / プロジェクト固有部分は取り込み先が所有・編集**」
-という前提で設計している。取り込み先では下表の **取り込み（vendored）** をそのままコピーし、
-**取り込み側が所有** する側だけを編集する。更新時は vendored を再コピー（上書き）するだけでよく、複雑なマージを避けられる。
+このツールは「**汎用の部分はそのままコピーして使い、プロジェクト固有の部分だけを編集する**」という考え方で作っています。
+導入先では、下の表の「**そのままコピーするファイル**」をコピーし、「**自分で編集するファイル**」だけを書き換えます。
+更新するときは、コピーするファイルを上書きでコピーし直すだけです。
+内容を突き合わせる複雑な作業は要りません。
 
-### 取り込み（vendored・そのままコピー / 更新時は上書き・取り込み先で編集しない）
-| ファイル | 役割 | 取り込み時の調整 |
-|----------|------|------------------|
-| `tools/cross-review.js` | CLI 本体（engine） | なし（verbatim） |
-| `tests/cross-review.test.js` | engine のユニットテスト | require パスのみ取り込み先のテスト配置に合わせる |
-| `.cross-review.example.md` | 観点テンプレート | なし。**コピーして `.cross-review.md` を作り、そちらを編集** |
-| `docs/cross-review.md` | 相互レビュー フロー doc（汎用） | なし（verbatim）。リポ内ファイルはインラインコード・節参照は名前で書いてあり階層に非依存 |
+### そのままコピーするファイル（更新時は上書き。コピー先では編集しない）
+| ファイル | 役割 | コピー時の調整 |
+|----------|------|----------------|
+| `tools/cross-review.js` | CLI 本体 | なし（そのまま） |
+| `tests/cross-review.test.js` | 本体のユニットテスト | require のパスだけ、コピー先のテスト配置に合わせる |
+| `.cross-review.example.md` | 観点のテンプレート | なし。**コピーして `.cross-review.md` を作り、そちらを編集する** |
+| `docs/cross-review.md` | 相互レビューの手順書（汎用） | なし（そのまま）。ファイルは名前で参照していて、置き場所が変わっても壊れない |
 
-### 取り込み側が所有・編集（同期で上書きしない）
+### 自分で編集するファイル（コピーで上書きしない）
 | ファイル | 役割 |
 |----------|------|
-| `.cross-review.md` | そのプロジェクトのレビュー観点（`.cross-review.example.md` を雛形に作成） |
-| `CLAUDE.md` / `AGENTS.md`（あれば） | そのリポの運用要約。フロー詳細は取り込んだ `docs/cross-review.md` へリンク |
-| 任意のアプリ固有 doc | フロー doc に書かない、そのアプリ固有の運用メモ（検証コマンド・CI・例 など） |
-| `tools/package.json` | `tools/*.js` を CommonJS にする（`"type": "commonjs"`）。そのリポのツール依存はここに足す |
-| 取り込み自動化ツール（任意） | vendored の再コピー・require パス調整を自動化する sync スクリプト等。取り込み側が用意・所有する（このリポには持たない。例: 取り込み側の `tools/sync-*.js`） |
+| `.cross-review.md` | そのプロジェクトのレビュー観点（`.cross-review.example.md` を雛形に作る） |
+| `CLAUDE.md` / `AGENTS.md`（あれば） | そのリポジトリの運用メモ。手順の詳細はコピーした `docs/cross-review.md` へリンクする |
+| そのプロジェクト用の doc（任意） | 手順書に書かない、プロジェクト固有のメモ（検証コマンド・CI・例 など） |
+| `tools/package.json` | `tools/*.js` を CommonJS にする設定（`"type": "commonjs"`）。そのリポジトリのツール依存もここに足す |
+| コピーを自動化するスクリプト（任意） | コピーし直しや require パス調整を自動化する同期スクリプトなど。コピー先が用意して持つ（このリポジトリには入れない。例: コピー先の `tools/sync-*.js`） |
 
 ### 手順
-1. 上の vendored をすべて取り込み先へコピーする（`tools/*.js` は CommonJS なので、取り込み先のルート
-   `package.json` が `"type": "module"` の場合は `tools/package.json` に `"type": "commonjs"` を置く）。
-   `tests/cross-review.test.js` の require パスだけ取り込み先のテスト配置に合わせる。
-2. `.cross-review.example.md` を `.cross-review.md` にコピーし、そのプロジェクトで壊れやすい不変条件を書く。
-3. ルート `package.json` の `scripts` に `review:codex` / `review:codex:fix` / `review:claude` を追加する。
-4. `codex` / `claude` のスタンドアロン CLI を PATH に通す（リモート等で spawn できない場合は `subagent` モード）。
-5. 更新時は vendored を再コピー（上書き）するだけ。取り込み側が所有するファイルは触らない。
+1. 上の「そのままコピーするファイル」を全部コピー先へコピーする（`tools/*.js` は CommonJS なので、コピー先のルート `package.json` が `"type": "module"` のときは `tools/package.json` に `"type": "commonjs"` を置く）。
+   `tests/cross-review.test.js` の require パスだけ、コピー先のテスト配置に合わせる。
+2. `.cross-review.example.md` を `.cross-review.md` にコピーし、そのプロジェクトで壊れやすい注意点を書く。
+3. ルート `package.json` の `scripts` に `review:codex` / `review:codex:fix` / `review:claude` を足す。
+4. `codex` / `claude` の CLI を PATH に通す（CLI を起動できないときは `subagent` モードを使う）。
+5. 更新するときは、コピーするファイルを上書きでコピーし直すだけ。
+   自分で編集するファイルは触らない。
 
 ## 開発
 
