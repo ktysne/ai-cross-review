@@ -14,9 +14,18 @@
   Codex の検出内容・修正差分（`git diff`）・要約を Claude がレビューし、必要なら再修正。
 - **C. 何もしない** → レビューを回さず終了。
 
-**リモートコントロール環境（Codex CLI を spawn できない）では、レビュアーを「Codex」から「Claude の客観的な観点を持つサブエージェント」に切り替える**（A / B のレビュー先だけ差し替え、3 択の意味は不変。C は同じ）。判定は `codex` が PATH で解決できない（`Get-Command codex` 等が失敗）か、リモート実行と分かっているとき（`npm run review:codex` が CLI 不在で失敗したときも切替）。`node tools/cross-review.js subagent`（`--uncommitted` / `--fix` 可）で**外部 CLI を起動せず**レビュープロンプトを stdout に出し、それを `Agent` ツールの客観レビュー用サブエージェント（実装意図に引きずられない第三者として枠付け。`--fix` 相当は書込権限付き）へ渡してレビューさせる。Codex CLI が使える環境では従来どおり Codex を優先。詳細は [docs/cross-review.md](docs/cross-review.md)。
+### 実装完了後の起点（Codex 主導）
+**Codex が改修（実装・修正）を一区切りしたら、完了扱いにする前に A / B / C を確認する**。Codex app の Plan mode など構造化された選択 UI を表示できる状態ならそれを使う。Codex が自発的に Plan mode へ切り替えることはできないため、通常チャット / CLI / 非対話実行では本文に A / B / C を明記してユーザの返信を待つ。
 
-**省略してよい軽微な例外**（省略時は一言添える）: 誤字・コメントのみ・ドキュメント文言調整 / フォーマット・lint 整形のみ / 既にレビュー済みパターンの 1 箇所踏襲（1〜数行）/ 直前のレビュー済み状態への単純 revert。規模・影響で迷ったら省略しない。
+**ブランチ・PR 運用（必須・レビューを回すなら先にここを満たす）**: Claude 主導と同じく feature ブランチで行い、A / B でレビューを回す前に **PR を作成**する。以降は PR を共有ログにし、指摘・対応・妥当性確認をその都度 `gh pr comment` で記録する。
+- **A. Claude にレビューを依頼** → `npm run review:claude`（Claude はレビューのみ）。Codex が結果を読み修正を適用（ユーザ判断が要る内容は確認してから）。  
+完了後に再度 `npm run review:claude` で妥当性確認。
+- **B. Claude の指摘を Codex が修正まで反映** → まず `npm run review:claude` でレビューし、指摘を `review-notes.md` 等に手作業で書き出してから `node tools/cross-review.js codex --fix --uncommitted --instructions <path>`。Claude が直接修正する選択肢ではない。B は、確定した指摘をクリーンな文脈で機械的に適用したい場合や、対話駆動で Codex に自動修正させたい場合に選ぶ（ループ内の Codex が直接編集できるなら A で足りる）。
+- **C. 何もしない** → レビューを回さず終了。
+
+**リモートコントロール環境（対象レビュアー CLI を spawn できない / ネットワーク・API 接続できない）では、対象レビュアー CLI を客観レビュー用サブエージェントに切り替える**（A / B の意味は不変。C は同じ）。判定は `codex` / `claude` が PATH で解決できない（`Get-Command <cli>` 等が失敗）か、リモート実行と分かっているとき（`npm run review:codex*` / `npm run review:claude` が CLI 不在・接続不可で失敗したときも切替）。`node tools/cross-review.js subagent`（`--uncommitted` / `--fix` 可）で**外部 CLI を起動せず**レビュープロンプトを stdout に出し、それを `Agent` ツール等の客観レビュー用サブエージェント（実装意図に引きずられない第三者として枠付け。`--fix` 相当は書込権限付き。ただし `subagent --fix` は Claude 起点 B（レビュアーが修正）の代替のみで、Codex 起点 A/B は `subagent` レビューのみ・修正は Codex）へ渡してレビューさせる。対象レビュアー CLI が使える環境では従来どおり CLI を優先。Codex 起点でこの代替を使った場合は、PR コメントに「Claude を直接実行できないため（CLI 不在 / 接続不可）subagent 代替で確認した」ことを残す。詳細は [docs/cross-review.md](docs/cross-review.md)。
+
+**省略してよい軽微な例外**（Claude / Codex どちらの起点にも適用。省略時は一言添える）: 誤字・コメントのみ・ドキュメント文言調整 / フォーマット・lint 整形のみ / 既にレビュー済みパターンの 1 箇所踏襲（1〜数行）/ 直前のレビュー済み状態への単純 revert。規模・影響で迷ったら省略しない。
 
 **Claude の指摘を Codex に渡して直させる**場合は、指摘をファイルに書いて `node tools/cross-review.js codex --fix --uncommitted --instructions <path>`。`--instructions` は観点 `.cross-review.md` を置き換えず重点指摘として追加で添える（この用途で `CROSS_REVIEW_CHECKLIST` を流用しない）。詳細は [docs/cross-review.md](docs/cross-review.md)。
 
@@ -26,7 +35,7 @@
 `AskUserQuestion` で提示してユーザの判断を仰ぐ。同じ指摘が往復をまたいで揺り戻すと判断したら 3 往復を待たず早期中断してよい。往復回数は会話内で数える（CLI は往復状態を持たない）。
 
 ### 実行上の注意
-- `npm run review:codex*` は codex がネットワークを使うため **Bash をサンドボックス無効で実行**する。
+- `npm run review:codex*` / `npm run review:claude` はレビュアー CLI がネットワーク/API 接続を使うため、必要に応じて **Bash をサンドボックス無効・ネットワーク許可で実行**する。
 - 既定のレビュー対象は **main とのコミット済み差分**（`--base <ref>` で変更）。未コミットの実装を見るなら `-- --uncommitted`（未追跡込み）。`--fix` は codex / subagent 対応（claude CLI 経路は未対応）。`--instructions <path>` でレビュアーの指摘ファイルを観点に加えて添付（置き換えない）。
 - レビュー観点は `.cross-review.md` を自動添付（解決順は env `CROSS_REVIEW_CHECKLIST` → `<cwd>/.cross-review.md`
   → `<スクリプト>/../.cross-review.md` → 汎用フォールバック）。
