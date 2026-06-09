@@ -16,6 +16,7 @@ const {
   runReview,
   loadChecklist,
   loadInstructions,
+  resolveReviewerCommandForSpawn,
   CHECKLIST_FILENAME,
   GENERIC_CHECKLIST,
   REVIEW_ONLY_INSTRUCTION,
@@ -167,6 +168,68 @@ describe('cross-review reviewerInvocation', () => {
     const inv = reviewerInvocation({ reviewer: 'subagent', fix: true });
     expect(inv.emit).toBe(true);
     expect(inv.notice).toMatch(/修正/);
+  });
+});
+
+describe('cross-review resolveReviewerCommandForSpawn', () => {
+  it('Windows では where.exe 候補から .exe を優先し shell:false にする', () => {
+    const resolved = resolveReviewerCommandForSpawn('claude', {
+      platform: 'win32',
+      lookup: () => [
+        'C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd',
+        'C:\\Users\\me\\.local\\bin\\claude.exe',
+      ],
+    });
+
+    expect(resolved).toEqual({
+      cmd: 'C:\\Users\\me\\.local\\bin\\claude.exe',
+      shell: false,
+    });
+  });
+
+  it('Windows で .exe が無ければ .cmd shim を shell:true で使う', () => {
+    const resolved = resolveReviewerCommandForSpawn('codex', {
+      platform: 'win32',
+      lookup: () => ['C:\\Users\\me\\AppData\\Roaming\\npm\\codex.cmd'],
+    });
+
+    expect(resolved).toEqual({
+      cmd: 'C:\\Users\\me\\AppData\\Roaming\\npm\\codex.cmd',
+      shell: true,
+    });
+  });
+
+  it('Windows で lookup 候補が空ならコマンド名を shell:true で使う', () => {
+    const resolved = resolveReviewerCommandForSpawn('claude', {
+      platform: 'win32',
+      lookup: () => [],
+    });
+
+    expect(resolved).toEqual({
+      cmd: 'claude',
+      shell: true,
+    });
+  });
+
+  it('Windows で .ps1 しか見つからない場合は shell:true で候補を使う', () => {
+    const resolved = resolveReviewerCommandForSpawn('codex', {
+      platform: 'win32',
+      lookup: () => ['C:\\Users\\me\\AppData\\Roaming\\npm\\codex.ps1'],
+    });
+
+    expect(resolved).toEqual({
+      cmd: 'C:\\Users\\me\\AppData\\Roaming\\npm\\codex.ps1',
+      shell: true,
+    });
+  });
+
+  it('非 Windows では PATH 解決をせず shell:false のまま使う', () => {
+    const resolved = resolveReviewerCommandForSpawn('claude', {
+      platform: 'linux',
+      lookup: () => { throw new Error('呼ばれないはず'); },
+    });
+
+    expect(resolved).toEqual({ cmd: 'claude', shell: false });
   });
 });
 
