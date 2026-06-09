@@ -374,6 +374,33 @@ describe('sync runSync', () => {
     expect(process.exitCode).toBe(0);
   });
 
+  it('sync: 上流コミットが進めばファイル一致でもマニフェストの記録だけ更新する', () => {
+    // 取り込み先ファイルは上流と一致しているが、上流コミットが古い記録から進んだ状態。
+    const synced = { ...manifestObj, lastSyncedCommit: 'oldcommit', lastSyncedRef: 'main' };
+    const fsx = makeFs({
+      '/proj/tools/cross-review.sync.json': JSON.stringify(synced, null, 2),
+      '/up/tools/cross-review.js': 'E',
+      '/up/docs/cross-review.md': 'D',
+      '/proj/tools/cross-review.js': 'E',
+      '/proj/docs/cross-review.md': 'D',
+    });
+    const res = runSync({ mode: 'sync', dryRun: false }, {
+      scriptDir: '/proj/tools',
+      readFile: fsx.readFile,
+      writeFile: fsx.writeFile,
+      exists: fsx.exists,
+      out: () => {},
+      err: () => {},
+      prepareUpstream: () => ({ dir: '/up', commit: 'newcommit', cleanup: () => {} }),
+    });
+    expect(res.wrote).toEqual([]); // ファイルは一致なので書かない
+    // 書き込みはマニフェストの記録更新のみ
+    expect(fsx.writes.map((w) => w.path)).toEqual([path.resolve('/proj/tools/cross-review.sync.json')]);
+    const written = JSON.parse(fsx.store.get('/proj/tools/cross-review.sync.json'));
+    expect(written.lastSyncedCommit).toBe('newcommit');
+    expect(process.exitCode).toBe(0);
+  });
+
   it('sync --dry-run: 書き込まない', () => {
     const h = baseDeps({
       '/up/tools/cross-review.js': 'NEW',
