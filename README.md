@@ -24,6 +24,7 @@ git の差分をそのままレビュアー CLI（`codex` / `claude`）へ渡し
 - Node.js 20 以上。  
 - `codex` / `claude` の **スタンドアロン CLI** が PATH にあること（VS Code 拡張やデスクトップアプリとは別物です）。  
   実際にレビューを走らせるのに必要です。  
+  `review:codex*` / `review:claude` はレビュアー CLI のネットワーク/API 接続も必要です。  
   CLI が無くても、引数の解析や差分の生成は動きます。  
   クラウド実行などで CLI を起動できないときは、後述の `subagent` モードを使えば CLI 無しでレビュー用プロンプトを出力できます。
 
@@ -46,13 +47,27 @@ node tools/cross-review.js subagent --uncommitted   # CLI を起動せずレビ�
 node tools/cross-review.js --help
 ```
 
+### Codex 起点で Claude レビューから回す例
+
+Codex が実装し、Claude レビューから往復を始める場合の最短例です。
+
+```bash
+npm run review:claude -- --uncommitted    # Claude がレビュー（結果を確認）
+# ↑の指摘を review-notes.md に書き出す（手作業。リポ外か .gitignore 済みのパスに置く）
+node tools/cross-review.js codex --fix --uncommitted --instructions review-notes.md  # Codex が修正
+npm run review:claude -- --uncommitted    # Claude が妥当性確認
+```
+
+`review-notes.md` は自動生成されません。Claude のレビュー結果から今回直す指摘だけを確認して書き出してください。  
+この手順を飛ばすと、存在しない / 古い指摘ファイルを `--instructions` に渡して `--fix` が走るおそれがあります。
+
 ### CLI を起動できない環境（`subagent` モード）
 
-Claude をクラウドで実行していると、`codex` / `claude` の CLI を起動できないことがあります。  
-このときはレビュアーに `subagent` を指定します。  
+クラウド実行やリモートコントロール環境では、`codex` / `claude` の CLI を起動できないことがあります。  
+CLI は起動できても、ネットワーク/API 接続が許可されずレビュー結果が返らないこともあります。  
+このときは対象レビュアー CLI の代わりに `subagent` を指定します。  
 すると外部プロセスを起動せず、組み立てたレビュー用プロンプト（観点 + 差分 + モード別の指示）を stdout に出力するだけになります（人向けの通知は stderr に分けます）。  
-この出力を Claude が `Agent` ツールのサブエージェントへ渡します。  
-こうして、Codex の代わりに「Claude の客観的なサブエージェント」がレビュアーになります。  
+この出力を呼び出し側が利用できる客観レビュー用エージェントへ渡します。  
 `--uncommitted` / `--base` / `--fix` / `--instructions` は他のレビュアーと同じように使えます。  
 詳しくは [docs/cross-review.md](docs/cross-review.md) を参照してください。
 
