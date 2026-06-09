@@ -221,7 +221,8 @@ function defaultPrepareUpstream(repo, ref, deps = {}) {
     const commit = gitRun(['-C', dir, 'rev-parse', 'HEAD']).trim();
     return { dir, commit, cleanup: () => rm(dir) };
   } catch (err) {
-    rm(dir);
+    // 後始末の失敗で本来の fetch 失敗理由を握りつぶさないよう、rm の例外は無視して元の err を投げる。
+    try { rm(dir); } catch { /* 一時ディレクトリ削除の失敗は無視 */ }
     throw err;
   }
 }
@@ -310,6 +311,8 @@ function runSync(opts, deps = {}) {
       writeOut(`  [${STATUS_LABEL[p.status]}] ${p.to}\n`);
     }
 
+    // --check は --dry-run より優先する (ここで先に return する)。両方指定すると検査として振る舞い、
+    // ドリフトがあれば exit 1 になる。dry-run は同期モードでの「書き込まないプレビュー」専用。
     if (opts.mode === 'check') {
       // 検査のみ: 書き込まず、ドリフトがあれば exit 1。
       if (drift) {
@@ -331,11 +334,14 @@ function runSync(opts, deps = {}) {
       writeFile(p.destAbs, p.expected);
       wrote.push(p.to);
     }
-    // 取り込み元コミットを記録し、どの版から取り込んだかを履歴に残す。変更が無くても更新する
-    // (検査時の基準が分かるように)。マニフェスト自体の書き込みは取り込みファイルと別管理。
-    manifest.lastSyncedCommit = upstream.commit;
-    manifest.lastSyncedRef = ref;
-    writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    // 取り込み元コミットを記録し、どの版から取り込んだかを履歴に残す。記録値 (commit / ref) が
+    // 変わるときだけ書き戻す。同一コミットの再同期では、ユーザが手で整形したマニフェストを毎回
+    // 上書きしない (不要な差分・整形崩れを防ぐ)。上流が進めば取り込みファイルが一致でも記録は更新する。
+    if (manifest.lastSyncedCommit !== upstream.commit || manifest.lastSyncedRef !== ref) {
+      manifest.lastSyncedCommit = upstream.commit;
+      manifest.lastSyncedRef = ref;
+      writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    }
 
     writeOut(wrote.length ? `同期しました (${wrote.length} 件を更新)。\n` : '同期しました (変更なし)。\n');
     return { ref, commit: upstream.commit, results, drift, wrote };

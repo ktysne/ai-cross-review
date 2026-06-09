@@ -224,6 +224,12 @@ describe('sync computeSyncPlan', () => {
     const fsx = makeFs({ '/up/a': 'x' });
     expect(() => computeSyncPlan(bad, '/up', '/proj', fsx)).toThrow(/外/);
   });
+
+  it('from がルート外を指すならエラー (パストラバーサル防止)', () => {
+    const bad = { files: [{ from: '../escape', to: 'a' }] };
+    const fsx = makeFs({});
+    expect(() => computeSyncPlan(bad, '/up', '/proj', fsx)).toThrow(/外/);
+  });
 });
 
 describe('sync loadManifest', () => {
@@ -313,6 +319,19 @@ describe('sync runSync', () => {
     expect(h.fsx.writes).toEqual([]);
   });
 
+  it('--check は --dry-run より優先 (検査として振る舞い、ドリフトで exit 1・書き込まない)', () => {
+    const h = baseDeps({
+      '/up/tools/cross-review.js': 'NEW',
+      '/up/docs/cross-review.md': 'D',
+      '/proj/tools/cross-review.js': 'OLD',
+      '/proj/docs/cross-review.md': 'D',
+    });
+    const res = runSync({ mode: 'check', dryRun: true }, h.deps);
+    expect(res.drift).toBe(true);
+    expect(process.exitCode).toBe(1);
+    expect(h.fsx.writes).toEqual([]);
+  });
+
   it('sync: 差分のあるファイルを書き、lastSyncedCommit を記録する', () => {
     const h = baseDeps({
       '/up/tools/cross-review.js': 'NEW',
@@ -329,6 +348,29 @@ describe('sync runSync', () => {
     const written = JSON.parse(h.fsx.store.get('/proj/tools/cross-review.sync.json'));
     expect(written.lastSyncedCommit).toBe('abc123def456');
     expect(written.lastSyncedRef).toBe('main');
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('sync: 同一コミットで一致なら何も書き込まない (マニフェストの整形崩れを防ぐ)', () => {
+    // 既に同じコミットまで同期済み・取り込み先も一致している状態。
+    const synced = { ...manifestObj, lastSyncedCommit: 'abc123def456', lastSyncedRef: 'main' };
+    const fsx = makeFs({
+      '/proj/tools/cross-review.sync.json': JSON.stringify(synced, null, 2),
+      '/up/tools/cross-review.js': 'E',
+      '/up/docs/cross-review.md': 'D',
+      '/proj/tools/cross-review.js': 'E',
+      '/proj/docs/cross-review.md': 'D',
+    });
+    runSync({ mode: 'sync', dryRun: false }, {
+      scriptDir: '/proj/tools',
+      readFile: fsx.readFile,
+      writeFile: fsx.writeFile,
+      exists: fsx.exists,
+      out: () => {},
+      err: () => {},
+      prepareUpstream: () => ({ dir: '/up', commit: 'abc123def456', cleanup: () => {} }),
+    });
+    expect(fsx.writes).toEqual([]); // ファイルもマニフェストも書き込まない
     expect(process.exitCode).toBe(0);
   });
 

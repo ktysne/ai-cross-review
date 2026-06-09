@@ -275,11 +275,11 @@ node tools/cross-review.js subagent      # CLI を起動せずレビュー用プ
 依存の追加はありません（Node 標準 API のみ・CommonJS）。git だけで取り込み元を取得します。
 
 - **取り込み元の取得**: `upstream.repo` の `upstream.ref`（ブランチ / タグ / コミット）を一時ディレクトリへ **shallow fetch**（`git init` → `git fetch --depth 1 origin <ref>` → `checkout FETCH_HEAD`）し、そこからファイルをコピーします。SHA 直接指定も拾えるよう `clone --branch` ではなく `fetch <ref>` を使います。一時ディレクトリは実行後に削除します。
-- **取り込むファイルの対応付け**: `files[]` の `from`（上流相対）→ `to`（取り込み先相対）で対応付けます。取り込み先の配置が上流と違っても対応できます（例: テストを `tests/tools/` 配下に置く）。
+- **取り込むファイルの対応付け**: `files[]` の `from`（上流相対）→ `to`（取り込み先相対）で対応付けます。取り込み先の配置が上流と違っても対応できます（例: テストを `tests/tools/` 配下に置く）。**ファイル単位のみ**で、`from` にディレクトリを指定した一括コピーは非対応です。
 - **require パス等の機械置換**: `files[].replace`（`{ from, to }` の配列）で**文字列リテラルの全置換**を行います（正規表現ではない）。コピーしたテストの require パスを取り込み先の配置へ合わせる用途です。上流側は書き換えません。
-- **取り込み元の記録**: 取り込んだ実コミットを `lastSyncedCommit`（と `lastSyncedRef`）へ書き戻します。どの版から取り込んだかが履歴に残り、検査の基準にもなります。
+- **取り込み元の記録**: 取り込んだ実コミットを `lastSyncedCommit`（と `lastSyncedRef`）へ書き戻します（記録値が変わるときだけ。同一コミットの再同期では書き換えません）。どの版から取り込んだかが履歴に残り、検査の基準にもなります。
 - **モード**:
-  - 既定（同期）: 差分のあるファイルだけ上書きし、マニフェストの `lastSyncedCommit` を更新する。
+  - 既定（同期）: 差分のあるファイルだけ上書きし、取り込み元コミットが変わったときだけマニフェストの `lastSyncedCommit` を更新する。
   - `--check`: 書き込まず、上流（ref）との差分（ドリフト）だけを報告する。差分があれば **exit 1**（CI のドリフト検知向け）。
   - `--dry-run`: 書き込まず、同期で何が変わるかだけ表示する。
 - **そのほかのオプション**: `--ref <ref>`（マニフェストの ref を上書き）/ `--manifest <path>`（マニフェストの場所。既定はスクリプト隣の `cross-review.sync.json`）/ `--root <path>`（取り込み先ルート。既定は `tools/` の 1 つ上 = プロジェクトルート。cwd に依存せず解決）。
@@ -305,8 +305,8 @@ node tools/cross-review.js subagent      # CLI を起動せずレビュー用プ
 }
 ```
 
+上の `files` は代表例です。配布物一式の雛形は `tools/cross-review.sync.example.json` にあり、こちらが正本です。  
 このマニフェスト自体は**取り込み先で編集するファイル**です（上書きコピーの対象に含めない）。  
-雛形は `tools/cross-review.sync.example.json` にあります。  
 `.cross-review.md`（観点）や `CLAUDE.md` / `AGENTS.md` などプロジェクト固有のファイルは `files` に入れません（上書きで消えます）。
 
 ```bash
