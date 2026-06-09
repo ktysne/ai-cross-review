@@ -25,6 +25,7 @@ git の差分をそのままレビュアー CLI（`codex` / `claude`）へ渡し
 - `codex` / `claude` の **スタンドアロン CLI** が PATH にあること（VS Code 拡張やデスクトップアプリとは別物です）。  
   実際にレビューを走らせるのに必要です。  
   `review:codex*` / `review:claude` はレビュアー CLI のネットワーク/API 接続も必要です。  
+  CLI が見えていても API 接続だけ失敗することがあります。`claude -p "Reply with OK only."` のような最小コマンドが通常サンドボックスで無応答 / `ConnectionRefused` になり、ネットワーク許可・サンドボックス外で成功するなら、原因は CLI ではなく実行環境のネットワーク制限です。  
   CLI が無くても、引数の解析や差分の生成は動きます。  
   クラウド実行などで CLI を起動できないときは、後述の `subagent` モードを使えば CLI 無しでレビュー用プロンプトを出力できます。
 
@@ -66,6 +67,7 @@ npm run review:claude -- --uncommitted    # Claude が妥当性確認
 
 クラウド実行やリモートコントロール環境では、`codex` / `claude` の CLI を起動できないことがあります。  
 CLI は起動できても、ネットワーク/API 接続が許可されずレビュー結果が返らないこともあります。  
+切り分けるときは、まず `Get-Command claude` / `claude --version`（または `codex --version`）で CLI 可視性を確認し、次に `claude -p "Reply with OK only."` のような最小 API 呼び出しを通常環境とネットワーク許可環境で比較します。  
 このときは対象レビュアー CLI の代わりに `subagent` を指定します。  
 すると外部プロセスを起動せず、組み立てたレビュー用プロンプト（観点 + 差分 + モード別の指示）を stdout に出力するだけになります（人向けの通知は stderr に分けます）。  
 この出力を呼び出し側が利用できる客観レビュー用エージェントへ渡します。  
