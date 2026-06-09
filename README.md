@@ -53,12 +53,13 @@ Codex が実装し、Claude レビューから往復を始める場合の最短�
 
 ```bash
 npm run review:claude -- --uncommitted    # Claude がレビュー（結果を確認）
-# ↑の指摘を review-notes.md に書き出す（手作業。リポ外か .gitignore 済みのパスに置く）
-node tools/cross-review.js codex --fix --uncommitted --instructions review-notes.md  # Codex が修正
+# ↑の指摘を ../review-notes.md に書き出す（手作業。リポ外に置き、最後の --uncommitted 差分へ混ぜない）
+node tools/cross-review.js codex --fix --uncommitted --instructions ../review-notes.md  # Codex が修正
 npm run review:claude -- --uncommitted    # Claude が妥当性確認
 ```
 
-`review-notes.md` は自動生成されません。Claude のレビュー結果から今回直す指摘だけを確認して書き出してください。  
+`../review-notes.md` は自動生成されません。Claude のレビュー結果から今回直す指摘だけを確認して書き出してください。  
+リポジトリ外（例: 親ディレクトリ）に置くのは、最後の妥当性確認 `npm run review:claude -- --uncommitted` で、このファイル自体が未追跡差分としてレビューに混ざるのを防ぐためです（`--instructions` 指定時は対象から自動除外されますが、妥当性確認は `--instructions` を付けないため除外されません）。  
 この手順を飛ばすと、存在しない / 古い指摘ファイルを `--instructions` に渡して `--fix` が走るおそれがあります。
 
 ### CLI を起動できない環境（`subagent` モード）
