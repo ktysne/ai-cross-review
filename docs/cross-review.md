@@ -149,12 +149,12 @@ B は、確定した指摘をクリーンな文脈で機械的に適用したい
    ```bash
    node tools/cross-review.js subagent                 # main との差分 (A 相当・レビューのみ)
    node tools/cross-review.js subagent --uncommitted   # 未コミット差分 (tracked + untracked)
-   node tools/cross-review.js subagent --fix           # 修正指示付きプロンプト (B 相当)
+   node tools/cross-review.js subagent --fix           # 修正指示付きプロンプト (Claude 起点 B 相当。Codex 起点では使わない)
    ```
 
 2. その stdout を **Agent ツールで起動する客観レビュー用サブエージェント**への指示として渡す。  
    サブエージェントには「実装者から独立した第三者レビュアーとして、実装の意図に引きずられず差分そのものを批判的に確かめる」よう役割を与える。  
-   レビューだけ（A 相当）なら読み取り系（`Explore` など）で十分、`--fix`（B 相当）で修正まで任せるなら**書き込み権限のあるサブエージェント**を使う。  
+   レビューだけ（A 相当）なら読み取り系（`Explore` など）で十分。`--fix`（Claude 起点 B 相当）で修正まで任せるなら**書き込み権限のあるサブエージェント**を使う（Codex 起点では `subagent` はレビューのみで、修正は Codex が行う。後述「起点 3 択（A / B / C）との対応」を参照）。  
 3. サブエージェントのレビュー結果（または修正差分）を呼び出し側が読み、A / B と同じく先（修正の適用・妥当性確認）へ進める。  
    妥当性確認も同じく `subagent` のプロンプトとサブエージェントで回す。  
    往復は最大 3 回までの数え方も変わらない。
