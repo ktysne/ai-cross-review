@@ -260,13 +260,44 @@ node tools/cross-review.js subagent      # CLI を起動せずレビュー用プ
 - **専用サブコマンド `codex exec review` は使いません**。  
   codex v0.137.0 で `--uncommitted` / `--base` が `[PROMPT]` と併用できなくなり、観点チェックリストを同時に渡せなくなったため、汎用の `exec` と差分の埋め込みに統一しました。  
 - 差分の対象範囲:
-  - 既定: `git diff <base>...HEAD`（ブランチ vs base、既定の base は `main`）
+  - 既定: `git diff <base>...HEAD`（ブランチ vs base）。**既定の base は `origin/main` を優先解決**します（後述「既定 base の解決と差分サイズのガード」）。
   - `--uncommitted`: tracked（`git diff HEAD`）＋ untracked
     （`git ls-files --others --exclude-standard -z` の各ファイルを `git diff --no-index` で新規ファイル差分にする。`-z`（NUL 区切り）で空白入りパスでも壊れない）
 - 申し送り（`--instructions <path>`）: レビュアー個別の重点指摘を**観点とは別系統**で足します（`REVIEWER_NOTES_HEADER` の見出し付きでプロンプトに追加。`.cross-review.md` は置き換えない）。  
   `--uncommitted` の未追跡収集からは、申し送りファイル自体を**絶対パスの突き合わせで除外**します。  
 - 引数解析・差分生成・プロンプト生成・観点解決・申し送り注入は `tests/cross-review.test.js`（vitest）が担保します。  
   このテストは**取り込み先では任意**で、vitest を使うときだけ同梱します（同梱しなくても engine の振る舞いは upstream のテストが担保）。
+
+## 既定 base の解決と差分サイズのガード
+
+レビュー差分のトークン消費を抑えるための仕組みです。
+
+### 既定 base は `origin/main` を優先解決する
+
+既定（`--base` 未指定・コミット済み差分モード）では、base を次の順で解決します。
+
+1. `git fetch origin main --quiet` を**ベストエフォート**で実行（10 秒タイムアウト）。  
+   リモートが無い・オフライン・タイムアウトのときは stderr に警告 1 行を出して続行します（失敗で止めません）。
+2. `git rev-parse --verify origin/main` が通れば **`origin/main` を base に採用**します（stderr に 1 行通知。`--base` で変更可）。
+3. 解決できなければ従来どおりローカル `main` を使います。
+
+`--base` を明示したとき、および `--uncommitted` のときは、この解決を**スキップ**します（fetch もしません）。指定した base / 未コミット差分には介入しません。
+
+**stale なローカル `main` の落とし穴**: ローカル `main` が古いと merge-base が過去にずれ、HEAD が既に取り込んだ `main` 側のコミットまで `git diff main...HEAD` に混入します（実例: 89 コミット・792KB に肥大。`git fetch origin main` + `--base origin/main` で 65KB に正常化）。`origin/main` の優先解決はこれを自動で避けるための既定挙動です。手動なら `git fetch origin main` 後に `--base origin/main` を明示しても同じ効果になります。
+
+### 差分サイズの表示とガード
+
+- レビュー差分の収集後、サイズを**常に stderr に 1 行表示**します（例: `[cross-review] レビュー差分サイズ: 65.2KB`）。
+- サイズが閾値（KB）を超えると、**レビュアーを起動せず中断**します（`subagent` でもプロンプトを出しません。`process.exitCode = 1`）。  
+  エラーメッセージに、原因の候補（stale な `main`・生成物 / lock ファイルの混入）と回避策を出します。
+- 閾値の解決順は **`--max-diff-kb <n>`（CLI フラグ）→ 環境変数 `CROSS_REVIEW_MAX_DIFF_KB` → 既定 256KB** です。  
+  値 `0` で**ガードを無効化**します（意図的に大きい差分をレビューしたいとき）。
+
+```bash
+node tools/cross-review.js codex --max-diff-kb 512   # 上限を 512KB に引き上げる
+node tools/cross-review.js codex --max-diff-kb 0     # ガードを無効化
+CROSS_REVIEW_MAX_DIFF_KB=512 npm run review:codex    # 環境変数で指定
+```
 
 ## 観点チェックリスト（.cross-review.md）
 
