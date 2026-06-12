@@ -163,8 +163,11 @@ describe('sync assertWithinRoot', () => {
 });
 
 // 仮想 FS (絶対パス -> 内容) を使い、実 I/O 無しで computeSyncPlan / runSync を検証する。
+// 参照側 (readFile / exists / writeFile) はキーを path.resolve で正規化するため、
+// 初期データのキーも同じく正規化して登録する (Windows では '/up/...' が 'D:\up\...' に
+// 解決されるので、生のキーのままだと一致せず全テストが落ちる)。
 function makeFs(initial = {}) {
-  const store = new Map(Object.entries(initial));
+  const store = new Map(Object.entries(initial).map(([k, v]) => [path.resolve(k), v]));
   const writes = [];
   return {
     store,
@@ -343,9 +346,9 @@ describe('sync runSync', () => {
     expect(res.wrote).toContain('tools/cross-review.js');
     expect(res.wrote).not.toContain('docs/cross-review.md'); // 一致は書かない
     // 取り込み先が更新されている
-    expect(h.fsx.store.get('/proj/tools/cross-review.js')).toBe('NEW');
+    expect(h.fsx.store.get(path.resolve('/proj/tools/cross-review.js'))).toBe('NEW');
     // マニフェストに取り込み元コミットが記録される
-    const written = JSON.parse(h.fsx.store.get('/proj/tools/cross-review.sync.json'));
+    const written = JSON.parse(h.fsx.store.get(path.resolve('/proj/tools/cross-review.sync.json')));
     expect(written.lastSyncedCommit).toBe('abc123def456');
     expect(written.lastSyncedRef).toBe('main');
     expect(process.exitCode).toBe(0);
@@ -396,7 +399,7 @@ describe('sync runSync', () => {
     expect(res.wrote).toEqual([]); // ファイルは一致なので書かない
     // 書き込みはマニフェストの記録更新のみ
     expect(fsx.writes.map((w) => w.path)).toEqual([path.resolve('/proj/tools/cross-review.sync.json')]);
-    const written = JSON.parse(fsx.store.get('/proj/tools/cross-review.sync.json'));
+    const written = JSON.parse(fsx.store.get(path.resolve('/proj/tools/cross-review.sync.json')));
     expect(written.lastSyncedCommit).toBe('newcommit');
     expect(process.exitCode).toBe(0);
   });
