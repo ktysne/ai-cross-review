@@ -268,6 +268,58 @@ node tools/cross-review.js subagent      # CLI を起動せずレビュー用プ
 - 引数解析・差分生成・プロンプト生成・観点解決・申し送り注入は `tests/cross-review.test.js`（vitest）が担保します。  
   このテストは**取り込み先では任意**で、vitest を使うときだけ同梱します（同梱しなくても engine の振る舞いは upstream のテストが担保）。
 
+## 同期スクリプト（tools/cross-review.sync.js）
+
+「そのままコピーするファイル」（CLI 本体・この手順書・観点テンプレート・テスト等）を、上流リポジトリから取り込み先プロジェクトへ取り込むスクリプトです。  
+手で 1 ファイルずつ上書きコピーする代わりに、マニフェストに従って機械的に同期します（手動コピー運用の置き換え）。  
+依存の追加はありません（Node 標準 API のみ・CommonJS）。git だけで取り込み元を取得します。
+
+- **取り込み元の取得**: `upstream.repo` の `upstream.ref`（ブランチ / タグ / コミット）を一時ディレクトリへ **shallow fetch**（`git init` → `git fetch --depth 1 origin <ref>` → `checkout FETCH_HEAD`）し、そこからファイルをコピーします。SHA 直接指定も拾えるよう `clone --branch` ではなく `fetch <ref>` を使います。一時ディレクトリは実行後に削除します。
+- **取り込むファイルの対応付け**: `files[]` の `from`（上流相対）→ `to`（取り込み先相対）で対応付けます。取り込み先の配置が上流と違っても対応できます（例: テストを `tests/tools/` 配下に置く）。**ファイル単位のみ**で、`from` にディレクトリを指定した一括コピーは非対応です。
+- **require パス等の機械置換**: `files[].replace`（`{ from, to }` の配列）で**文字列リテラルの全置換**を行います（正規表現ではない）。コピーしたテストの require パスを取り込み先の配置へ合わせる用途です。上流側は書き換えません。
+- **取り込み元の記録**: 取り込んだ実コミットを `lastSyncedCommit`（と `lastSyncedRef`）へ書き戻します（記録値が変わるときだけ。同一コミットの再同期では書き換えません）。どの版から取り込んだかが履歴に残り、検査の基準にもなります。
+- **モード**:
+  - 既定（同期）: 差分のあるファイルだけ上書きし、取り込み元コミットが変わったときだけマニフェストの `lastSyncedCommit` を更新する。
+  - `--check`: 書き込まず、上流（ref）との差分（ドリフト）だけを報告する。差分があれば **exit 1**（CI のドリフト検知向け）。
+  - `--dry-run`: 書き込まず、同期で何が変わるかだけ表示する。
+- **そのほかのオプション**: `--ref <ref>`（マニフェストの ref を上書き）/ `--manifest <path>`（マニフェストの場所。既定はスクリプト隣の `cross-review.sync.json`）/ `--root <path>`（取り込み先ルート。既定は `tools/` の 1 つ上 = プロジェクトルート。cwd に依存せず解決）。
+- **安全策**: `from` / `to` が取り込み元 / 取り込み先ルートの外を指す場合はエラーにします（マニフェスト由来のパスでルート外へ読み書きする事故を防ぐ）。
+
+マニフェスト（`tools/cross-review.sync.json`）の形:
+
+```json
+{
+  "upstream": { "repo": "https://github.com/ktysne/ai-cross-review.git", "ref": "main" },
+  "lastSyncedCommit": null,
+  "files": [
+    { "from": "tools/cross-review.js", "to": "tools/cross-review.js" },
+    { "from": "tools/cross-review.sync.js", "to": "tools/cross-review.sync.js" },
+    { "from": "docs/cross-review.md", "to": "docs/cross-review.md" },
+    { "from": ".cross-review.example.md", "to": ".cross-review.example.md" },
+    {
+      "from": "tests/cross-review.test.js",
+      "to": "tests/tools/cross-review.test.js",
+      "replace": [{ "from": "../tools/cross-review.js", "to": "../../tools/cross-review.js" }]
+    }
+  ]
+}
+```
+
+上の `files` は代表例です。配布物一式の雛形は `tools/cross-review.sync.example.json` にあり、こちらが正本です。  
+このマニフェスト自体は**取り込み先で編集するファイル**です（上書きコピーの対象に含めない）。  
+`.cross-review.md`（観点）や `CLAUDE.md` / `AGENTS.md` などプロジェクト固有のファイルは `files` に入れません（上書きで消えます）。
+
+```bash
+node tools/cross-review.sync.js            # 上流から取り込む（差分のあるファイルだけ上書き）
+node tools/cross-review.sync.js --check    # ドリフト検査のみ（書き込まない。差分があれば exit 1）
+node tools/cross-review.sync.js --dry-run  # 何が変わるかだけ表示（書き込まない）
+node tools/cross-review.sync.js --ref v1.2.3   # 取り込む版をマニフェストより優先
+```
+
+> 取り込み元の取得は git のネットワークアクセスを使います。  
+> サンドボックス内では fetch に失敗することがあるため、必要に応じてネットワークを許可して実行してください。  
+> 引数解析・マニフェスト検証・置換・同期プラン算出・同期/検査の配線は `tests/cross-review.sync.test.js`（vitest）が担保します（取り込み先では任意。vitest を使うときだけ同梱）。
+
 ## 観点チェックリスト（.cross-review.md）
 
 レビュアーへ渡す観点は、リポジトリ直下の `.cross-review.md` から読み込みます。  
@@ -289,5 +341,6 @@ node tools/cross-review.js subagent      # CLI を起動せずレビュー用プ
 
 - レビュー観点を増やしたり減らしたりしたら `.cross-review.md` を更新します。  
 - CLI の対象範囲（`--staged` など）を増やすときは、（テストを同梱しているなら）`tests/cross-review.test.js` も更新します。  
+- 同期スクリプトの仕様（マニフェストの形・モード）を変えたら、（同梱しているなら）`tests/cross-review.sync.test.js` も更新します。  
 - 運用ルールの要約はコピー先の `CLAUDE.md` / `AGENTS.md`（あれば）に置きます。  
   このドキュメントが正本なので、内容を二重に書きません（要約からはここへリンクします）。
