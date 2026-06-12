@@ -14,12 +14,18 @@ const {
   collectReviewDiff,
   resolveBaseRef,
   resolveMaxDiffKb,
+  resolveMaxFileDiffKb,
+  summarizeLargeFileDiffs,
   buildReviewPrompt,
   runReview,
   loadChecklist,
   loadInstructions,
+  loadIgnorePatterns,
+  toExcludePathspecs,
   resolveReviewerCommandForSpawn,
   CHECKLIST_FILENAME,
+  IGNORE_FILENAME,
+  DEFAULT_EXCLUDE_PATTERNS,
   GENERIC_CHECKLIST,
   REVIEW_ONLY_INSTRUCTION,
   FIX_INSTRUCTION,
@@ -101,6 +107,25 @@ describe('cross-review parseArgs', () => {
     expect(parseArgs(['codex', '--max-diff-kb=1.5']).error).toMatch(/--max-diff-kb/);
     expect(parseArgs(['codex', '--max-diff-kb=']).error).toMatch(/--max-diff-kb/);
     expect(parseArgs(['codex', '--max-diff-kb']).error).toMatch(/--max-diff-kb/);
+  });
+
+  it('--no-exclude で noExclude:true になる (既定は false)', () => {
+    expect(parseArgs(['codex']).noExclude).toBe(false);
+    expect(parseArgs(['codex', '--no-exclude']).noExclude).toBe(true);
+  });
+
+  it('--max-file-diff-kb / --max-file-diff-kb= で閾値を取り込む (0 も有効)', () => {
+    expect(parseArgs(['codex', '--max-file-diff-kb', '128']).maxFileDiffKb).toBe(128);
+    expect(parseArgs(['codex', '--max-file-diff-kb=0']).maxFileDiffKb).toBe(0);
+    expect(parseArgs(['codex']).maxFileDiffKb).toBeNull();
+  });
+
+  it('--max-file-diff-kb の不正値 (負数・非数値・空) はエラー', () => {
+    expect(parseArgs(['codex', '--max-file-diff-kb', '-1']).error).toMatch(/--max-file-diff-kb/);
+    expect(parseArgs(['codex', '--max-file-diff-kb', 'abc']).error).toMatch(/--max-file-diff-kb/);
+    expect(parseArgs(['codex', '--max-file-diff-kb=2.5']).error).toMatch(/--max-file-diff-kb/);
+    expect(parseArgs(['codex', '--max-file-diff-kb=']).error).toMatch(/--max-file-diff-kb/);
+    expect(parseArgs(['codex', '--max-file-diff-kb']).error).toMatch(/--max-file-diff-kb/);
   });
 
   it('--instructions <path> / --instructions=path で申し送りファイルを取り込む', () => {
@@ -264,7 +289,8 @@ describe('cross-review collectReviewDiff', () => {
     };
     const out = collectReviewDiff({ mode: 'base', baseRef: 'main' }, fakeGit);
     expect(calls[0]).toEqual(['diff', 'main...HEAD']);
-    expect(out).toBe('BASE_DIFF');
+    expect(out.diffText).toBe('BASE_DIFF');
+    expect(out.excludedFiles).toEqual([]);
   });
 
   it('uncommitted モードは tracked 差分に untracked 新規ファイルも含める', () => {
@@ -279,7 +305,7 @@ describe('cross-review collectReviewDiff', () => {
       }
       return '';
     };
-    const out = collectReviewDiff({ mode: 'uncommitted' }, fakeGit);
+    const out = collectReviewDiff({ mode: 'uncommitted' }, fakeGit).diffText;
     expect(out).toContain('TRACKED_DIFF');
     expect(out).toContain('NEWFILE_DIFF(new-a.js)');
     expect(out).toContain('NEWFILE_DIFF(new dir/new-b.txt)');
@@ -291,7 +317,7 @@ describe('cross-review collectReviewDiff', () => {
       if (args[0] === 'ls-files') return '';
       return '';
     };
-    expect(collectReviewDiff({ mode: 'uncommitted' }, fakeGit)).toBe('TRACKED_ONLY');
+    expect(collectReviewDiff({ mode: 'uncommitted' }, fakeGit).diffText).toBe('TRACKED_ONLY');
   });
 
   it('uncommitted で --instructions の申し送りファイルは untracked 差分から除外する', () => {
@@ -302,7 +328,7 @@ describe('cross-review collectReviewDiff', () => {
       return '';
     };
     // instructionsPath と untracked 候補は同一相対パス文字列なので path.resolve 後も一致し、除外される。
-    const out = collectReviewDiff({ mode: 'uncommitted', instructionsPath: 'review-notes.md' }, fakeGit);
+    const out = collectReviewDiff({ mode: 'uncommitted', instructionsPath: 'review-notes.md' }, fakeGit).diffText;
     expect(out).toContain('NEWFILE(real-new.js)');
     expect(out).not.toContain('review-notes.md');
   });
@@ -316,6 +342,225 @@ describe('cross-review loadInstructions', () => {
 
   it('読めなければ例外を投げる (呼び出し側でエラー終了させる)', () => {
     expect(() => loadInstructions('/missing.md', { readFile: () => { throw new Error('ENOENT'); } })).toThrow();
+  });
+});
+
+describe('cross-review loadIgnorePatterns', () => {
+  it('ファイルが無ければ既定パターン (DEFAULT_EXCLUDE_PATTERNS) のみを返す', () => {
+    const out = loadIgnorePatterns({
+      env: {},
+      cwd: '/repo',
+      scriptDir: path.join('/repo', 'tools'),
+      exists: () => false,
+      readFile: () => { throw new Error('読まれないはず'); },
+      warn: () => { throw new Error('警告は出ないはず'); },
+    });
+    expect(out).toEqual(DEFAULT_EXCLUDE_PATTERNS);
+  });
+
+  it('<cwd>/.cross-review-ignore があれば既定 + ファイルのパターンを併合する', () => {
+    const expected = path.join('/repo', IGNORE_FILENAME);
+    const out = loadIgnorePatterns({
+      env: {},
+      cwd: '/repo',
+      exists: (p) => p === expected,
+      readFile: () => 'dist/**\n# コメント\n\n  *.snap  \n',
+      warn: () => { throw new Error('警告は出ないはず'); },
+    });
+    expect(out).toEqual(DEFAULT_EXCLUDE_PATTERNS.concat(['dist/**', '*.snap']));
+  });
+
+  it('コメント行 (#) と空行は無視する', () => {
+    const out = loadIgnorePatterns({
+      env: {},
+      cwd: '/repo',
+      exists: () => true,
+      readFile: () => '# 全部コメント\n\n   \n# もう 1 行\n',
+      warn: () => {},
+    });
+    expect(out).toEqual(DEFAULT_EXCLUDE_PATTERNS); // 追加パターンなし
+  });
+
+  it('環境変数 CROSS_REVIEW_IGNORE のパスを優先する', () => {
+    const out = loadIgnorePatterns({
+      env: { CROSS_REVIEW_IGNORE: '/custom/ignore' },
+      cwd: '/repo',
+      exists: (p) => p === '/custom/ignore',
+      readFile: (p) => (p === '/custom/ignore' ? 'fixtures/**' : 'OTHER'),
+      warn: () => { throw new Error('警告は出ないはず'); },
+    });
+    expect(out).toEqual(DEFAULT_EXCLUDE_PATTERNS.concat(['fixtures/**']));
+  });
+
+  it('CROSS_REVIEW_IGNORE 指定先が無効なら警告し、次候補へフォールバックする', () => {
+    let warned = '';
+    const cwdIgnore = path.join('/repo', IGNORE_FILENAME);
+    const out = loadIgnorePatterns({
+      env: { CROSS_REVIEW_IGNORE: '/missing/ignore' },
+      cwd: '/repo',
+      scriptDir: path.join('/repo', 'tools'),
+      exists: (p) => p === cwdIgnore, // env 先は無い。cwd にはある。
+      readFile: () => 'from-cwd/**',
+      warn: (m) => { warned += m; },
+    });
+    expect(out).toEqual(DEFAULT_EXCLUDE_PATTERNS.concat(['from-cwd/**']));
+    expect(warned).toContain('CROSS_REVIEW_IGNORE');
+  });
+});
+
+describe('cross-review toExcludePathspecs', () => {
+  it('各パターンを glob マジックワード + **/ 接頭の除外パススペックにする', () => {
+    expect(toExcludePathspecs(['package-lock.json', '*.min.js'])).toEqual([
+      ':(exclude,glob,top)**/package-lock.json',
+      ':(exclude,glob,top)**/*.min.js',
+    ]);
+  });
+});
+
+describe('cross-review summarizeLargeFileDiffs', () => {
+  const fileChunk = (path, body) => `diff --git a/${path} b/${path}\n${body}`;
+
+  it('maxFileDiffKb が 0 なら無置換でそのまま返す', () => {
+    const text = fileChunk('x', '+'.repeat(5000));
+    expect(summarizeLargeFileDiffs(text, 0)).toEqual({ text, replacedCount: 0 });
+  });
+
+  it('閾値以下のチャンクは変更しない', () => {
+    const text = fileChunk('x', '+small');
+    const out = summarizeLargeFileDiffs(text, 64);
+    expect(out.replacedCount).toBe(0);
+    expect(out.text).toBe(text);
+  });
+
+  it('超過チャンクのみ置換し、追加/削除行数を数える (複数ファイル混在)', () => {
+    const small = fileChunk('small.js', '+a\n-b');
+    // 2KB 超の本文 (+ 行を大量に). 追加行数 = body の + 行数。
+    const bigBody = Array.from({ length: 3000 }, () => '+x').join('\n') + '\n-y';
+    const big = fileChunk('big.js', bigBody);
+    const out = summarizeLargeFileDiffs(`${small}\n${big}`, 1);
+    expect(out.replacedCount).toBe(1);
+    expect(out.text).toContain('+a');                         // 小さいファイルは本文を保持
+    expect(out.text).toContain('diff --git a/big.js b/big.js'); // ヘッダは残す
+    expect(out.text).toContain('本文を省略');
+    expect(out.text).toContain('追加 3000 行');
+    expect(out.text).toContain('削除 1 行');
+    expect(out.text).not.toContain('+x');                     // 本文は省略済み
+  });
+
+  it('+++ / --- のヘッダ行は追加/削除行数に数えない', () => {
+    const body = ['--- a/f', '+++ b/f', '@@ -1 +1 @@', '+added', '-removed', ...Array.from({ length: 2000 }, () => '+pad')].join('\n');
+    const text = `diff --git a/f b/f\n${body}`;
+    const out = summarizeLargeFileDiffs(text, 1);
+    expect(out.replacedCount).toBe(1);
+    expect(out.text).toContain('追加 2001 行'); // +added と +pad*2000。+++ は数えない
+    expect(out.text).toContain('削除 1 行');    // -removed のみ。--- は数えない
+  });
+
+  it('複数チャンクの先頭・末尾の両方を置換できる', () => {
+    const padBody = Array.from({ length: 2000 }, () => '+p').join('\n');
+    const a = `diff --git a/a b/a\n${padBody}`;
+    const b = `diff --git a/b b/b\n${padBody}`;
+    const out = summarizeLargeFileDiffs(`${a}\n${b}`, 1);
+    expect(out.replacedCount).toBe(2);
+    expect(out.text).toContain('diff --git a/a b/a');
+    expect(out.text).toContain('diff --git a/b b/b');
+    expect(out.text).not.toContain('+p');
+  });
+});
+
+describe('cross-review resolveMaxFileDiffKb', () => {
+  it('CLI フラグ (maxFileDiffKb 数値) を最優先する', () => {
+    expect(resolveMaxFileDiffKb({ maxFileDiffKb: 128 }, { CROSS_REVIEW_MAX_FILE_DIFF_KB: '32' })).toBe(128);
+    expect(resolveMaxFileDiffKb({ maxFileDiffKb: 0 }, { CROSS_REVIEW_MAX_FILE_DIFF_KB: '32' })).toBe(0);
+  });
+
+  it('フラグ未指定なら環境変数へフォールバックする', () => {
+    expect(resolveMaxFileDiffKb({ maxFileDiffKb: null }, { CROSS_REVIEW_MAX_FILE_DIFF_KB: '32' })).toBe(32);
+  });
+
+  it('フラグも env も無ければ既定 64', () => {
+    expect(resolveMaxFileDiffKb({ maxFileDiffKb: null }, {})).toBe(64);
+  });
+
+  it('env が非負整数として解釈できなければ無視して既定 64', () => {
+    expect(resolveMaxFileDiffKb({ maxFileDiffKb: null }, { CROSS_REVIEW_MAX_FILE_DIFF_KB: 'x' })).toBe(64);
+  });
+});
+
+describe('cross-review collectReviewDiff (除外パススペック配線)', () => {
+  it('base モード: 除外パススペックが diff 引数に入る', () => {
+    const calls = [];
+    const fakeGit = (args) => {
+      calls.push(args);
+      if (args.includes('--name-only')) return 'kept.js\n';
+      return 'BASE_DIFF\n';
+    };
+    const out = collectReviewDiff(
+      { mode: 'base', baseRef: 'main', excludePathspecs: [':(exclude,glob,top)**/package-lock.json'] },
+      fakeGit,
+    );
+    expect(calls[0]).toEqual(['diff', 'main...HEAD', '--', ':/', ':(exclude,glob,top)**/package-lock.json']);
+    expect(out.diffText).toBe('BASE_DIFF');
+  });
+
+  it('base モード: excludePathspecs が無ければ従来どおり除外指定を入れない', () => {
+    const calls = [];
+    const fakeGit = (args) => { calls.push(args); return 'BASE_DIFF\n'; };
+    collectReviewDiff({ mode: 'base', baseRef: 'main' }, fakeGit);
+    expect(calls[0]).toEqual(['diff', 'main...HEAD']); // --no-exclude 相当: 除外指定なし
+  });
+
+  it('base モード: 除外で落ちたファイル一覧を name-only の差集合で返す', () => {
+    const fakeGit = (args) => {
+      if (args[0] === 'diff' && args.includes('--name-only')) {
+        // 除外あり (-- :/ spec) は kept のみ、除外なしは full を返す。
+        return args.includes(':/') ? 'kept.js\n' : 'kept.js\npackage-lock.json\nsub/x.min.js\n';
+      }
+      return 'DIFF\n';
+    };
+    const out = collectReviewDiff(
+      { mode: 'base', baseRef: 'main', excludePathspecs: [':(exclude,glob,top)**/package-lock.json'] },
+      fakeGit,
+    );
+    expect(out.excludedFiles).toEqual(['package-lock.json', 'sub/x.min.js']);
+  });
+
+  it('uncommitted モード: 除外パススペックが tracked diff と ls-files に入る', () => {
+    const calls = [];
+    const fakeGit = (args) => {
+      calls.push(args);
+      if (args[0] === 'diff' && args[1] === 'HEAD' && !args.includes('--name-only')) return 'TRACKED\n';
+      if (args[0] === 'ls-files') return '';
+      if (args.includes('--name-only')) return '';
+      return '';
+    };
+    collectReviewDiff(
+      { mode: 'uncommitted', excludePathspecs: [':(exclude,glob,top)**/*.min.js'] },
+      fakeGit,
+    );
+    const trackedCall = calls.find((c) => c[0] === 'diff' && c[1] === 'HEAD' && !c.includes('--name-only'));
+    expect(trackedCall).toEqual(['diff', 'HEAD', '--', ':/', ':(exclude,glob,top)**/*.min.js']);
+    const lsCall = calls.find((c) => c[0] === 'ls-files' && c.includes('--'));
+    expect(lsCall).toEqual(['ls-files', '--others', '--exclude-standard', '-z', '--', ':/', ':(exclude,glob,top)**/*.min.js']);
+  });
+
+  it('uncommitted モード: untracked の除外ファイルを差集合で返す', () => {
+    const fakeGit = (args) => {
+      if (args[0] === 'diff' && args[1] === 'HEAD' && args.includes('--name-only')) return ''; // tracked 変更なし
+      if (args[0] === 'diff' && args[1] === 'HEAD') return ''; // tracked 本体なし
+      if (args[0] === 'ls-files') {
+        // 除外あり (-- :/ spec) は real-new.js のみ、除外なしは min も返す。
+        return args.includes(':/') ? 'real-new.js\0' : 'real-new.js\0gen/app.min.js\0';
+      }
+      if (args[0] === 'diff' && args[3] === '/dev/null') return `NEWFILE(${args[4]})\n`;
+      return '';
+    };
+    const out = collectReviewDiff(
+      { mode: 'uncommitted', excludePathspecs: [':(exclude,glob,top)**/*.min.js'] },
+      fakeGit,
+    );
+    expect(out.diffText).toContain('NEWFILE(real-new.js)');
+    expect(out.excludedFiles).toEqual(['gen/app.min.js']);
   });
 });
 
@@ -356,6 +601,24 @@ describe('cross-review buildReviewPrompt', () => {
   it('instructions が空/未指定なら申し送り見出しを含めない', () => {
     expect(buildReviewPrompt('diff', { mode: 'base', baseRef: 'main' }, 'CL')).not.toContain(REVIEWER_NOTES_HEADER);
     expect(buildReviewPrompt('diff', { mode: 'base', baseRef: 'main' }, 'CL', '   ')).not.toContain(REVIEWER_NOTES_HEADER);
+  });
+
+  it('excludedFiles が 1 件以上なら除外一覧セクションを含める', () => {
+    const prompt = buildReviewPrompt('diff', { mode: 'base', baseRef: 'main' }, 'CL', null, ['package-lock.json', 'dist/app.min.js']);
+    expect(prompt).toContain('レビュー対象外（除外済み）');
+    expect(prompt).toContain('- package-lock.json');
+    expect(prompt).toContain('- dist/app.min.js');
+  });
+
+  it('excludedFiles が空/未指定なら除外一覧セクションを含めない', () => {
+    expect(buildReviewPrompt('diff', { mode: 'base', baseRef: 'main' }, 'CL')).not.toContain('レビュー対象外');
+    expect(buildReviewPrompt('diff', { mode: 'base', baseRef: 'main' }, 'CL', null, [])).not.toContain('レビュー対象外');
+  });
+
+  it('差分の再取得を抑止する枠付け文言を含む', () => {
+    const prompt = buildReviewPrompt('diff', { mode: 'base', baseRef: 'main' }, 'CL');
+    expect(prompt).toContain('git diff やファイル全文の再取得はしないこと');
+    expect(prompt).not.toContain('必要なら作業ディレクトリのファイルを読んで文脈を補ってください'); // 旧文言は撤去
   });
 });
 
@@ -694,6 +957,74 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
       { gitRun, spawnFn, checklist: 'CL', out: () => {}, err: () => {} },
     );
     expect(captured.stdin).toContain('origin/main...HEAD');
+  });
+
+  it('巨大ファイル差分は stat 置換され、置換通知が stderr に出る', () => {
+    const captured = {};
+    const spawnFn = (cmd, args, stdin) => { Object.assign(captured, { cmd, args, stdin }); return null; };
+    const bigBody = Array.from({ length: 2000 }, () => '+x').join('\n');
+    const gitRun = (args) => {
+      if (args[0] === 'diff' && !args.includes('--name-only')) return `diff --git a/big.js b/big.js\n${bigBody}\n`;
+      return '';
+    };
+    let err = '';
+    runReview(
+      { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 0, maxFileDiffKb: 1, noExclude: true },
+      { gitRun, spawnFn, checklist: 'CL', out: () => {}, err: (s) => { err += s; } },
+    );
+    expect(captured.stdin).toContain('本文を省略');         // stat 要約に置換された
+    expect(captured.stdin).not.toContain('+x');             // 本文は載らない
+    expect(err).toMatch(/要約に置換/);                       // 置換通知
+  });
+
+  it('巨大 1 ファイルが置換で縮めば全体ガードを通る (置換後サイズで判定)', () => {
+    const captured = {};
+    const spawnFn = (cmd, args, stdin) => { Object.assign(captured, { cmd, args, stdin }); return null; };
+    // 元は 4KB 超 (ガード 2KB を超える) だが、1KB 超で置換されると小さくなりガードを通る。
+    const bigBody = Array.from({ length: 2000 }, () => '+x').join('\n');
+    const gitRun = (args) => {
+      if (args[0] === 'diff' && !args.includes('--name-only')) return `diff --git a/big.js b/big.js\n${bigBody}\n`;
+      return '';
+    };
+    let called = false;
+    process.exitCode = 0;
+    runReview(
+      { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 2, maxFileDiffKb: 1, noExclude: true },
+      { gitRun, spawnFn: (...a) => { called = true; return spawnFn(...a); }, checklist: 'CL', out: () => {}, err: () => {} },
+    );
+    expect(called).toBe(true);          // 置換で縮みガードを通過し spawn される
+    expect(process.exitCode).toBe(0);
+    process.exitCode = 0;
+  });
+
+  it('除外ファイルがあればプロンプトに除外一覧が乗る (deps.ignorePatterns 注入)', () => {
+    const captured = {};
+    const spawnFn = (cmd, args, stdin) => { Object.assign(captured, { cmd, args, stdin }); return null; };
+    const gitRun = (args) => {
+      if (args[0] === 'diff' && args.includes('--name-only')) {
+        return args.includes(':/') ? 'kept.js\n' : 'kept.js\npackage-lock.json\n';
+      }
+      if (args[0] === 'diff') return 'KEPT_DIFF\n';
+      return '';
+    };
+    runReview(
+      { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 0, maxFileDiffKb: 0 },
+      { gitRun, spawnFn, checklist: 'CL', ignorePatterns: ['package-lock.json'], out: () => {}, err: () => {} },
+    );
+    expect(captured.stdin).toContain('レビュー対象外（除外済み）');
+    expect(captured.stdin).toContain('- package-lock.json');
+  });
+
+  it('--no-exclude なら除外パススペックを git に渡さない', () => {
+    const calls = [];
+    const spawnFn = () => null;
+    const gitRun = (args) => { calls.push(args); return args[0] === 'diff' ? 'DIFF\n' : ''; };
+    runReview(
+      { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: true, fix: false, maxDiffKb: 0, maxFileDiffKb: 0, noExclude: true },
+      { gitRun, spawnFn, checklist: 'CL', ignorePatterns: ['package-lock.json'], out: () => {}, err: () => {} },
+    );
+    const diffCall = calls.find((c) => c[0] === 'diff' && !c.includes('--name-only'));
+    expect(diffCall).toEqual(['diff', 'main...HEAD']); // 除外指定が入らない (baseExplicit で origin/main 解決をスキップ)
   });
 
   it('subagent で差分が空なら stdout は空のまま、通知は stderr に出す (プロンプト契約を保つ)', () => {

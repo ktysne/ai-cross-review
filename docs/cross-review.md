@@ -265,6 +265,7 @@ node tools/cross-review.js subagent      # CLI を起動せずレビュー用プ
     （`git ls-files --others --exclude-standard -z` の各ファイルを `git diff --no-index` で新規ファイル差分にする。`-z`（NUL 区切り）で空白入りパスでも壊れない）
 - 申し送り（`--instructions <path>`）: レビュアー個別の重点指摘を**観点とは別系統**で足します（`REVIEWER_NOTES_HEADER` の見出し付きでプロンプトに追加。`.cross-review.md` は置き換えない）。  
   `--uncommitted` の未追跡収集からは、申し送りファイル自体を**絶対パスの突き合わせで除外**します。  
+- 差分の間引き: ロックファイル・生成物（`package-lock.json` / `*.min.js` / `*.map` ほか）を**既定で除外**し、巨大なファイル差分は **stat 要約に置換**してトークンを節約します（`.cross-review-ignore` で除外を追加、`--no-exclude` で無効化、`--max-file-diff-kb` で置換しきい値。詳細は後述「差分の除外と要約」）。  
 - 引数解析・差分生成・プロンプト生成・観点解決・申し送り注入は `tests/cross-review.test.js`（vitest）が担保します。  
   このテストは**取り込み先では任意**で、vitest を使うときだけ同梱します（同梱しなくても engine の振る舞いは upstream のテストが担保）。
 
@@ -299,6 +300,58 @@ node tools/cross-review.js codex --max-diff-kb 512   # 上限を 512KB に引き
 node tools/cross-review.js codex --max-diff-kb 0     # ガードを無効化
 CROSS_REVIEW_MAX_DIFF_KB=512 npm run review:codex    # 環境変数で指定
 ```
+
+### 差分の除外と要約（レビュー価値の低い差分でトークンを浪費しない）
+
+レビュー価値が低い差分（ロックファイル・生成物）や、巨大すぎて読まないファイル差分を、レビュアーへ渡す前に間引きます。
+
+**既定除外（ロックファイル・生成物）**: 次のファイルは、差分本文から既定で除外します（ファイル名のみのパターンで、どの階層でも一致します）。
+
+```
+package-lock.json / npm-shrinkwrap.json / yarn.lock / pnpm-lock.yaml /
+bun.lock / bun.lockb / Cargo.lock / Gemfile.lock / poetry.lock / uv.lock /
+composer.lock / go.sum / *.min.js / *.min.css / *.map
+```
+
+除外は `git diff` のパススペック（`:(exclude,glob,top)**/<pattern>`、include 側は repo ルート `:/`）で適用するので、サブディレクトリの同名ファイルにも効き、cwd がリポ直下でなくても差分スコープは変わりません。  
+**除外したが変更のあったファイルは、ファイル名だけプロンプトに残します**（`【レビュー対象外（除外済み）の変更ファイル】` の枠）。レビュアーが必要と判断すれば個別に読めます（差分本文は載りません）。
+
+**追加の除外（`.cross-review-ignore`）**: 既定除外に足したいパターンは `.cross-review-ignore` に書きます。  
+形式は **1 行 1 パターン・`#` 始まりはコメント・空行は無視**。観点（`.cross-review.md`）と同じ流儀で、`環境変数 CROSS_REVIEW_IGNORE（パス）→ <cwd>/.cross-review-ignore → <スクリプト>/../.cross-review-ignore` の順に探し、見つかった最初の 1 つを読みます（既定パターンと併合）。  
+`CROSS_REVIEW_IGNORE` を指定したのに読めないときは、黙って次へ進まず警告を出します。
+
+```text
+# .cross-review-ignore の例（既定パターンに追加される）
+docs/generated/*.md
+*.snap
+schema.sql
+```
+
+**すべての除外を無効化（`--no-exclude`）**: 既定除外も含めてすべての除外を切ります（緊急時の逃げ道。生成物もまとめてレビューしたいとき）。
+
+**巨大ファイル差分の stat 置換（`--max-file-diff-kb`）**: ファイル単位の差分がしきい値（KB）を超えたら、本文を **1 行の stat 要約**（`diff --git` 行＋「<X.X>KB・追加 n 行 / 削除 m 行のため本文を省略」）に置き換えます。  
+置換は全体サイズガードの**前**に行うので、置換で縮んだ分は全体ガードに掛かりません（巨大 1 ファイルが置換で縮めばガードを通ります）。置換が起きたら stderr に 1 行通知します。  
+しきい値の解決順は **`--max-file-diff-kb <n>`（CLI フラグ）→ 環境変数 `CROSS_REVIEW_MAX_FILE_DIFF_KB` → 既定 64KB**。値 `0` で置換を無効化します。
+
+```bash
+node tools/cross-review.js codex --max-file-diff-kb 128  # ファイル単位の置換しきい値を 128KB に
+node tools/cross-review.js codex --max-file-diff-kb 0    # stat 置換を無効化
+node tools/cross-review.js codex --no-exclude            # 既定除外も含めすべての除外を無効化
+```
+
+### 妥当性確認を軽くする（往復のトークンを線形に増やさない）
+
+指摘対応後の妥当性確認で、毎回**全差分**を再送するとトークンが往復ごとに膨らみます。  
+レビュー時点の HEAD を控えておき、**前回レビュー以降の増分差分だけ**を送ると線形増加を避けられます。
+
+1. レビュー前に SHA を控える: `git rev-parse HEAD`。
+2. 指摘対応後の妥当性確認は、その SHA を base にして増分だけ送る:
+
+   ```bash
+   node tools/cross-review.js <reviewer> --base <そのSHA> --instructions <指摘ファイル>
+   ```
+
+   `--base` はブランチ名に限らず**任意のコミット**を受けます。これで「前回レビュー以降の増分差分 ＋ 前回指摘」だけがレビュアーへ渡り、毎回の全差分再送を避けられます（往復のトークンが線形に増えない）。
 
 ## 同期スクリプト（tools/cross-review.sync.js）
 

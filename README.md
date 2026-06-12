@@ -81,6 +81,8 @@ CLI は起動できても、ネットワーク/API 接続が許可されずレ�
 | `--uncommitted` | 未コミットの作業ツリー差分（tracked + untracked）をレビュー |
 | `--base <ref>` | 比較先ブランチを指定（既定: 未指定なら `origin/main` を優先解決し、無ければ `main`） |
 | `--max-diff-kb <n>` | レビュー差分サイズの上限（KB）。超過時はレビュアーを起動せず中断（既定 256・`0` で無効。環境変数 `CROSS_REVIEW_MAX_DIFF_KB` でも指定可） |
+| `--max-file-diff-kb <n>` | ファイル単位の差分がこの KB を超えたら本文を stat 要約に置換（既定 64・`0` で無効。環境変数 `CROSS_REVIEW_MAX_FILE_DIFF_KB` でも指定可） |
+| `--no-exclude` | 既定除外も含めすべての除外を無効化（生成物・ロックファイルもまとめてレビューしたいとき） |
 | `--instructions <path>` | レビュアーへの申し送り・重点指摘ファイルをプロンプトに追加する（観点 `.cross-review.md` は置き換えず追加。`--fix` と併用すると、その指摘を直接修正させる） |
 | `-h`, `--help` | ヘルプを表示 |
 
@@ -96,6 +98,19 @@ CLI は起動できても、ネットワーク/API 接続が許可されずレ�
 
 `CROSS_REVIEW_CHECKLIST` を指定したのに読めない（存在しない / 空 / 読めない）ときは、黙って次へ進まず警告を出します。  
 誤ったパスや空ファイルで観点が変わってしまう事故を防ぐためです。
+
+## 差分の除外（`.cross-review-ignore`）
+
+ロックファイル・生成物（`package-lock.json` / `*.min.js` / `*.map` など）はレビュー価値が低くトークンを浪費するため、**既定で差分本文から除外**します（除外したファイル名はプロンプトに残るので、必要なら個別に読めます）。  
+除外を増やしたいときは `.cross-review-ignore` に **1 行 1 パターン**で足します（`#` 始まりはコメント・空行は無視。観点と同じ解決順で `CROSS_REVIEW_IGNORE` / `<cwd>` / スクリプト基準から探す）。
+
+```text
+# .cross-review-ignore の例（既定パターンに追加される）
+docs/generated/*.md
+*.snap
+```
+
+`--no-exclude` で既定除外も含めすべて無効化できます。巨大なファイル差分は `--max-file-diff-kb`（既定 64KB・`0` で無効）で stat 要約に置換します。詳しくは [docs/cross-review.md](docs/cross-review.md) を参照してください。
 
 ## 相互レビューの回し方
 
