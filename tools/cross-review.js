@@ -372,6 +372,8 @@ function resolveBaseRef(opts, gitRun, deps = {}) {
   if (opts.mode === 'uncommitted' || opts.baseExplicit) return opts.baseRef;
   const writeErr = deps.err || ((s) => process.stderr.write(s));
   // a. origin/main をベストエフォートで取得 (10 秒タイムアウト)。失敗は警告 1 行で続行。
+  // 成否は allowFailure 経路の契約「null = 失敗 / null 以外 (空文字含む) = 成功」で判定する
+  // (--quiet 付き fetch は成功時 stdout が空。gitRun を差し替えるときもこの契約を守ること)。
   const fetched = gitRun(
     ['fetch', 'origin', 'main', '--quiet'],
     { allowFailure: true, timeoutMs: 10000 },
@@ -590,7 +592,9 @@ function runReview(opts, deps = {}) {
     return null;
   }
   const prompt = buildReviewPrompt(diffText, resolvedOpts, checklist, instructions);
-  const inv = reviewerInvocation(opts);
+  // reviewerInvocation も解決後の opts で揃える (現状 baseRef は参照しないが、プロンプトの
+  // スコープ表記と起動引数が将来食い違わないよう、解決後の値だけを下流に渡す)。
+  const inv = reviewerInvocation(resolvedOpts);
   if (inv.emit) {
     // subagent: 外部プロセスを起動せず、組み立てたプロンプト本文だけを stdout に出す。
     // 通知は stderr に分けて、stdout を「そのまま客観サブエージェントへ渡せるプロンプト」に保つ。

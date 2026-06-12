@@ -277,7 +277,8 @@ node tools/cross-review.js subagent      # CLI を起動せずレビュー用プ
 既定（`--base` 未指定・コミット済み差分モード）では、base を次の順で解決します。
 
 1. `git fetch origin main --quiet` を**ベストエフォート**で実行（10 秒タイムアウト）。  
-   リモートが無い・オフライン・タイムアウトのときは stderr に警告 1 行を出して続行します（失敗で止めません）。
+   リモートが無い・オフライン・タイムアウトのときは stderr に警告 1 行を出して続行します（失敗で止めません）。  
+   タイムアウト等で fetch が中断された場合は、**前回取得済みの `origin/main`**（やや古い可能性あり）が使われることがあります（次回の fetch で追いつくため実害は軽微）。
 2. `git rev-parse --verify origin/main` が通れば **`origin/main` を base に採用**します（stderr に 1 行通知。`--base` で変更可）。
 3. 解決できなければ従来どおりローカル `main` を使います。
 
