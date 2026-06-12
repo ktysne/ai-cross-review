@@ -320,6 +320,13 @@ composer.lock / go.sum / *.min.js / *.min.css / *.map
 形式は **1 行 1 パターン・`#` 始まりはコメント・空行は無視**。観点（`.cross-review.md`）と同じ流儀で、`環境変数 CROSS_REVIEW_IGNORE（パス）→ <cwd>/.cross-review-ignore → <スクリプト>/../.cross-review-ignore` の順に探し、見つかった最初の 1 つを読みます（既定パターンと併合）。  
 `CROSS_REVIEW_IGNORE` を指定したのに読めないときは、黙って次へ進まず警告を出します。
 
+```text
+# .cross-review-ignore の例（既定パターンに追加される）
+docs/generated/*.md
+*.snap
+schema.sql
+```
+
 **すべての除外を無効化（`--no-exclude`）**: 既定除外も含めてすべての除外を切ります（緊急時の逃げ道。生成物もまとめてレビューしたいとき）。
 
 **巨大ファイル差分の stat 置換（`--max-file-diff-kb`）**: ファイル単位の差分がしきい値（KB）を超えたら、本文を **1 行の stat 要約**（`diff --git` 行＋「<X.X>KB・追加 n 行 / 削除 m 行のため本文を省略」）に置き換えます。  

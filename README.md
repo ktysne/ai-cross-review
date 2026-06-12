@@ -102,7 +102,14 @@ CLI は起動できても、ネットワーク/API 接続が許可されずレ�
 ## 差分の除外（`.cross-review-ignore`）
 
 ロックファイル・生成物（`package-lock.json` / `*.min.js` / `*.map` など）はレビュー価値が低くトークンを浪費するため、**既定で差分本文から除外**します（除外したファイル名はプロンプトに残るので、必要なら個別に読めます）。  
-除外を増やしたいときは `.cross-review-ignore` に **1 行 1 パターン**で足します（`#` 始まりはコメント・空行は無視。観点と同じ解決順で `CROSS_REVIEW_IGNORE` / `<cwd>` / スクリプト基準から探す）。  
+除外を増やしたいときは `.cross-review-ignore` に **1 行 1 パターン**で足します（`#` 始まりはコメント・空行は無視。観点と同じ解決順で `CROSS_REVIEW_IGNORE` / `<cwd>` / スクリプト基準から探す）。
+
+```text
+# .cross-review-ignore の例（既定パターンに追加される）
+docs/generated/*.md
+*.snap
+```
+
 `--no-exclude` で既定除外も含めすべて無効化できます。巨大なファイル差分は `--max-file-diff-kb`（既定 64KB・`0` で無効）で stat 要約に置換します。詳しくは [docs/cross-review.md](docs/cross-review.md) を参照してください。
 
 ## 相互レビューの回し方
