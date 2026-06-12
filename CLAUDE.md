@@ -37,7 +37,7 @@
 ### 実行上の注意
 - `npm run review:codex*` / `npm run review:claude` はレビュアー CLI がネットワーク/API 接続を使うため、必要に応じて **Bash をサンドボックス無効・ネットワーク許可で実行**する。
 - CLI は `Get-Command <cli>` / `<cli> --version` で見えていても、API 接続だけサンドボックスで止まることがある。`claude -p "Reply with OK only."` 等の最小 API 呼び出しが通常環境で無応答 / `ConnectionRefused`、ネットワーク許可環境で成功するなら、CLI 不在ではなくネットワーク制限として扱う。
-- 既定のレビュー対象は **main とのコミット済み差分**（`--base <ref>` で変更）。未コミットの実装を見るなら `-- --uncommitted`（未追跡込み）。`--fix` は codex / subagent 対応（claude CLI 経路は未対応）。`--instructions <path>` でレビュアーの指摘ファイルを観点に加えて添付（置き換えない）。
+- 既定のレビュー対象は **main とのコミット済み差分**（`--base <ref>` で変更）。`--base` 未指定時は **`origin/main` をベストエフォートで fetch・優先解決**し（解決できなければローカル `main`）、stale なローカル main による差分肥大を避ける（`--base` 明示時・`--uncommitted` 時は解決をスキップ）。未コミットの実装を見るなら `-- --uncommitted`（未追跡込み）。差分サイズは常に stderr 表示され、閾値（既定 256KB・`--max-diff-kb` / `CROSS_REVIEW_MAX_DIFF_KB`、`0` で無効）超過時はレビュアーを起動せず中断。`--fix` は codex / subagent 対応（claude CLI 経路は未対応）。`--instructions <path>` でレビュアーの指摘ファイルを観点に加えて添付（置き換えない）。
 - レビュー観点は `.cross-review.md` を自動添付（解決順は env `CROSS_REVIEW_CHECKLIST` → `<cwd>/.cross-review.md`
   → `<スクリプト>/../.cross-review.md` → 汎用フォールバック）。
 

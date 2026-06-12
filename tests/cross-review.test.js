@@ -12,6 +12,8 @@ const {
   codexExecArgs,
   reviewerInvocation,
   collectReviewDiff,
+  resolveBaseRef,
+  resolveMaxDiffKb,
   buildReviewPrompt,
   runReview,
   loadChecklist,
@@ -79,6 +81,26 @@ describe('cross-review parseArgs', () => {
 
   it('--base に値が無ければエラー', () => {
     expect(parseArgs(['codex', '--base']).error).toMatch(/--base/);
+  });
+
+  it('--base 指定で baseExplicit=true、未指定で false', () => {
+    expect(parseArgs(['codex']).baseExplicit).toBe(false);
+    expect(parseArgs(['codex', '--base', 'develop']).baseExplicit).toBe(true);
+    expect(parseArgs(['codex', '--base=release']).baseExplicit).toBe(true);
+  });
+
+  it('--max-diff-kb / --max-diff-kb= で閾値を取り込む (0 も有効)', () => {
+    expect(parseArgs(['codex', '--max-diff-kb', '512']).maxDiffKb).toBe(512);
+    expect(parseArgs(['codex', '--max-diff-kb=0']).maxDiffKb).toBe(0);
+    expect(parseArgs(['codex']).maxDiffKb).toBeNull();
+  });
+
+  it('--max-diff-kb の不正値 (負数・非数値・空) はエラー', () => {
+    expect(parseArgs(['codex', '--max-diff-kb', '-1']).error).toMatch(/--max-diff-kb/);
+    expect(parseArgs(['codex', '--max-diff-kb', 'abc']).error).toMatch(/--max-diff-kb/);
+    expect(parseArgs(['codex', '--max-diff-kb=1.5']).error).toMatch(/--max-diff-kb/);
+    expect(parseArgs(['codex', '--max-diff-kb=']).error).toMatch(/--max-diff-kb/);
+    expect(parseArgs(['codex', '--max-diff-kb']).error).toMatch(/--max-diff-kb/);
   });
 
   it('--instructions <path> / --instructions=path で申し送りファイルを取り込む', () => {
@@ -419,6 +441,88 @@ describe('cross-review loadChecklist', () => {
   });
 });
 
+describe('cross-review resolveBaseRef', () => {
+  it('--base 明示時は fetch も rev-parse も呼ばれず baseRef をそのまま返す', () => {
+    const calls = [];
+    const gitRun = (args) => { calls.push(args); return ''; };
+    const out = resolveBaseRef({ mode: 'base', baseRef: 'develop', baseExplicit: true }, gitRun);
+    expect(out).toBe('develop');
+    expect(calls).toEqual([]); // git は一切呼ばれない
+  });
+
+  it('uncommitted 時も git を呼ばず baseRef をそのまま返す', () => {
+    const calls = [];
+    const gitRun = (args) => { calls.push(args); return ''; };
+    const out = resolveBaseRef({ mode: 'uncommitted', baseRef: 'main', baseExplicit: false }, gitRun);
+    expect(out).toBe('main');
+    expect(calls).toEqual([]);
+  });
+
+  it('fetch 失敗でも origin/main が verify できれば origin/main を返す', () => {
+    const gitRun = (args) => {
+      if (args[0] === 'fetch') return null;           // fetch 失敗 (allowFailure で null)
+      if (args[0] === 'rev-parse') return 'abc123\n'; // origin/main は verify できる
+      return '';
+    };
+    const out = resolveBaseRef({ mode: 'base', baseRef: 'main', baseExplicit: false }, gitRun);
+    expect(out).toBe('origin/main');
+  });
+
+  it('origin/main が verify できなければ main を返す', () => {
+    const gitRun = (args) => {
+      if (args[0] === 'fetch') return '';
+      if (args[0] === 'rev-parse') return null; // origin/main 無し
+      return '';
+    };
+    const out = resolveBaseRef({ mode: 'base', baseRef: 'main', baseExplicit: false }, gitRun);
+    expect(out).toBe('main');
+  });
+
+  it('fetch 失敗時は stderr に警告を出す', () => {
+    let err = '';
+    const gitRun = (args) => (args[0] === 'fetch' ? null : null);
+    resolveBaseRef(
+      { mode: 'base', baseRef: 'main', baseExplicit: false },
+      gitRun,
+      { err: (s) => { err += s; } },
+    );
+    expect(err).toMatch(/取得に失敗/);
+  });
+
+  it('origin/main 採用時は stderr に通知を出す', () => {
+    let err = '';
+    const gitRun = (args) => (args[0] === 'rev-parse' ? 'abc\n' : '');
+    resolveBaseRef(
+      { mode: 'base', baseRef: 'main', baseExplicit: false },
+      gitRun,
+      { err: (s) => { err += s; } },
+    );
+    expect(err).toMatch(/origin\/main/);
+  });
+});
+
+describe('cross-review resolveMaxDiffKb', () => {
+  it('CLI フラグ (maxDiffKb 数値) を最優先する', () => {
+    expect(resolveMaxDiffKb({ maxDiffKb: 512 }, { CROSS_REVIEW_MAX_DIFF_KB: '128' })).toBe(512);
+    expect(resolveMaxDiffKb({ maxDiffKb: 0 }, { CROSS_REVIEW_MAX_DIFF_KB: '128' })).toBe(0);
+  });
+
+  it('フラグ未指定なら環境変数へフォールバックする', () => {
+    expect(resolveMaxDiffKb({ maxDiffKb: null }, { CROSS_REVIEW_MAX_DIFF_KB: '128' })).toBe(128);
+    expect(resolveMaxDiffKb({ maxDiffKb: null }, { CROSS_REVIEW_MAX_DIFF_KB: '0' })).toBe(0);
+  });
+
+  it('フラグも env も無ければ既定 256', () => {
+    expect(resolveMaxDiffKb({ maxDiffKb: null }, {})).toBe(256);
+  });
+
+  it('env が非負整数として解釈できなければ無視して既定 256', () => {
+    expect(resolveMaxDiffKb({ maxDiffKb: null }, { CROSS_REVIEW_MAX_DIFF_KB: 'abc' })).toBe(256);
+    expect(resolveMaxDiffKb({ maxDiffKb: null }, { CROSS_REVIEW_MAX_DIFF_KB: '-5' })).toBe(256);
+    expect(resolveMaxDiffKb({ maxDiffKb: null }, { CROSS_REVIEW_MAX_DIFF_KB: '1.5' })).toBe(256);
+  });
+});
+
 describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
   // codex 経路でも「観点 + 差分本文 + モード指示」を stdin に渡す配線を固定する。
   // 旧挙動 (codex に観点だけ渡す) への退行を検知するための結合テスト。
@@ -525,6 +629,71 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     );
     expect(called).toBe(false);
     expect(ret).toBeNull();
+  });
+
+  it('差分サイズが閾値超過なら spawn せず exitCode 1、回避策入りエラーを stderr に出す', () => {
+    let called = false;
+    const spawnFn = () => { called = true; return null; };
+    // fetch/rev-parse は '' を返し、diff に大きな本文を返す。
+    const big = 'x'.repeat(2 * 1024); // 2KB
+    const gitRun = (args) => (args[0] === 'diff' ? big : '');
+    let err = '';
+    process.exitCode = 0;
+    const ret = runReview(
+      { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 1 },
+      { gitRun, spawnFn, checklist: 'CL', out: () => {}, err: (s) => { err += s; } },
+    );
+    expect(called).toBe(false);
+    expect(ret).toBeNull();
+    expect(process.exitCode).toBe(1);
+    expect(err).toMatch(/閾値/);
+    expect(err).toMatch(/--max-diff-kb/);   // 回避策
+    expect(err).toMatch(/stale/);           // 原因の示唆
+    process.exitCode = 0;
+  });
+
+  it('subagent でも閾値超過なら stdout にプロンプトを出さない', () => {
+    const big = 'y'.repeat(2 * 1024);
+    const gitRun = (args) => (args[0] === 'diff' ? big : '');
+    let out = '';
+    process.exitCode = 0;
+    runReview(
+      { reviewer: 'subagent', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 1 },
+      { gitRun, spawnFn: () => { throw new Error('spawn してはいけない'); }, checklist: 'CL', out: (s) => { out += s; }, err: () => {} },
+    );
+    expect(out).toBe('');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('閾値以下なら従来どおり動き、サイズ表示が stderr に出る (env で閾値解決)', () => {
+    const captured = {};
+    const spawnFn = (cmd, args, stdin) => { Object.assign(captured, { cmd, args, stdin }); return null; };
+    const gitRun = (args) => (args[0] === 'diff' ? 'SMALL_DIFF\n' : '');
+    let err = '';
+    runReview(
+      { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: null },
+      { gitRun, spawnFn, checklist: 'CL', out: () => {}, err: (s) => { err += s; }, env: { CROSS_REVIEW_MAX_DIFF_KB: '256' } },
+    );
+    expect(captured.cmd).toBe('codex');
+    expect(captured.stdin).toContain('SMALL_DIFF');
+    expect(err).toMatch(/レビュー差分サイズ:/);
+  });
+
+  it('スコープ表記に解決後 base (origin/main) が反映される', () => {
+    const captured = {};
+    const spawnFn = (cmd, args, stdin) => { Object.assign(captured, { cmd, args, stdin }); return null; };
+    // fetch '' / rev-parse はハッシュを返す → origin/main が採用される。
+    const gitRun = (args) => {
+      if (args[0] === 'rev-parse') return 'abc\n';
+      if (args[0] === 'diff') return 'DIFF\n';
+      return '';
+    };
+    runReview(
+      { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 0 },
+      { gitRun, spawnFn, checklist: 'CL', out: () => {}, err: () => {} },
+    );
+    expect(captured.stdin).toContain('origin/main...HEAD');
   });
 
   it('subagent で差分が空なら stdout は空のまま、通知は stderr に出す (プロンプト契約を保つ)', () => {

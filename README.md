@@ -79,7 +79,8 @@ CLI は起動できても、ネットワーク/API 接続が許可されずレ�
 |------------|------|
 | `--fix` | 修正まで依頼する（`codex` は `-s workspace-write` で直接修正 / `subagent` は FIX 指示付きでプロンプト出力。`claude` CLI 経路は非対応） |
 | `--uncommitted` | 未コミットの作業ツリー差分（tracked + untracked）をレビュー |
-| `--base <ref>` | 比較先ブランチを指定（既定: `main`） |
+| `--base <ref>` | 比較先ブランチを指定（既定: 未指定なら `origin/main` を優先解決し、無ければ `main`） |
+| `--max-diff-kb <n>` | レビュー差分サイズの上限（KB）。超過時はレビュアーを起動せず中断（既定 256・`0` で無効。環境変数 `CROSS_REVIEW_MAX_DIFF_KB` でも指定可） |
 | `--instructions <path>` | レビュアーへの申し送り・重点指摘ファイルをプロンプトに追加する（観点 `.cross-review.md` は置き換えず追加。`--fix` と併用すると、その指摘を直接修正させる） |
 | `-h`, `--help` | ヘルプを表示 |
 

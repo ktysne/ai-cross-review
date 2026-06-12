@@ -171,7 +171,9 @@ const USAGE = [
   'options:',
   '  --fix                 修正まで依頼 (codex: workspace-write で直接編集 / subagent: FIX 指示付きで出力。claude CLI 経路は非対応)',
   '  --uncommitted         未コミットの作業ツリー差分 (tracked + untracked) をレビュー',
-  '  --base <ref>          比較先ブランチを指定 (既定: main)',
+  '  --base <ref>          比較先ブランチを指定 (既定: 未指定なら origin/main を優先解決→無ければ main)',
+  '  --max-diff-kb <n>     レビュー差分サイズの上限 (KB)。超過時はレビュアーを起動せず中断',
+  '                        (既定 256。0 でガード無効。環境変数 CROSS_REVIEW_MAX_DIFF_KB でも指定可)',
   '  --instructions <path> レビュアーからの申し送り・重点指摘ファイルをプロンプトへ添付',
   '                        (観点 .cross-review.md は置き換えず追加。--fix と併用で指摘を直接修正させる)',
   '  -h, --help            このヘルプを表示',
@@ -191,10 +193,31 @@ const USAGE = [
   '       Agent ツールの客観サブエージェントへ渡す)',
 ].join('\n');
 
+// 非負整数として解釈できれば数値を、できなければ null を返す。
+// 受理するのは数字だけからなる文字列 (前後空白は許容)。負号・小数点・指数表記・空文字は不可。
+// --max-diff-kb のフラグ値と CROSS_REVIEW_MAX_DIFF_KB の解釈に共通で使う。
+function parseNonNegativeInt(value) {
+  if (value == null) return null;
+  const s = String(value).trim();
+  if (!/^\d+$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
 // process.argv.slice(2) を受け取り、レビュアーと差分スコープを解釈する。
 function parseArgs(argv) {
   const args = argv.slice();
-  const out = { reviewer: null, mode: 'base', baseRef: 'main', fix: false, instructionsPath: null, help: false, error: null };
+  const out = {
+    reviewer: null,
+    mode: 'base',
+    baseRef: 'main',
+    baseExplicit: false, // --base / --base= が指定されたか (既定 base 解決をスキップする判定に使う)
+    fix: false,
+    instructionsPath: null,
+    maxDiffKb: null, // --max-diff-kb の値 (未指定は null。閾値の最終解決は resolveMaxDiffKb)
+    help: false,
+    error: null,
+  };
   const rest = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -225,10 +248,31 @@ function parseArgs(argv) {
         out.error = '--base にはブランチ名が必要です';
       } else {
         out.baseRef = v;
+        out.baseExplicit = true;
         i++;
       }
     } else if (a.startsWith('--base=')) {
       out.baseRef = a.slice('--base='.length);
+      out.baseExplicit = true;
+    } else if (a === '--max-diff-kb') {
+      const v = args[i + 1];
+      const n = parseNonNegativeInt(v);
+      if (n == null) {
+        out.error = '--max-diff-kb には 0 以上の整数を指定してください';
+        // 値トークン (例: -1) が次ループで「不明なオプション」と誤判定されないよう、
+        // 別フラグでない (= 値として与えられた) ものはここで消費する。
+        if (v != null && !v.startsWith('--')) i++;
+      } else {
+        out.maxDiffKb = n;
+        i++;
+      }
+    } else if (a.startsWith('--max-diff-kb=')) {
+      const n = parseNonNegativeInt(a.slice('--max-diff-kb='.length));
+      if (n == null) {
+        out.error = '--max-diff-kb には 0 以上の整数を指定してください';
+      } else {
+        out.maxDiffKb = n;
+      }
     } else if (a.startsWith('-')) {
       out.error = `不明なオプション: ${a}`;
     } else {
@@ -267,13 +311,24 @@ function codexExecArgs(opts) {
 }
 
 // git を実行し stdout を返す。テストから差し替えられるよう実体を分離する。
-// git diff --no-index は差分があると exit 1 を返すので allowDiffExit で許容する。
+// opts:
+//   - allowDiffExit: git diff --no-index は差分があると exit 1 を返すので許容する。
+//   - allowFailure:  非ゼロ終了 (やタイムアウト) でも throw せず null を返す。fetch / rev-parse の
+//                    ベストエフォート実行に使う (成功判定は戻り値が null かどうか)。
+//   - timeoutMs:     spawnSync の timeout (ミリ秒)。タイムアウトすると非ゼロ終了になる。
 function defaultGitRunner(args, opts) {
   const allowDiffExit = !!(opts && opts.allowDiffExit);
-  const res = spawnSync('git', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const allowFailure = !!(opts && opts.allowFailure);
+  const timeoutMs = opts && opts.timeoutMs;
+  const spawnOpts = { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 };
+  if (timeoutMs) spawnOpts.timeout = timeoutMs;
+  const res = spawnSync('git', args, spawnOpts);
   const ok = res.status === 0 || (allowDiffExit && res.status === 1);
   if (!ok) {
-    const detail = res.stderr || `exit ${res.status}`;
+    // allowFailure 経路では、リモート無し・オフライン・タイムアウト・参照不在などを
+    // 例外ではなく null で表現し、呼び出し側がベストエフォートで続行できるようにする。
+    if (allowFailure) return null;
+    const detail = res.stderr || (res.error && res.error.message) || `exit ${res.status}`;
     throw new Error(`git ${args.join(' ')} に失敗しました: ${detail}`);
   }
   return res.stdout || '';
@@ -303,6 +358,53 @@ function collectReviewDiff(opts, gitRun) {
     if (added.trim()) parts.push(added.replace(/\n$/, ''));
   }
   return parts.join('\n');
+}
+
+// 既定 base (--base 未指定・コミット済み差分モード) のとき、ローカル main が stale だと
+// merge-base が古くなり HEAD 取り込み済みの main 側コミットまで差分に混入する。これを避けるため、
+// origin/main をベストエフォートで取得し、解決できれば base を origin/main に切り替える。
+// 解決順: fetch (ベストエフォート) → origin/main が verify できれば 'origin/main' → だめなら 'main'。
+//   - opts.mode === 'uncommitted' または opts.baseExplicit のときは何もせず opts.baseRef を返す
+//     (ユーザが明示した base / 未コミット差分には介入しない。fetch もしない)。
+//   - 人向け通知 (fetch 失敗・origin/main 採用) は deps.err (無ければ process.stderr.write) へ。
+// gitRun は (args, opts) => stdout | null の関数 (allowFailure 経路で失敗時 null)。
+function resolveBaseRef(opts, gitRun, deps = {}) {
+  if (opts.mode === 'uncommitted' || opts.baseExplicit) return opts.baseRef;
+  const writeErr = deps.err || ((s) => process.stderr.write(s));
+  // a. origin/main をベストエフォートで取得 (10 秒タイムアウト)。失敗は警告 1 行で続行。
+  // 成否は allowFailure 経路の契約「null = 失敗 / null 以外 (空文字含む) = 成功」で判定する
+  // (--quiet 付き fetch は成功時 stdout が空。gitRun を差し替えるときもこの契約を守ること)。
+  const fetched = gitRun(
+    ['fetch', 'origin', 'main', '--quiet'],
+    { allowFailure: true, timeoutMs: 10000 },
+  );
+  if (fetched == null) {
+    writeErr('[cross-review] origin の取得に失敗しました (オフライン等)。ローカルの参照で続行します。\n');
+  }
+  // b. origin/main が verify できれば base に採用。
+  const verified = gitRun(
+    ['rev-parse', '--verify', '--quiet', 'origin/main'],
+    { allowFailure: true },
+  );
+  if (verified != null) {
+    writeErr('[cross-review] base として origin/main を使用します (--base で変更可)。\n');
+    return 'origin/main';
+  }
+  // c. 解決できなければ従来どおりローカル main。
+  return 'main';
+}
+
+// レビュー差分サイズのガード閾値 (KB) を解決する。優先順:
+//   1. CLI フラグ --max-diff-kb (opts.maxDiffKb が数値なら採用)
+//   2. 環境変数 CROSS_REVIEW_MAX_DIFF_KB (非負整数として解釈できれば採用。できなければ無視して次へ)
+//   3. 既定 256
+// 戻り値 0 は「ガード無効」を表す。
+function resolveMaxDiffKb(opts, env) {
+  if (opts && typeof opts.maxDiffKb === 'number') return opts.maxDiffKb;
+  const e = env || process.env;
+  const fromEnv = parseNonNegativeInt(e.CROSS_REVIEW_MAX_DIFF_KB);
+  if (fromEnv != null) return fromEnv;
+  return 256;
 }
 
 // レビュアーへ渡すプロンプト (観点 + スコープ + モード別指示 + 申し送り + 差分本文)。
@@ -455,10 +557,15 @@ function runReview(opts, deps = {}) {
       return null;
     }
   }
+  // 既定 base (--base 未指定・コミット済み差分) のときは origin/main を優先解決する
+  // (ローカル main が stale だと無関係な差分が混入するため)。opts を直接書き換えず、
+  // 解決後の base を以降のスコープ表記・差分収集で使う。
+  const resolvedBaseRef = resolveBaseRef(opts, gitRun, deps);
+  const resolvedOpts = resolvedBaseRef === opts.baseRef ? opts : { ...opts, baseRef: resolvedBaseRef };
   // どのレビュアー (codex / claude / subagent) も自前で差分を取り出し、プロンプトへ同梱する (untracked も含める)。
   let diffText;
   try {
-    diffText = collectReviewDiff(opts, gitRun).trim();
+    diffText = collectReviewDiff(resolvedOpts, gitRun).trim();
   } catch (err) {
     writeErr(`${(err && err.message) || 'git の実行に失敗しました'}\n`);
     process.exitCode = 1;
@@ -470,8 +577,24 @@ function runReview(opts, deps = {}) {
     (opts.reviewer === 'subagent' ? writeErr : writeOut)('レビュー対象の差分がありません。\n');
     return null;
   }
-  const prompt = buildReviewPrompt(diffText, opts, checklist, instructions);
-  const inv = reviewerInvocation(opts);
+  // 差分サイズを常に表示し、閾値超過ならレビュアーを起動せず中断する (トークン浪費・stale base 検知)。
+  const diffBytes = Buffer.byteLength(diffText, 'utf8');
+  const diffKb = diffBytes / 1024;
+  writeErr(`[cross-review] レビュー差分サイズ: ${diffKb.toFixed(1)}KB\n`);
+  const maxDiffKb = resolveMaxDiffKb(opts, deps.env);
+  if (maxDiffKb > 0 && diffKb > maxDiffKb) {
+    writeErr(
+      `[cross-review] レビュー差分が閾値 ${maxDiffKb}KB を超えました (${diffKb.toFixed(1)}KB)。レビュアーを起動せず中断します。\n`
+      + '  考えられる原因: ローカル main が stale (git fetch origin main 後に再実行 / --base origin/main を明示)、生成物・lock ファイルの混入。\n'
+      + '  意図的に大きい差分なら --max-diff-kb <n> を引き上げるか --max-diff-kb 0 でガードを無効化してください。\n',
+    );
+    process.exitCode = 1;
+    return null;
+  }
+  const prompt = buildReviewPrompt(diffText, resolvedOpts, checklist, instructions);
+  // reviewerInvocation も解決後の opts で揃える (現状 baseRef は参照しないが、プロンプトの
+  // スコープ表記と起動引数が将来食い違わないよう、解決後の値だけを下流に渡す)。
+  const inv = reviewerInvocation(resolvedOpts);
   if (inv.emit) {
     // subagent: 外部プロセスを起動せず、組み立てたプロンプト本文だけを stdout に出す。
     // 通知は stderr に分けて、stdout を「そのまま客観サブエージェントへ渡せるプロンプト」に保つ。
@@ -502,6 +625,8 @@ module.exports = {
   codexExecArgs,
   reviewerInvocation,
   collectReviewDiff,
+  resolveBaseRef,
+  resolveMaxDiffKb,
   buildReviewPrompt,
   runReview,
   loadChecklist,
