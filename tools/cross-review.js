@@ -62,6 +62,31 @@ const path = require('path');
 // <スクリプト>/../.cross-review.md → GENERIC_CHECKLIST。このリポジトリの観点は `.cross-review.md` にある。
 const CHECKLIST_FILENAME = '.cross-review.md';
 
+// 除外パターンファイル名。観点 (.cross-review.md) と同じ解決順で探す。
+const IGNORE_FILENAME = '.cross-review-ignore';
+
+// 既定で差分本文から除外するファイル群 (ロックファイル・生成物・ソースマップ)。
+// レビュー価値が低くトークンを浪費しがちなので、明示的に除外する。
+// パターンはファイル名のみ (どの階層でも一致させたい) で、git パススペックでは
+// glob + top マジックワード + `**/` 接頭で再帰一致させる (toExcludePathspecs 参照)。
+const DEFAULT_EXCLUDE_PATTERNS = [
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'bun.lock',
+  'bun.lockb',
+  'Cargo.lock',
+  'Gemfile.lock',
+  'poetry.lock',
+  'uv.lock',
+  'composer.lock',
+  'go.sum',
+  '*.min.js',
+  '*.min.css',
+  '*.map',
+];
+
 // `.cross-review.md` が無いときの汎用フォールバック観点。特定リポに依存しない一般論のみ。
 const GENERIC_CHECKLIST = [
   'あなたはこのリポジトリのコードレビュアーです。',
@@ -128,6 +153,63 @@ function loadInstructions(instructionsPath, deps = {}) {
   return String(readFile(instructionsPath)).replace(/\s+$/, '');
 }
 
+// 除外パターン (.cross-review-ignore) を解決して読む。解決順は観点 (loadChecklist) と同じ流儀:
+//   1. 環境変数 CROSS_REVIEW_IGNORE (パス)
+//   2. <cwd>/.cross-review-ignore
+//   3. <スクリプト>/../.cross-review-ignore
+// 形式は 1 行 1 パターン・`#` 始まりはコメント・空行無視。見つかった最初の 1 つだけを読む。
+// 戻り値は「既定パターン (DEFAULT_EXCLUDE_PATTERNS) + ファイルのパターン」の配列
+// (ファイルが無ければ既定のみ)。env 明示指定が読めない場合は警告して次の候補へ (loadChecklist と同じ流儀)。
+// deps で env / cwd / scriptDir / fs / 警告出力を差し替え可能にする (テスト用)。
+function loadIgnorePatterns(deps = {}) {
+  const env = deps.env || process.env;
+  const cwd = deps.cwd || process.cwd();
+  const scriptDir = deps.scriptDir || __dirname;
+  const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
+  const exists = deps.exists || ((p) => fs.existsSync(p));
+  const warn = deps.warn || ((m) => process.stderr.write(m));
+  const envPath = env.CROSS_REVIEW_IGNORE || '';
+  const candidates = [];
+  if (envPath) candidates.push(envPath);
+  candidates.push(path.join(cwd, IGNORE_FILENAME));
+  candidates.push(path.join(scriptDir, '..', IGNORE_FILENAME));
+  const seen = new Set();
+  for (const p of candidates) {
+    if (seen.has(p)) continue; // cwd == リポ直下のときに同一パスを二重判定しない。
+    seen.add(p);
+    let body = null;
+    try {
+      if (exists(p)) body = readFile(p);
+    } catch {
+      body = null; // 読めなければ次の候補へ進む。
+    }
+    if (body != null) {
+      const extra = String(body)
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith('#'));
+      return DEFAULT_EXCLUDE_PATTERNS.concat(extra);
+    }
+    // 明示指定した CROSS_REVIEW_IGNORE が解決できなかったら、黙って次へ進まず警告する
+    // (誤ったパスで意図しない除外設定になる運用事故を検知しやすくするため)。
+    if (envPath && p === envPath) {
+      warn(`[cross-review] CROSS_REVIEW_IGNORE=${envPath} を読めません (存在しない/読取不可)。他の候補にフォールバックします。\n`);
+    }
+  }
+  return DEFAULT_EXCLUDE_PATTERNS.slice();
+}
+
+// 除外パターン配列を git パススペック群に変換する。ファイル名のみのパターンを
+// どの階層でも一致させるため、glob マジックワード + `**/` 接頭で再帰一致させる。
+// `top` マジックワードで repo ルート相対に固定する: これが無いとパススペックが cwd 相対になり、
+// リポジトリのサブディレクトリから実行したとき除外範囲 (ひいては差分スコープ) がそのサブツリーに
+// 狭まってしまう (include 側を `:/` にしているのと対になる)。
+// (例: `package-lock.json` → `:(exclude,glob,top)**/package-lock.json`、
+//  `*.min.js` → `:(exclude,glob,top)**/*.min.js`)。実挙動はテストと git で確認済み。
+function toExcludePathspecs(patterns) {
+  return patterns.map((p) => `:(exclude,glob,top)**/${p}`);
+}
+
 // レビューのみ (既定) の追加指示。ファイルを変更させない。
 const REVIEW_ONLY_INSTRUCTION = [
   '【モード: レビューのみ】',
@@ -174,12 +256,17 @@ const USAGE = [
   '  --base <ref>          比較先ブランチを指定 (既定: 未指定なら origin/main を優先解決→無ければ main)',
   '  --max-diff-kb <n>     レビュー差分サイズの上限 (KB)。超過時はレビュアーを起動せず中断',
   '                        (既定 256。0 でガード無効。環境変数 CROSS_REVIEW_MAX_DIFF_KB でも指定可)',
+  '  --max-file-diff-kb <n> ファイル単位の差分がこの KB を超えたら本文を stat 要約に置換',
+  '                        (既定 64。0 で無効。環境変数 CROSS_REVIEW_MAX_FILE_DIFF_KB でも指定可)',
+  '  --no-exclude          既定除外も含めすべての除外を無効化 (緊急時の逃げ道)',
   '  --instructions <path> レビュアーからの申し送り・重点指摘ファイルをプロンプトへ添付',
   '                        (観点 .cross-review.md は置き換えず追加。--fix と併用で指摘を直接修正させる)',
   '  -h, --help            このヘルプを表示',
   '',
   'レビュー観点: リポジトリ直下の .cross-review.md を読み込みます',
   '  (環境変数 CROSS_REVIEW_CHECKLIST でパス指定可。スクリプト位置からも解決。無ければ汎用観点)。',
+  '差分の除外: ロックファイル・生成物 (package-lock.json / *.min.js / *.map 等) を既定で除外します',
+  '  (.cross-review-ignore で追加可。環境変数 CROSS_REVIEW_IGNORE でパス指定可。--no-exclude で無効化)。',
   '',
   '例:',
   '  npm run review:codex',
@@ -215,6 +302,8 @@ function parseArgs(argv) {
     fix: false,
     instructionsPath: null,
     maxDiffKb: null, // --max-diff-kb の値 (未指定は null。閾値の最終解決は resolveMaxDiffKb)
+    maxFileDiffKb: null, // --max-file-diff-kb の値 (未指定は null。最終解決は resolveMaxFileDiffKb)
+    noExclude: false, // --no-exclude で既定除外も含めすべての除外を無効化する (緊急時の逃げ道)
     help: false,
     error: null,
   };
@@ -225,6 +314,8 @@ function parseArgs(argv) {
       out.help = true;
     } else if (a === '--fix') {
       out.fix = true;
+    } else if (a === '--no-exclude') {
+      out.noExclude = true;
     } else if (a === '--uncommitted') {
       out.mode = 'uncommitted';
     } else if (a === '--instructions') {
@@ -272,6 +363,24 @@ function parseArgs(argv) {
         out.error = '--max-diff-kb には 0 以上の整数を指定してください';
       } else {
         out.maxDiffKb = n;
+      }
+    } else if (a === '--max-file-diff-kb') {
+      const v = args[i + 1];
+      const n = parseNonNegativeInt(v);
+      if (n == null) {
+        out.error = '--max-file-diff-kb には 0 以上の整数を指定してください';
+        // 値トークン (例: -1) が次ループで「不明なオプション」と誤判定されないよう消費する。
+        if (v != null && !v.startsWith('--')) i++;
+      } else {
+        out.maxFileDiffKb = n;
+        i++;
+      }
+    } else if (a.startsWith('--max-file-diff-kb=')) {
+      const n = parseNonNegativeInt(a.slice('--max-file-diff-kb='.length));
+      if (n == null) {
+        out.error = '--max-file-diff-kb には 0 以上の整数を指定してください';
+      } else {
+        out.maxFileDiffKb = n;
       }
     } else if (a.startsWith('-')) {
       out.error = `不明なオプション: ${a}`;
@@ -334,12 +443,47 @@ function defaultGitRunner(args, opts) {
   return res.stdout || '';
 }
 
-// claude へ渡す差分本文を組み立てる。gitRun は (args, { allowDiffExit }) => stdout の関数。
+// 差分本文と「除外したが変更のあったファイル一覧」を組み立てる。
+// gitRun は (args, { allowDiffExit }) => stdout の関数。
 // uncommitted では Codex の --uncommitted と揃えるため、tracked 変更に加えて
 // 未追跡 (untracked) ファイルも new file 差分として含める。
+// 戻り値: { diffText, excludedFiles }
+//   - diffText: 除外パススペック適用後の差分本文。
+//   - excludedFiles: 除外したが変更のあったファイル名一覧 (除外なし/除外ありの name-only 差集合)。
+// opts.excludePathspecs があれば差分収集に渡し、加えて差集合を name-only でベストエフォート取得する
+// (一覧取得は軽量な name-only。失敗時は除外一覧なしで続行)。
 function collectReviewDiff(opts, gitRun) {
+  // include 側は repo ルート (`:/`) を指す。これと除外側の `top` マジックワードにより、
+  // cwd がリポジトリ直下でなくても差分スコープがリポ全体のまま変わらない (cwd 相対の `.` だと退行)。
+  const excludeSpecs = opts.excludePathspecs || [];
+  const hasExclude = excludeSpecs.length > 0;
+  // name-only 一覧から「除外で落ちたファイル」を差集合で求める (ベストエフォート)。
+  const diffNames = (args) => {
+    try {
+      const out = gitRun(args, { allowDiffExit: true });
+      return out.split('\n').map((s) => s.trim()).filter(Boolean);
+    } catch {
+      return null; // name-only 取得失敗時は差集合を諦める (本体の差分収集は続行)。
+    }
+  };
+  const subtract = (full, kept) => {
+    if (full == null || kept == null) return [];
+    const keptSet = new Set(kept);
+    return full.filter((f) => !keptSet.has(f));
+  };
+
   if (opts.mode !== 'uncommitted') {
-    return gitRun(['diff', `${opts.baseRef}...HEAD`], { allowDiffExit: true }).replace(/\n$/, '');
+    const range = `${opts.baseRef}...HEAD`;
+    const diffArgs = ['diff', range];
+    if (hasExclude) diffArgs.push('--', ':/', ...excludeSpecs);
+    const diffText = gitRun(diffArgs, { allowDiffExit: true }).replace(/\n$/, '');
+    let excludedFiles = [];
+    if (hasExclude) {
+      const full = diffNames(['diff', '--name-only', range]);
+      const kept = diffNames(['diff', '--name-only', range, '--', ':/', ...excludeSpecs]);
+      excludedFiles = subtract(full, kept);
+    }
+    return { diffText, excludedFiles };
   }
   // --instructions の申し送りファイルが untracked のままリポジトリ内に置かれていても、
   // レビュー対象 (実コード差分) に紛れ込まないよう除外する。絶対パスで突き合わせる。
@@ -347,9 +491,13 @@ function collectReviewDiff(opts, gitRun) {
   const normCmp = (p) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
   const excludeAbs = opts.instructionsPath ? normCmp(opts.instructionsPath) : null;
   const parts = [];
-  const tracked = gitRun(['diff', 'HEAD'], { allowDiffExit: true });
+  const trackedArgs = ['diff', 'HEAD'];
+  if (hasExclude) trackedArgs.push('--', ':/', ...excludeSpecs);
+  const tracked = gitRun(trackedArgs, { allowDiffExit: true });
   if (tracked.trim()) parts.push(tracked.replace(/\n$/, ''));
-  const listed = gitRun(['ls-files', '--others', '--exclude-standard', '-z'], {});
+  const lsArgs = ['ls-files', '--others', '--exclude-standard', '-z'];
+  if (hasExclude) lsArgs.push('--', ':/', ...excludeSpecs);
+  const listed = gitRun(lsArgs, {});
   const untracked = listed.split('\0').filter(Boolean);
   for (const file of untracked) {
     if (excludeAbs && normCmp(file) === excludeAbs) continue; // 申し送りファイル自体は対象外。
@@ -357,7 +505,20 @@ function collectReviewDiff(opts, gitRun) {
     const added = gitRun(['diff', '--no-index', '--', '/dev/null', file], { allowDiffExit: true });
     if (added.trim()) parts.push(added.replace(/\n$/, ''));
   }
-  return parts.join('\n');
+  let excludedFiles = [];
+  if (hasExclude) {
+    // tracked: name-only の差集合。untracked: ls-files の差集合 (申し送りファイルは除く)。
+    const trackedFull = diffNames(['diff', '--name-only', 'HEAD']);
+    const trackedKept = diffNames(['diff', '--name-only', 'HEAD', '--', ':/', ...excludeSpecs]);
+    const trackedExcluded = subtract(trackedFull, trackedKept);
+    const fullLs = gitRun(['ls-files', '--others', '--exclude-standard', '-z'], {});
+    const fullUntracked = fullLs.split('\0').filter(Boolean)
+      .filter((f) => !(excludeAbs && normCmp(f) === excludeAbs));
+    const keptUntracked = new Set(untracked);
+    const untrackedExcluded = fullUntracked.filter((f) => !keptUntracked.has(f));
+    excludedFiles = trackedExcluded.concat(untrackedExcluded);
+  }
+  return { diffText: parts.join('\n'), excludedFiles };
 }
 
 // 既定 base (--base 未指定・コミット済み差分モード) のとき、ローカル main が stale だと
@@ -407,12 +568,77 @@ function resolveMaxDiffKb(opts, env) {
   return 256;
 }
 
+// 巨大なファイル差分を stat 要約に置換する純関数。
+// diffText を `diff --git ` 行でファイル単位チャンクに分割し、チャンクのバイトサイズ (utf8) が
+// maxFileDiffKb KB を超えたら、本文を「diff --git 行 + 1 行の省略注記」に置き換える。
+// maxFileDiffKb が 0 なら無置換でそのまま返す。
+// 戻り値: { text, replacedCount } (置換が起きたチャンク数)。
+function summarizeLargeFileDiffs(diffText, maxFileDiffKb) {
+  if (!maxFileDiffKb || maxFileDiffKb <= 0) return { text: diffText, replacedCount: 0 };
+  if (!diffText) return { text: diffText, replacedCount: 0 };
+  const limitBytes = maxFileDiffKb * 1024;
+  // `diff --git ` 行の直前で分割する。先頭に `diff --git ` 以外の前置きがあれば
+  // それは独立した先頭チャンク (置換対象外) として保持する。
+  const lines = diffText.split('\n');
+  const chunks = [];
+  let current = null;
+  for (const line of lines) {
+    if (line.startsWith('diff --git ')) {
+      if (current != null) chunks.push(current);
+      current = [line];
+    } else if (current == null) {
+      // `diff --git ` より前の前置き行 (通常は無いが堅牢化のため)。
+      current = [line];
+      // この先頭チャンクは diff ヘッダを持たないので置換対象にしない印を付ける。
+      current.__preamble = true;
+    } else {
+      current.push(line);
+    }
+  }
+  if (current != null) chunks.push(current);
+
+  let replacedCount = 0;
+  const outChunks = chunks.map((chunkLines) => {
+    const chunkText = chunkLines.join('\n');
+    if (chunkLines.__preamble) return chunkText; // 前置きは置換しない。
+    const header = chunkLines[0];
+    if (!header || !header.startsWith('diff --git ')) return chunkText;
+    const bytes = Buffer.byteLength(chunkText, 'utf8');
+    if (bytes <= limitBytes) return chunkText;
+    // 追加/削除行数を数える (+++ / --- のヘッダ行は除く)。
+    let added = 0;
+    let removed = 0;
+    for (const l of chunkLines) {
+      if (l.startsWith('+') && !l.startsWith('+++')) added++;
+      else if (l.startsWith('-') && !l.startsWith('---')) removed++;
+    }
+    replacedCount++;
+    const kb = (bytes / 1024).toFixed(1);
+    return `${header}\n(この差分は ${kb}KB・追加 ${added} 行 / 削除 ${removed} 行のため本文を省略。レビューに必要なら作業ツリーのファイルを個別に読むこと)`;
+  });
+  return { text: outChunks.join('\n'), replacedCount };
+}
+
+// ファイル単位の差分置換しきい値 (KB) を解決する。優先順:
+//   1. CLI フラグ --max-file-diff-kb (opts.maxFileDiffKb が数値なら採用)
+//   2. 環境変数 CROSS_REVIEW_MAX_FILE_DIFF_KB (非負整数として解釈できれば採用)
+//   3. 既定 64
+// 戻り値 0 は「置換無効」を表す。
+function resolveMaxFileDiffKb(opts, env) {
+  if (opts && typeof opts.maxFileDiffKb === 'number') return opts.maxFileDiffKb;
+  const e = env || process.env;
+  const fromEnv = parseNonNegativeInt(e.CROSS_REVIEW_MAX_FILE_DIFF_KB);
+  if (fromEnv != null) return fromEnv;
+  return 64;
+}
+
 // レビュアーへ渡すプロンプト (観点 + スコープ + モード別指示 + 申し送り + 差分本文)。
 // codex / claude / subagent 共通 (codex/claude は stdin、subagent は stdout へ出す)。
 // opts.fix で「修正まで依頼」と「レビューのみ」を切り替える。
 // checklist は loadChecklist() の戻り値 (未指定/空なら GENERIC_CHECKLIST を使う)。
 // instructions は --instructions の本文 (任意)。観点とは別に「重点指摘」として添える。
-function buildReviewPrompt(diffText, opts, checklist, instructions) {
+// excludedFiles は「除外したが変更のあったファイル名一覧」(任意)。1 件以上あればプロンプトに枠を足す。
+function buildReviewPrompt(diffText, opts, checklist, instructions, excludedFiles) {
   const reviewPoints = (checklist != null && String(checklist).trim())
     ? checklist
     : GENERIC_CHECKLIST;
@@ -423,12 +649,23 @@ function buildReviewPrompt(diffText, opts, checklist, instructions) {
     reviewPoints,
     '',
     `レビュー対象: ${scope}`,
-    '必要なら作業ディレクトリのファイルを読んで文脈を補ってください。',
+    // 同一内容に二重にトークンを使わせないため、差分の再取得を抑止する枠付け。
+    '差分本文はこのプロンプトに全文含まれている。git diff やファイル全文の再取得はしないこと（同じ内容に二重にトークンを使わない）。',
+    '文脈の補完は、差分の周辺コード・呼び出し元・関連定義の確認など必要最小限に限定すること。',
+    '（除外・省略されたファイルを読む必要があると判断した場合はこの限りではない）',
     '',
     opts.fix ? FIX_INSTRUCTION : REVIEW_ONLY_INSTRUCTION,
   ];
   if (instructions != null && String(instructions).trim()) {
     parts.push('', REVIEWER_NOTES_HEADER, String(instructions).trim());
+  }
+  if (Array.isArray(excludedFiles) && excludedFiles.length > 0) {
+    parts.push(
+      '',
+      '【レビュー対象外（除外済み）の変更ファイル】',
+      '以下は生成物・ロックファイル等として差分本文から除外した。必要と判断した場合のみ個別に読むこと:',
+      excludedFiles.map((f) => `- ${f}`).join('\n'),
+    );
   }
   parts.push('', '--- DIFF START ---', diffText, '--- DIFF END ---');
   return parts.join('\n');
@@ -561,11 +798,22 @@ function runReview(opts, deps = {}) {
   // (ローカル main が stale だと無関係な差分が混入するため)。opts を直接書き換えず、
   // 解決後の base を以降のスコープ表記・差分収集で使う。
   const resolvedBaseRef = resolveBaseRef(opts, gitRun, deps);
-  const resolvedOpts = resolvedBaseRef === opts.baseRef ? opts : { ...opts, baseRef: resolvedBaseRef };
+  // 除外パススペックを解決する (--no-exclude 指定時は無効化)。観点と同じ流儀で .cross-review-ignore を読む。
+  const excludePatterns = opts.noExclude
+    ? []
+    : (deps.ignorePatterns != null ? deps.ignorePatterns : loadIgnorePatterns(deps));
+  const excludePathspecs = toExcludePathspecs(excludePatterns);
+  const baseChanged = resolvedBaseRef !== opts.baseRef;
+  const resolvedOpts = (baseChanged || excludePathspecs.length > 0)
+    ? { ...opts, baseRef: resolvedBaseRef, excludePathspecs }
+    : opts;
   // どのレビュアー (codex / claude / subagent) も自前で差分を取り出し、プロンプトへ同梱する (untracked も含める)。
   let diffText;
+  let excludedFiles = [];
   try {
-    diffText = collectReviewDiff(resolvedOpts, gitRun).trim();
+    const collected = collectReviewDiff(resolvedOpts, gitRun);
+    diffText = collected.diffText.trim();
+    excludedFiles = collected.excludedFiles || [];
   } catch (err) {
     writeErr(`${(err && err.message) || 'git の実行に失敗しました'}\n`);
     process.exitCode = 1;
@@ -576,6 +824,13 @@ function runReview(opts, deps = {}) {
     // stderr 側へ出す (stdout は空のまま保ち、空通知をプロンプトと誤認させない)。codex/claude は従来どおり stdout。
     (opts.reviewer === 'subagent' ? writeErr : writeOut)('レビュー対象の差分がありません。\n');
     return null;
+  }
+  // 巨大なファイル差分を stat 要約へ置換する (全体ガードの前に行う = 置換で縮んだ分はガードに掛からない)。
+  const maxFileDiffKb = resolveMaxFileDiffKb(opts, deps.env);
+  const summarized = summarizeLargeFileDiffs(diffText, maxFileDiffKb);
+  diffText = summarized.text;
+  if (summarized.replacedCount > 0) {
+    writeErr(`[cross-review] 大きなファイル差分 ${summarized.replacedCount} 件を要約に置換しました (--max-file-diff-kb で調整可)\n`);
   }
   // 差分サイズを常に表示し、閾値超過ならレビュアーを起動せず中断する (トークン浪費・stale base 検知)。
   const diffBytes = Buffer.byteLength(diffText, 'utf8');
@@ -591,7 +846,7 @@ function runReview(opts, deps = {}) {
     process.exitCode = 1;
     return null;
   }
-  const prompt = buildReviewPrompt(diffText, resolvedOpts, checklist, instructions);
+  const prompt = buildReviewPrompt(diffText, resolvedOpts, checklist, instructions, excludedFiles);
   // reviewerInvocation も解決後の opts で揃える (現状 baseRef は参照しないが、プロンプトの
   // スコープ表記と起動引数が将来食い違わないよう、解決後の値だけを下流に渡す)。
   const inv = reviewerInvocation(resolvedOpts);
@@ -627,12 +882,18 @@ module.exports = {
   collectReviewDiff,
   resolveBaseRef,
   resolveMaxDiffKb,
+  resolveMaxFileDiffKb,
+  summarizeLargeFileDiffs,
   buildReviewPrompt,
   runReview,
   loadChecklist,
   loadInstructions,
+  loadIgnorePatterns,
+  toExcludePathspecs,
   resolveReviewerCommandForSpawn,
   CHECKLIST_FILENAME,
+  IGNORE_FILENAME,
+  DEFAULT_EXCLUDE_PATTERNS,
   GENERIC_CHECKLIST,
   REVIEW_ONLY_INSTRUCTION,
   FIX_INSTRUCTION,
