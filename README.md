@@ -113,7 +113,10 @@ CLI は起動できても、ネットワーク/API 接続が許可されずレ�
 | ファイル | 役割 | コピー時の調整 |
 |----------|------|----------------|
 | `tools/cross-review.js` | CLI 本体 | なし（そのまま） |
+| `tools/cross-review.sync.js` | 同期スクリプト本体（上流から取り込む / ドリフト検査） | なし（そのまま）。手動コピーの代わりに使える（後述「同期スクリプトで更新する」） |
+| `tools/cross-review.sync.example.json` | 同期マニフェストのテンプレート | なし。**コピーして `tools/cross-review.sync.json` を作り、そちらを編集する** |
 | `tests/cross-review.test.js`（任意） | 本体のユニットテスト（vitest） | **取り込み先が vitest のときだけ同梱**。require のパスをコピー先のテスト配置に合わせる（engine は upstream のテストが担保） |
+| `tests/cross-review.sync.test.js`（任意） | 同期スクリプトのユニットテスト（vitest） | **取り込み先が vitest のときだけ同梱**。require のパスをコピー先のテスト配置に合わせる |
 | `.cross-review.example.md` | 観点のテンプレート | なし。**コピーして `.cross-review.md` を作り、そちらを編集する** |
 | `docs/cross-review.md` | 相互レビューの手順書（汎用） | なし（そのまま）。ファイルは名前で参照していて、置き場所が変わっても壊れない |
 
@@ -124,16 +127,50 @@ CLI は起動できても、ネットワーク/API 接続が許可されずレ�
 | `CLAUDE.md` / `AGENTS.md`（あれば） | そのリポジトリの運用メモ。手順の詳細はコピーした `docs/cross-review.md` へリンクする |
 | そのプロジェクト用の doc（任意） | 手順書に書かない、プロジェクト固有のメモ（検証コマンド・CI・例 など） |
 | `tools/package.json` | `tools/*.js` を CommonJS にする設定（`"type": "commonjs"`）。そのリポジトリのツール依存もここに足す |
-| コピーを自動化するスクリプト（任意） | コピーし直しや require パス調整を自動化する同期スクリプトなど。コピー先が用意して持つ（このリポジトリには入れない。例: コピー先の `tools/sync-*.js`） |
+| `tools/cross-review.sync.json` | そのプロジェクトの同期マニフェスト（`tools/cross-review.sync.example.json` を雛形に作る）。取り込むファイルの `from`/`to`・取り込み元 `repo`/`ref` を書く。`lastSyncedCommit` は同期時に自動で更新される（どの版から取り込んだかの記録） |
 
 ### 手順
 1. 上の「そのままコピーするファイル」を全部コピー先へコピーする（`tools/*.js` は CommonJS なので、コピー先のルート `package.json` が `"type": "module"` のときは `tools/package.json` に `"type": "commonjs"` を置く）。  
    テスト `tests/cross-review.test.js` は任意で、取り込み先が vitest のときだけ require パスを合わせて同梱する。  
 2. `.cross-review.example.md` を `.cross-review.md` にコピーし、そのプロジェクトで壊れやすい注意点を書く。  
 3. ルート `package.json` の `scripts` に `review:codex` / `review:codex:fix` / `review:claude` を足す。  
+   同期スクリプトを使うなら `sync` / `sync:check` も足す（後述「同期スクリプトで更新する」）。  
 4. `codex` / `claude` の CLI を PATH に通す（CLI を起動できないときは `subagent` モードを使う）。  
 5. 更新するときは、コピーするファイルを上書きでコピーし直すだけ。  
-   自分で編集するファイルは触らない。
+   自分で編集するファイルは触らない。  
+   毎回手でコピーする代わりに、後述の**同期スクリプト**でこの上書きコピーを自動化できる。
+
+### 同期スクリプトで更新する（手動コピーの代わり）
+
+「そのままコピーするファイル」を毎回手で上書きする代わりに、`tools/cross-review.sync.js` でまとめて取り込めます。  
+どのファイルをどこへ取り込むかは `tools/cross-review.sync.json`（マニフェスト）に書きます。  
+`tools/cross-review.sync.example.json` を雛形にコピーして編集してください。
+
+1. `tools/cross-review.sync.example.json` を `tools/cross-review.sync.json` にコピーする。  
+2. `upstream.repo`（このツールの git URL）と `upstream.ref`（取り込む版。既定 `main`）を書く。  
+3. `files` に取り込むファイルを `from`（上流相対）/ `to`（自分のプロジェクト相対）で並べる。  
+   テストのように require パスを取り込み先へ合わせたいときは `replace`（文字列の全置換）を足す。  
+4. ルート `package.json` の `scripts` に登録する（任意。コマンド名は自由）:
+
+   ```json
+   "scripts": {
+     "sync": "node tools/cross-review.sync.js",
+     "sync:check": "node tools/cross-review.sync.js --check"
+   }
+   ```
+
+5. 取り込み・検査を実行する:
+
+   ```bash
+   node tools/cross-review.sync.js            # 上流から取り込む（差分のあるファイルだけ上書き）
+   node tools/cross-review.sync.js --check    # ドリフト検査のみ（書き込まない。差分があれば exit 1 → CI 向け）
+   node tools/cross-review.sync.js --dry-run  # 何が変わるかだけ表示（書き込まない）
+   node tools/cross-review.sync.js --ref v1.2.3   # 取り込む版をマニフェストより優先
+   ```
+
+取り込み元の取得は **git のみ**で行います（`upstream.ref` を一時ディレクトリへ shallow fetch）。  
+取り込んだ実コミットは `lastSyncedCommit` に記録され、どの版から取り込んだかが残ります。  
+詳細・マニフェストの形は [docs/cross-review.md](docs/cross-review.md) の「同期スクリプト」節を参照してください。
 
 > **メモ（末尾空白）**: `docs/cross-review.md` などは Markdown のハード改行（行末スペース 2 つ）を使います。
 > `git diff --check` や CI で末尾空白を弾く場合は、コピー先の `.gitattributes` に
@@ -143,7 +180,7 @@ CLI は起動できても、ネットワーク/API 接続が許可されずレ�
 
 ```bash
 npm install        # devDependencies (vitest / eslint) を入れる
-npm test           # ユニットテスト (引数解析・差分生成・プロンプト生成・観点解決・申し送り注入)
+npm test           # ユニットテスト (引数解析・差分生成・プロンプト生成・観点解決・申し送り注入・同期スクリプト)
 npm run lint       # ESLint
 ```
 
