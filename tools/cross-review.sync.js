@@ -138,6 +138,17 @@ function validateManifest(manifest, refOverride) {
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
     throw new Error('マニフェストはオブジェクトである必要があります');
   }
+  // 旧形式 ({source, ref, commit}) の検出: upstream / files を持たず source / commit があるなら、
+  // 取り込み先が独自 sync 機構のレガシーマニフェストを同名で置いている可能性が高い。汎用の
+  // 「upstream がありません」より具体的に、新形式への移行手順を促す (移行初回の取り込みを滑らかに)。
+  if (manifest.upstream === undefined && manifest.files === undefined
+      && (manifest.source !== undefined || manifest.commit !== undefined)) {
+    throw new Error(
+      'マニフェストが旧形式 ({source, ref, commit}) のようです。'
+      + ' 新形式 ({upstream:{repo,ref}, files:[...]}) へ移行してください'
+      + ' (雛形は cross-review.sync.example.json)。',
+    );
+  }
   const up = manifest.upstream;
   if (!up || typeof up !== 'object') {
     throw new Error('マニフェストに upstream オブジェクトがありません');
