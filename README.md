@@ -129,9 +129,12 @@ docs/generated/*.md
 |----------|------|----------------|
 | `tools/cross-review.js` | CLI 本体 | なし（そのまま） |
 | `tools/cross-review.sync.js` | 同期スクリプト本体（上流から取り込む / ドリフト検査） | なし（そのまま）。手動コピーの代わりに使える（後述「同期スクリプトで更新する」） |
+| `tools/cross-review.sync-all.js`（任意） | 一括同期ツール（作業ルート配下の導入プロジェクトをまとめて同期） | なし（そのまま）。`/Develop` などをまとめて更新する人だけ入れればよい（後述「複数プロジェクトへ一括で反映する」） |
 | `tools/cross-review.sync.example.json` | 同期マニフェストのテンプレート | なし。**コピーして `tools/cross-review.sync.json` を作り、そちらを編集する** |
+| `.claude/skills/cross-review/SKILL.md`（任意） | 相互レビューの実行手順（Claude Code スキル・汎用） | なし（そのまま）。Claude Code を使うなら入れる。プロジェクト固有の運用は `.cross-review.md` と自分の doc に分け、スキルには書かない |
 | `tests/cross-review.test.js`（任意） | 本体のユニットテスト（vitest） | **取り込み先が vitest のときだけ同梱**。require のパスをコピー先のテスト配置に合わせる（engine は upstream のテストが担保） |
 | `tests/cross-review.sync.test.js`（任意） | 同期スクリプトのユニットテスト（vitest） | **取り込み先が vitest のときだけ同梱**。require のパスをコピー先のテスト配置に合わせる |
+| `tests/cross-review.sync-all.test.js`（任意） | 一括同期ツールのユニットテスト（vitest） | **`cross-review.sync-all.js` を入れ、かつ vitest のときだけ同梱**。require のパスを合わせる |
 | `.cross-review.example.md` | 観点のテンプレート | なし。**コピーして `.cross-review.md` を作り、そちらを編集する** |
 | `docs/cross-review.md` | 相互レビューの手順書（汎用） | なし（そのまま）。ファイルは名前で参照していて、置き場所が変わっても壊れない |
 
@@ -150,8 +153,10 @@ docs/generated/*.md
 2. `.cross-review.example.md` を `.cross-review.md` にコピーし、そのプロジェクトで壊れやすい注意点を書く。  
 3. ルート `package.json` の `scripts` に `review:codex` / `review:codex:fix` / `review:claude` を足す。  
    同期スクリプトを使うなら `sync` / `sync:check` も足す（後述「同期スクリプトで更新する」）。  
-4. `codex` / `claude` の CLI を PATH に通す（CLI を起動できないときは `subagent` モードを使う）。  
-5. 更新するときは、コピーするファイルを上書きでコピーし直すだけ。  
+4. Claude Code を使うなら `.claude/skills/cross-review/SKILL.md` をコピーする（実行手順スキル・汎用）。  
+   このスキルは vendored（上書き更新の対象）なので**直接編集せず**、プロジェクト固有の運用（検証コマンド・CI・同期スクリプト名など）は `.cross-review.md` や自分の doc 側に書く。  
+5. `codex` / `claude` の CLI を PATH に通す（CLI を起動できないときは `subagent` モードを使う）。  
+6. 更新するときは、コピーするファイルを上書きでコピーし直すだけ。  
    自分で編集するファイルは触らない。  
    毎回手でコピーする代わりに、後述の**同期スクリプト**でこの上書きコピーを自動化できる。
 
@@ -190,6 +195,29 @@ docs/generated/*.md
 > **メモ（末尾空白）**: `docs/cross-review.md` などは Markdown のハード改行（行末スペース 2 つ）を使います。
 > `git diff --check` や CI で末尾空白を弾く場合は、コピー先の `.gitattributes` に
 > `*.md whitespace=-blank-at-eol` を足して許容してください（このリポジトリにも同じ設定があります）。
+
+### 複数プロジェクトへ一括で反映する（sync-all）
+
+導入プロジェクトが増えると、上流を更新するたびに 1 リポずつ `cross-review.sync.js` を回すのは手間です。  
+`tools/cross-review.sync-all.js` は、ローカルの作業ルート（例: `/Develop`）配下を走査して、**同期マニフェスト `cross-review.sync.json` を持つディレクトリ＝導入プロジェクト**を自動判定し、まとめて同期します。
+
+```bash
+node tools/cross-review.sync-all.js --root /Develop --list    # 検出したプロジェクトを列挙するだけ
+node tools/cross-review.sync-all.js --root /Develop --check   # 各プロジェクトをドリフト検査（書き込まない。差分があれば exit 1）
+node tools/cross-review.sync-all.js --root /Develop --dry-run # 各プロジェクトで何が変わるかだけ表示
+node tools/cross-review.sync-all.js --root /Develop           # 各プロジェクトを一括同期（上書き更新）
+node tools/cross-review.sync-all.js --root /Develop --ref v1.2.3  # 取り込む上流 ref を全プロジェクト共通で上書き
+```
+
+- 各プロジェクトの同期は、そのプロジェクトに同梱された版ではなく、**この checkout の `cross-review.sync.js`（最新ロジック）を再利用**して回します。導入先の sync スクリプトが古くても最新の挙動で反映できます。取り込むファイルや上流 ref は各プロジェクトの `cross-review.sync.json` を尊重します（`--ref` で一時的に上書き可）。
+- **1 プロジェクトの失敗（マニフェスト不正・上流取得失敗など）で全体は止まりません**。各プロジェクトを独立に回し、最後に「更新 / 変更なし / ドリフト / エラー」の集計を出します。終了コードは「いずれかが失敗」または「`--check` でいずれかにドリフト」のとき 1（CI 向け）。
+- 走査の最大深さは `--depth <n>`（既定 4）で調整します。`node_modules` / `.git` / 隠しディレクトリは走査しません。
+- このリポジトリの `package.json` には `npm run sync:all` / `npm run sync:all:check` を用意しています（`--root` を付けて使います）。
+
+```bash
+npm run sync:all -- --root /Develop          # 一括同期
+npm run sync:all:check -- --root /Develop     # 一括ドリフト検査（CI 向け）
+```
 
 ## 開発
 

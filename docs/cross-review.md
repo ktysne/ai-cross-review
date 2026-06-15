@@ -379,8 +379,10 @@ node tools/cross-review.js codex --no-exclude            # 既定除外も含め
   "files": [
     { "from": "tools/cross-review.js", "to": "tools/cross-review.js" },
     { "from": "tools/cross-review.sync.js", "to": "tools/cross-review.sync.js" },
+    { "from": "tools/cross-review.sync-all.js", "to": "tools/cross-review.sync-all.js" },
     { "from": "docs/cross-review.md", "to": "docs/cross-review.md" },
     { "from": ".cross-review.example.md", "to": ".cross-review.example.md" },
+    { "from": ".claude/skills/cross-review/SKILL.md", "to": ".claude/skills/cross-review/SKILL.md" },
     {
       "from": "tests/cross-review.test.js",
       "to": "tests/tools/cross-review.test.js",
@@ -390,9 +392,32 @@ node tools/cross-review.js codex --no-exclude            # 既定除外も含め
 }
 ```
 
-上の `files` は代表例です。配布物一式の雛形は `tools/cross-review.sync.example.json` にあり、こちらが正本です。  
+上の `files` は代表例です。配布物一式の雛形は `tools/cross-review.sync.example.json` にあり、こちらが正本です（CLI 本体・同期スクリプト・一括同期ツール `cross-review.sync-all.js`・手順書・観点テンプレート・**Claude Code スキル `.claude/skills/cross-review/SKILL.md`**・各テストを含む）。  
 このマニフェスト自体は**取り込み先で編集するファイル**です（上書きコピーの対象に含めない）。  
 `.cross-review.md`（観点）や `CLAUDE.md` / `AGENTS.md` などプロジェクト固有のファイルは `files` に入れません（上書きで消えます）。
+
+`.claude/skills/cross-review/SKILL.md`（相互レビューの実行手順スキル）も vendored（上書き更新の対象）です。  
+スキルにはプロジェクト固有の運用（検証コマンド・CI・同期スクリプト名など）を書かず、それらは `.cross-review.md` や各リポの doc 側へ分離します。こうすると、上流のスキル更新が取り込み先のカスタマイズと干渉しません。
+
+## 複数プロジェクトへ一括反映（tools/cross-review.sync-all.js）
+
+導入プロジェクトが増えると、上流を更新するたびに 1 リポずつ同期するのは手間です。  
+`tools/cross-review.sync-all.js` は、ローカルの作業ルート（例: `/Develop`）配下を走査し、**同期マニフェスト `cross-review.sync.json` を持つディレクトリ＝導入プロジェクト**を自動判定して、まとめて同期します。
+
+- **判定**: `cross-review.sync.json` の存在を単一マーカーにします（同期に必須のファイルなので誤検出しにくい）。慣例どおり `tools/cross-review.sync.json` に置かれている前提ですが、ルート直下に置かれていても拾います。
+- **同期ロジック**: 各プロジェクトに同梱された版ではなく、**この checkout の `cross-review.sync.js`（`runSync`）を再利用**して回します。導入先の sync スクリプトが古くても最新ロジックで一括反映できます。取り込むファイル・上流 ref は各プロジェクトのマニフェストを尊重します（`--ref` で一時上書き可）。
+- **独立実行**: 1 プロジェクトの失敗（マニフェスト不正・上流取得失敗など）で全体を止めません。各プロジェクトを独立に回し、最後に「更新 / 変更なし / ドリフト / エラー」を集計します。終了コードは「いずれかが失敗」または「`--check` でいずれかにドリフト」のとき **1**（CI 向け）。
+- **走査**: `--depth <n>`（既定 4）で最大深さを調整。`node_modules` / `.git` / 隠しディレクトリはたどりません。
+
+```bash
+node tools/cross-review.sync-all.js --root /Develop --list    # 検出したプロジェクトを列挙するだけ
+node tools/cross-review.sync-all.js --root /Develop --check   # 各プロジェクトをドリフト検査 (書き込まない)
+node tools/cross-review.sync-all.js --root /Develop --dry-run # 各プロジェクトで何が変わるかだけ表示
+node tools/cross-review.sync-all.js --root /Develop           # 各プロジェクトを一括同期 (上書き更新)
+node tools/cross-review.sync-all.js --root /Develop --ref v1.2.3  # 取り込む ref を全プロジェクト共通で上書き
+```
+
+> 引数解析・プロジェクト走査・結果分類・集計・一括同期の配線は `tests/cross-review.sync-all.test.js`（vitest）が担保します（取り込み先では任意。一括同期ツールを入れ、かつ vitest を使うときだけ同梱）。
 
 ```bash
 node tools/cross-review.sync.js            # 上流から取り込む（差分のあるファイルだけ上書き）
