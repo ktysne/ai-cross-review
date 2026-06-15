@@ -157,14 +157,24 @@ function findManifests(root, maxDepth, deps = {}) {
 }
 
 // マニフェストの内容が cross-review.sync.js 用 (upstream / files を持つ) かを判定する。
-// JSON でない / upstream も files も無いもの (旧 {source,ref,commit} の独自 sync 来歴や、別用途で
-// たまたま同名のファイル) は同期対象外として扱い、一括同期では skip する (ハードエラーにしない)。
-function isSyncManifestContent(raw) {
-  if (raw == null) return false;
+// マニフェスト内容を 3 通りに分類する:
+//   'ok'      : upstream / files を持つ同期対象マニフェスト。
+//   'skip'    : valid JSON だが新スキーマでない (旧 {source,ref,commit} の独自 sync 来歴や、別用途で
+//               たまたま同名のファイル)。一括同期では対象外として skip する (ハードエラーにしない)。
+//   'invalid' : 読めない (IO/権限エラー = raw が null) / JSON 構文エラー (破損)。正式導入先の設定破損を
+//               skip で握り潰すと CI の sync-all --check で検出できなくなるため、error/exit 1 に分ける。
+function classifyManifestRaw(raw) {
+  if (raw == null) return 'invalid';                          // 読めない (read error)
   let obj;
-  try { obj = JSON.parse(raw); } catch { return false; }
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
-  return obj.upstream !== undefined || obj.files !== undefined;
+  try { obj = JSON.parse(raw); } catch { return 'invalid'; }  // JSON 構文エラー (破損)
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return 'skip'; // valid JSON だが新スキーマでない
+  return (obj.upstream !== undefined || obj.files !== undefined) ? 'ok' : 'skip';
+}
+
+// 後方互換: 「同期対象 (ok) か」を真偽で返す薄いラッパ。破損 (invalid) と対象外 (skip) は
+// どちらも false になる点に注意 (両者の区別が要る runAll では classifyManifestRaw を直接使う)。
+function isSyncManifestContent(raw) {
+  return classifyManifestRaw(raw) === 'ok';
 }
 
 // runSync の戻り値 (result) と捕捉した exit コードから、表示用のステータスを決める。
@@ -283,9 +293,17 @@ function runAll(opts, deps = {}) {
   let anyDrift = false;
   for (const mp of manifests) {
     const project = projectRootForManifest(mp);
+    const kind = classifyManifestRaw(readManifest(mp));
+    // 破損 (読めない / JSON 構文エラー) は正式導入先の設定崩れなので skip せず error/exit 1 にする
+    // (CI の sync-all --check で検出できるようにする)。1 件の error で他プロジェクトは止めない。
+    if (kind === 'invalid') {
+      items.push({ project, status: 'error', changed: 0, message: `${SYNC_MANIFEST_FILENAME} を読み込めない、または JSON として不正です` });
+      anyError = true;
+      continue;
+    }
     // upstream / files を持たないマニフェスト (旧 {source,ref,commit} の独自 sync 来歴や別用途の
     // 同名ファイル) は同期対象外として skip する。1 件の非準拠で全体を失敗させない。
-    if (!isSyncManifestContent(readManifest(mp))) {
+    if (kind === 'skip') {
       items.push({ project, status: 'skipped', changed: 0, message: 'upstream/files を持たないため同期対象外' });
       continue;
     }
@@ -315,6 +333,7 @@ module.exports = {
   parseArgs,
   projectRootForManifest,
   findManifests,
+  classifyManifestRaw,
   isSyncManifestContent,
   classifyResult,
   syncOne,

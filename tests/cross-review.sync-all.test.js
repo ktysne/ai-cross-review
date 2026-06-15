@@ -10,6 +10,7 @@ const {
   parseArgs,
   projectRootForManifest,
   findManifests,
+  classifyManifestRaw,
   isSyncManifestContent,
   classifyResult,
   errorMessageOf,
@@ -118,6 +119,25 @@ describe('findManifests', () => {
 
   it('読めないディレクトリはスキップして落ちない', () => {
     expect(() => findManifests('/missing', 2, { listDir: () => { throw new Error('ENOENT'); } })).not.toThrow();
+  });
+});
+
+describe('classifyManifestRaw', () => {
+  it('upstream または files を持てば ok', () => {
+    expect(classifyManifestRaw('{"upstream":{"repo":"x","ref":"main"}}')).toBe('ok');
+    expect(classifyManifestRaw('{"files":[]}')).toBe('ok');
+  });
+  it('旧形式 {source,ref,commit} は skip (valid JSON だが新スキーマでない)', () => {
+    expect(classifyManifestRaw('{"source":"o/r","ref":"main","commit":"abc"}')).toBe('skip');
+  });
+  it('valid JSON だが object でない (配列 / プリミティブ / null) は skip', () => {
+    expect(classifyManifestRaw('[]')).toBe('skip');
+    expect(classifyManifestRaw('42')).toBe('skip');
+    expect(classifyManifestRaw('null')).toBe('skip');
+  });
+  it('読めない (raw=null) / JSON 構文エラー (破損) は invalid', () => {
+    expect(classifyManifestRaw(null)).toBe('invalid');
+    expect(classifyManifestRaw('{ not json')).toBe('invalid');
   });
 });
 
@@ -294,5 +314,37 @@ describe('runAll', () => {
     const r = runAll({ root: '/r', depth: 4, mode: 'check' }, deps);
     expect(r.exitCode).toBe(0);
     expect(r.items[0].status).toBe('skipped');
+  });
+
+  it('破損マニフェスト (JSON 構文エラー) は skip せず error・exit 1', () => {
+    const sink = { out: [], err: [] };
+    const manifests = ['/r/broken/tools/cross-review.sync.json'];
+    const deps = mkDeps(manifests, {}, sink, () => '{ not json');
+    deps.syncOne = () => { throw new Error('破損で syncOne が呼ばれた'); };
+    const r = runAll({ root: '/r', depth: 4, mode: 'sync', dryRun: false }, deps);
+    expect(r.exitCode).toBe(1);
+    expect(r.items[0].status).toBe('error');
+  });
+
+  it('読めないマニフェスト (raw=null) は skip せず error・exit 1', () => {
+    const sink = { out: [], err: [] };
+    const manifests = ['/r/unreadable/tools/cross-review.sync.json'];
+    const deps = mkDeps(manifests, {}, sink, () => null);
+    deps.syncOne = () => { throw new Error('読めないのに syncOne が呼ばれた'); };
+    const r = runAll({ root: '/r', depth: 4, mode: 'check' }, deps);
+    expect(r.exitCode).toBe(1);
+    expect(r.items[0].status).toBe('error');
+  });
+
+  it('準拠と破損が混在: 準拠は同期しつつ破損は error・全体 exit 1', () => {
+    const sink = { out: [], err: [] };
+    const manifests = ['/r/app/tools/cross-review.sync.json', '/r/broken/tools/cross-review.sync.json'];
+    const syncResults = {
+      '/r/app/tools/cross-review.sync.json': { result: { results: [{ status: 'update' }], wrote: ['x'], drift: false }, code: 0 },
+    };
+    const readManifest = (mp) => (mp.includes('broken') ? '{ not json' : CONFORMING_MANIFEST);
+    const r = runAll({ root: '/r', depth: 4, mode: 'sync', dryRun: false }, mkDeps(manifests, syncResults, sink, readManifest));
+    expect(r.exitCode).toBe(1);
+    expect(r.items.map((i) => i.status)).toEqual(['updated', 'error']);
   });
 });
