@@ -13,11 +13,18 @@ git の差分をそのままレビュアー CLI（`codex` / `claude`）へ渡し
 - **追加インストール不要**: 本体（`tools/cross-review.js`）は Node 標準 API だけで動きます。  
   テストと lint のときだけ devDependencies を使います。  
 - **git の差分でやり取り**: ブランチとベースの差分、または未コミットの差分（未追跡ファイルを含む）を渡します。  
+  チャットの中身を手でコピーする必要はありません。  
 - **既定は安全側**: レビューだけのときは `codex` を read-only で起動し、ファイルを書き換えさせません。  
   `--fix` を付けたときだけ workspace-write で起動し、見つかった問題を直接修正させます。  
+- **CLI を起動できない環境にも対応**: クラウド / リモート実行で `codex` / `claude` CLI を起動できない（または API 接続が通らない）ときは、`subagent` モードがレビュー用プロンプトを stdout に出力します。  
+  それを Claude の客観サブエージェントへ渡せば、外部 CLI 無しで同じ観点のレビューを回せます（後述「CLI を起動できない環境（`subagent` モード）」）。  
+- **トークンを節約**: ロックファイル・生成物（`package-lock.json` / `*.min.js` / `*.map` など）を既定で差分から除外し、巨大なファイル差分は stat 要約に置換します。  
+  既定の比較先は `origin/main` を優先解決し、差分サイズが閾値を超えたらレビュアーを起動せず中断します（stale なローカル `main` による差分の肥大を防ぎます）。  
 - **観点を分離**: プロジェクト固有のレビュー観点は `.cross-review.md` に分けてあります。  
   本体は完全に汎用です。  
-  導入するときは、決まったファイル一式をコピーし、`.cross-review.md` だけを自分のプロジェクト向けに編集します。
+  導入するときは、決まったファイル一式をコピーし、`.cross-review.md` だけを自分のプロジェクト向けに編集します。  
+- **配布と更新を仕組み化**: 同期スクリプト（`tools/cross-review.sync.js`）と一括同期ツール（`tools/cross-review.sync-all.js`）で、上流の更新を導入先へまとめて反映できます。  
+  Claude Code 用の実行手順スキル（`.claude/skills/cross-review/SKILL.md`）も同梱します。
 
 ## 前提
 
@@ -230,7 +237,7 @@ npm run sync:all:check -- --root /Develop     # 一括ドリフト検査（CI �
 
 ```bash
 npm install        # devDependencies (vitest / eslint) を入れる
-npm test           # ユニットテスト (引数解析・差分生成・プロンプト生成・観点解決・申し送り注入・同期スクリプト)
+npm test           # ユニットテスト (引数解析・差分生成・プロンプト生成・観点解決・申し送り注入・除外/要約・同期スクリプト・一括同期)
 npm run lint       # ESLint
 ```
 
