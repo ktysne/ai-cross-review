@@ -156,6 +156,17 @@ function findManifests(root, maxDepth, deps = {}) {
   return found.sort();
 }
 
+// マニフェストの内容が cross-review.sync.js 用 (upstream / files を持つ) かを判定する。
+// JSON でない / upstream も files も無いもの (旧 {source,ref,commit} の独自 sync 来歴や、別用途で
+// たまたま同名のファイル) は同期対象外として扱い、一括同期では skip する (ハードエラーにしない)。
+function isSyncManifestContent(raw) {
+  if (raw == null) return false;
+  let obj;
+  try { obj = JSON.parse(raw); } catch { return false; }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+  return obj.upstream !== undefined || obj.files !== undefined;
+}
+
 // runSync の戻り値 (result) と捕捉した exit コードから、表示用のステータスを決める。
 //   error        : マニフェスト不正・上流取得失敗・例外 (result が null か code===2、または threw)
 //   drift        : --check で上流と差分あり
@@ -210,6 +221,7 @@ const STATUS_LABEL = {
   updated: '更新',
   'would-update': '更新予定',
   unchanged: '変更なし',
+  skipped: '対象外',
 };
 
 // 集計結果を人間向けの文字列に整形する (テスト可能な純関数)。
@@ -223,7 +235,7 @@ function formatSummary(rootLabel, items) {
     let detail = '';
     if (it.status === 'updated' || it.status === 'would-update' || it.status === 'drift') {
       detail = ` (${it.changed} 件)`;
-    } else if (it.status === 'error') {
+    } else if (it.status === 'error' || it.status === 'skipped') {
       detail = it.message ? ` (${it.message})` : '';
     }
     lines.push(`  [${label}]${detail} ${it.project}`);
@@ -248,6 +260,8 @@ function runAll(opts, deps = {}) {
   const writeErr = deps.err || ((s) => process.stderr.write(s));
   const find = deps.findManifests || ((root, depth) => findManifests(root, depth, deps));
   const doSync = deps.syncOne || ((mp, o) => syncOne(mp, o, deps));
+  // マニフェスト内容の先読み (同期対象判定用)。読めなければ null → 同期対象外 (skip) 扱い。
+  const readManifest = deps.readManifest || ((mp) => { try { return fs.readFileSync(mp, 'utf8'); } catch { return null; } });
 
   const root = path.resolve(opts.root || '.');
   const manifests = find(root, opts.depth);
@@ -269,6 +283,12 @@ function runAll(opts, deps = {}) {
   let anyDrift = false;
   for (const mp of manifests) {
     const project = projectRootForManifest(mp);
+    // upstream / files を持たないマニフェスト (旧 {source,ref,commit} の独自 sync 来歴や別用途の
+    // 同名ファイル) は同期対象外として skip する。1 件の非準拠で全体を失敗させない。
+    if (!isSyncManifestContent(readManifest(mp))) {
+      items.push({ project, status: 'skipped', changed: 0, message: 'upstream/files を持たないため同期対象外' });
+      continue;
+    }
     const res = doSync(mp, opts);
     const { status, changed } = classifyResult(opts, res);
     const item = { project, status, changed };
@@ -295,6 +315,7 @@ module.exports = {
   parseArgs,
   projectRootForManifest,
   findManifests,
+  isSyncManifestContent,
   classifyResult,
   syncOne,
   formatSummary,

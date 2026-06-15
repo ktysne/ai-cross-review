@@ -108,6 +108,19 @@ describe('sync validateManifest', () => {
     expect(() => validateManifest(m)).toThrow(/files/);
   });
 
+  it('旧形式 {source,ref,commit} は移行を促すエラー', () => {
+    expect(() => validateManifest({ source: 'o/r', ref: 'main', commit: 'abc' })).toThrow(/旧形式/);
+    // source だけ / commit だけでも検出する
+    expect(() => validateManifest({ source: 'o/r' })).toThrow(/旧形式/);
+    expect(() => validateManifest({ commit: 'abc' })).toThrow(/旧形式/);
+  });
+
+  it('upstream を持つマニフェストは旧形式エラーにならない (source キーが混在しても)', () => {
+    // upstream があれば新形式とみなし、通常の検証へ進む。
+    const m = { upstream: { repo: 'x', ref: 'main' }, files: [{ from: 'a', to: 'b' }], source: 'legacy' };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
   it('files エントリに from / to が無いとエラー', () => {
     const m = valid();
     m.files = [{ to: 'b' }];

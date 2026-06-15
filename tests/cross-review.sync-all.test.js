@@ -10,12 +10,16 @@ const {
   parseArgs,
   projectRootForManifest,
   findManifests,
+  isSyncManifestContent,
   classifyResult,
   errorMessageOf,
   formatSummary,
   runAll,
   DEFAULT_DEPTH,
 } = require('../tools/cross-review.sync-all.js');
+
+// 同期対象とみなす準拠マニフェスト (upstream / files を持つ) の最小内容。
+const CONFORMING_MANIFEST = JSON.stringify({ upstream: { repo: 'x', ref: 'main' }, files: [{ from: 'a', to: 'b' }] });
 
 // withFileTypes 風のエントリを作るヘルパ。
 function file(name) { return { name, isFile: () => true, isDirectory: () => false }; }
@@ -117,6 +121,22 @@ describe('findManifests', () => {
   });
 });
 
+describe('isSyncManifestContent', () => {
+  it('upstream または files を持てば同期対象', () => {
+    expect(isSyncManifestContent('{"upstream":{"repo":"x","ref":"main"}}')).toBe(true);
+    expect(isSyncManifestContent('{"files":[]}')).toBe(true);
+  });
+  it('旧形式 {source,ref,commit} は対象外', () => {
+    expect(isSyncManifestContent('{"source":"o/r","ref":"main","commit":"abc"}')).toBe(false);
+  });
+  it('JSON でない / null / 配列 / プリミティブは対象外', () => {
+    expect(isSyncManifestContent('{ not json')).toBe(false);
+    expect(isSyncManifestContent(null)).toBe(false);
+    expect(isSyncManifestContent('[]')).toBe(false);
+    expect(isSyncManifestContent('42')).toBe(false);
+  });
+});
+
 describe('classifyResult', () => {
   const ok = (results, wrote = [], drift = false) => ({ result: { results, wrote, drift }, code: 0, threw: null });
 
@@ -179,9 +199,11 @@ describe('formatSummary', () => {
 });
 
 describe('runAll', () => {
-  const mkDeps = (manifests, syncResults, sink) => ({
+  const mkDeps = (manifests, syncResults, sink, readManifest) => ({
     findManifests: () => manifests,
     syncOne: (mp) => syncResults[mp],
+    // 既定では全マニフェストを準拠扱いにし、同期経路 (doSync) を通す。
+    readManifest: readManifest || (() => CONFORMING_MANIFEST),
     out: (s) => sink.out.push(s),
     err: (s) => sink.err.push(s),
   });
@@ -237,5 +259,40 @@ describe('runAll', () => {
     const r = runAll({ root: '/r', depth: 4, mode: 'check' }, mkDeps(manifests, syncResults, sink));
     expect(r.exitCode).toBe(1);
     expect(r.items[0].status).toBe('drift');
+  });
+
+  it('非準拠マニフェスト (旧形式) は同期せず skipped・exit 0', () => {
+    const sink = { out: [], err: [] };
+    const manifests = ['/r/legacy/tools/cross-review.sync.json'];
+    // syncOne は呼ばれてはいけない (呼ばれたら throw して検知)。
+    const deps = mkDeps(manifests, {}, sink, () => '{"source":"o/r","ref":"main","commit":"abc"}');
+    deps.syncOne = () => { throw new Error('skip 対象で syncOne が呼ばれた'); };
+    const r = runAll({ root: '/r', depth: 4, mode: 'sync', dryRun: false }, deps);
+    expect(r.exitCode).toBe(0);
+    expect(r.items[0].status).toBe('skipped');
+  });
+
+  it('準拠と非準拠が混在: 準拠だけ同期し、非準拠は skip・exit 0', () => {
+    const sink = { out: [], err: [] };
+    const manifests = ['/r/app/tools/cross-review.sync.json', '/r/legacy/tools/cross-review.sync.json'];
+    const syncResults = {
+      '/r/app/tools/cross-review.sync.json': { result: { results: [{ status: 'update' }], wrote: ['x'], drift: false }, code: 0 },
+    };
+    const readManifest = (mp) => (mp.includes('legacy')
+      ? '{"source":"o/r","ref":"main","commit":"abc"}'
+      : CONFORMING_MANIFEST);
+    const r = runAll({ root: '/r', depth: 4, mode: 'sync', dryRun: false }, mkDeps(manifests, syncResults, sink, readManifest));
+    expect(r.exitCode).toBe(0);
+    expect(r.items.map((i) => i.status)).toEqual(['updated', 'skipped']);
+  });
+
+  it('--check でも非準拠は skip 扱い (ドリフト扱いしない・exit 0)', () => {
+    const sink = { out: [], err: [] };
+    const manifests = ['/r/legacy/tools/cross-review.sync.json'];
+    const deps = mkDeps(manifests, {}, sink, () => '{"source":"o/r"}');
+    deps.syncOne = () => { throw new Error('skip 対象で syncOne が呼ばれた'); };
+    const r = runAll({ root: '/r', depth: 4, mode: 'check' }, deps);
+    expect(r.exitCode).toBe(0);
+    expect(r.items[0].status).toBe('skipped');
   });
 });

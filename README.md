@@ -198,6 +198,11 @@ docs/generated/*.md
 > `git diff --check` や CI で末尾空白を弾く場合は、コピー先の `.gitattributes` に
 > `*.md whitespace=-blank-at-eol` を足して許容してください（このリポジトリにも同じ設定があります）。
 
+> **メモ（doc を生成する / エントリ doc を分けるプロジェクト）**: 取り込み先が Markdown を HTML へ生成する（docs パイプラインを持つ）場合や、相互レビューの「入口 doc」を別に置きたい場合は、次のようにマニフェストで吸収できます。
+> - `docs/cross-review.md`（汎用フロー）を、自分のプロジェクトのパスへ `to` で map する（例: `documents/developer/md/cross-review-flow.md`）。これは **vendored（再同期で上書き）** のまま扱う。
+> - **プロジェクト固有の運用**（検証コマンド・CI・配置・例）は、vendored doc に書かず、別の **overlay doc**（取り込み先が所有・編集する）と `.cross-review.md` に分ける。overlay からは vendored フロー doc へリンクする。
+> - 同期はファイル内容を上書きするだけで、`docs:build` のような **生成 / ビルドは取り込み先の責務**です。再同期後に各自の docs ビルドを回してください（drift 検査があれば CI で取りこぼしを検出できます）。
+
 ### 複数プロジェクトへ一括で反映する（sync-all）
 
 導入プロジェクトが増えると、上流を更新するたびに 1 リポずつ `cross-review.sync.js` を回すのは手間です。  
