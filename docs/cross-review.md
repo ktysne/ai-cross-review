@@ -22,6 +22,8 @@ Claude と Codex を交互に使う相互レビューの運用ドキュメント
 CLI 経由（`npm run review:*`）で回すには `codex` / `claude` が PATH にあること。  
 拡張 / アプリ内で完結するなら不要です。
 
+> **課金メモ（Claude サブスクプラン）**: Anthropic のサブスク（Pro / Max / Team / Enterprise）では、**2026-06-15 以降** `claude -p`（`npm run review:claude` が内部で使うヘッドレス実行）や Agent SDK 経由の利用が、インタラクティブの利用上限とは**別の月次 Agent SDK クレジット枠**から消費されます。`npm run review:codex*`（OpenAI の Codex CLI）や `subagent`（外部 API を呼ばずプロンプトを出力するだけ）は対象外です。挙動・認証方法に変更はなく、影響は課金・利用枠のみ。CI / 非対話で使う場合の長寿命トークンは `claude setup-token`（→ `CLAUDE_CODE_OAUTH_TOKEN`）。詳細は [Use the Claude Agent SDK with your Claude plan](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) を参照。
+
 ## 基本フロー（4 ステップのループ）
 
 実装担当とレビュー担当を入れ替えながら、次の 4 ステップで回します。
