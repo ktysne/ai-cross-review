@@ -29,6 +29,8 @@ git の差分をそのままレビュアー CLI（`codex` / `claude`）へ渡し
   CLI が無くても、引数の解析や差分の生成は動きます。  
   クラウド実行などで CLI を起動できないときは、後述の `subagent` モードを使えば CLI 無しでレビュー用プロンプトを出力できます。
 
+> **課金メモ（Claude サブスクプラン）**: Anthropic のサブスク（Pro / Max / Team / Enterprise）では、**2026-06-15 以降** `claude -p`（`review:claude` が内部で使うヘッドレス実行）や Agent SDK 経由の利用が、インタラクティブの利用上限とは**別の月次 Agent SDK クレジット枠**から消費されます（枠超過時は停止、または extra usage 有効なら API 従量課金）。`review:codex*`（OpenAI の Codex CLI）や `subagent`（外部 API を呼ばずプロンプトを出力するだけ）は**この枠の対象外**です。挙動・認証方法に変更はなく、影響は課金・利用枠のみです。詳細は [Use the Claude Agent SDK with your Claude plan](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) を参照。
+
 ## 使い方
 
 ```bash
