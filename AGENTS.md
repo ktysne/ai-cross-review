@@ -1,5 +1,7 @@
 ## AI 相互レビュー（Claude ↔ Codex）
 > 詳細フローの正本は [docs/cross-review.md](docs/cross-review.md)（本ファイルは運用要点の要約）。
+> 実行手順（A/B/C・往復・subagent 経路）は Claude Code スキル [.claude/skills/cross-review/SKILL.md](.claude/skills/cross-review/SKILL.md) にもまとめてある（vendored・取り込み先へコピー可）。
+> 導入プロジェクトをまとめて更新するには `tools/cross-review.sync-all.js`（`/Develop` 等を走査して一括同期。詳細は docs）。
 
 基本フローは **実装 → レビュー → 指摘対応 → 妥当性確認** の 4 ステップを Claude / Codex を入れ替えて回す（Claude 実装 → Codex レビュー → Claude 対応 → Codex 妥当性確認 / およびその逆）。  
 **指摘・対応・妥当性確認は PR コメントに残す**（揮発させない。PR 未作成なら先に作り、`gh pr comment` で記録）。

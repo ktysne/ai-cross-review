@@ -16,7 +16,9 @@
     "lint": "eslint .",
     "review:codex": "node tools/cross-review.js codex",
     "review:codex:fix": "node tools/cross-review.js codex --fix",
-    "review:claude": "node tools/cross-review.js claude"
+    "review:claude": "node tools/cross-review.js claude",
+    "sync:all": "node tools/cross-review.sync-all.js",
+    "sync:all:check": "node tools/cross-review.sync-all.js --check"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
