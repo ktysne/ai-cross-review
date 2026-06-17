@@ -22,10 +22,10 @@
 // - 実際の同期は各プロジェクトに同梱された版ではなく、この checkout の cross-review.sync.js (runSync) を
 //   再利用して回す。導入先の sync スクリプトが古くても、最新ロジックで一括反映できる。各プロジェクトの
 //   マニフェスト (upstream.repo / ref / files) はそのプロジェクト固有なので尊重する。
-// - 1 プロジェクトの失敗 (マニフェスト不正・上流取得失敗等) で全体を止めない。各プロジェクトを独立に回し、
+// - 1 プロジェクトの失敗 (マニフェスト不正、上流取得失敗等) で全体を止めない。各プロジェクトを独立に回し、
 //   最後に集計を出す。終了コードは「いずれかが失敗」または「--check でいずれかにドリフト」で 1。
-// - 副作用 (ディレクトリ走査・runSync 実行) は deps で差し替え可能にし、純粋なロジック (引数解析・
-//   プロジェクトルート算出・結果分類・集計) を単体テストで固定する。cross-review.sync.js と同じ方針。
+// - 副作用 (ディレクトリ走査、runSync 実行) は deps で差し替え可能にし、純粋なロジック (引数解析、
+//   プロジェクトルート算出、結果分類、集計) を単体テストで固定する。cross-review.sync.js と同じ方針。
 
 'use strict';
 
@@ -34,7 +34,7 @@ const path = require('path');
 
 const SYNC_MANIFEST_FILENAME = 'cross-review.sync.json';
 const DEFAULT_DEPTH = 4;
-// 走査時にたどらないディレクトリ (生成物・VCS・隠しディレクトリ)。
+// 走査時にたどらないディレクトリ (生成物、VCS、隠しディレクトリ)。
 const SKIP_DIRS = new Set(['node_modules', '.git']);
 
 const USAGE = [
@@ -178,7 +178,7 @@ function isSyncManifestContent(raw) {
 }
 
 // runSync の戻り値 (result) と捕捉した exit コードから、表示用のステータスを決める。
-//   error        : マニフェスト不正・上流取得失敗・例外 (result が null か code===2、または threw)
+//   error        : マニフェスト不正、上流取得失敗、例外 (result が null か code===2、または threw)
 //   drift        : --check で上流と差分あり
 //   clean        : --check で差分なし
 //   updated      : 同期で 1 件以上書き込んだ
