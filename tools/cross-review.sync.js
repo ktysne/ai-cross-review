@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // tools/cross-review.sync.js
 //
-// ai-cross-review の「そのままコピーするファイル」(CLI 本体・手順書・観点テンプレート・テスト等)
+// ai-cross-review の「そのままコピーするファイル」(CLI 本体、手順書、観点テンプレート、テスト等)
 // を、上流リポジトリから取り込み先プロジェクトへ取り込む同期スクリプト。
 // 手動コピー運用を、マニフェスト (cross-review.sync.json) に基づく機械的な同期へ置き換える。
 //
@@ -15,7 +15,7 @@
 //   node tools/cross-review.sync.js --help
 //
 // 設計判断:
-// - 依存パッケージを追加しない (Node 標準 API のみ・CommonJS)。cross-review.js と同じ方針。
+// - 依存パッケージを追加しない (Node 標準 API のみ、CommonJS)。cross-review.js と同じ方針。
 // - 上流の取得は git のみで行う。ref (ブランチ / タグ / コミット SHA) を一時ディレクトリへ
 //   shallow fetch し、そこからファイルをコピーする。取得した実コミットをマニフェストの
 //   lastSyncedCommit に記録し、どの版から取り込んだかを履歴に残す。
@@ -24,8 +24,8 @@
 //   replace で機械置換する (上流側を書き換えない)。
 // - --check は書き込まず、上流 (ref) と取り込み先の差分 (ドリフト) だけを報告する。
 //   差分があれば exit 1 にして CI で検知できるようにする (取り込み先の docs:check 相当のドリフト検知)。
-// - 副作用 (git 実行・一時ディレクトリ・ファイル I/O) は deps で差し替え可能にし、純粋なロジック
-//   (引数解析・マニフェスト検証・置換・同期プラン算出) を単体テストで固定する。cross-review.js と同様。
+// - 副作用 (git 実行、一時ディレクトリ、ファイル I/O) は deps で差し替え可能にし、純粋なロジック
+//   (引数解析、マニフェスト検証、置換、同期プラン算出) を単体テストで固定する。cross-review.js と同様。
 
 'use strict';
 
@@ -347,7 +347,7 @@ function runSync(opts, deps = {}) {
     }
     // 取り込み元コミットを記録し、どの版から取り込んだかを履歴に残す。記録値 (commit / ref) が
     // 変わるときだけ書き戻す。同一コミットの再同期では、ユーザが手で整形したマニフェストを毎回
-    // 上書きしない (不要な差分・整形崩れを防ぐ)。上流が進めば取り込みファイルが一致でも記録は更新する。
+    // 上書きしない (不要な差分、整形崩れを防ぐ)。上流が進めば取り込みファイルが一致でも記録は更新する。
     if (manifest.lastSyncedCommit !== upstream.commit || manifest.lastSyncedRef !== ref) {
       manifest.lastSyncedCommit = upstream.commit;
       manifest.lastSyncedRef = ref;

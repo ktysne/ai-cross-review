@@ -10,20 +10,20 @@ git の差分をそのままレビュアー CLI（`codex` / `claude`）へ渡し
 
 ## 特徴
 
-- **追加インストール不要**: 本体（`tools/cross-review.js`）は Node 標準 API だけで動きます。  
+- **追加インストール不要**：本体（`tools/cross-review.js`）は Node 標準 API だけで動きます。  
   テストと lint のときだけ devDependencies を使います。  
-- **git の差分でやり取り**: ブランチとベースの差分、または未コミットの差分（未追跡ファイルを含む）を渡します。  
+- **git の差分でやり取り**：ブランチとベースの差分、または未コミットの差分（未追跡ファイルを含む）を渡します。  
   チャットの中身を手でコピーする必要はありません。  
-- **既定は安全側**: レビューだけのときは `codex` を read-only で起動し、ファイルを書き換えさせません。  
+- **既定は安全側**：レビューだけのときは `codex` を read-only で起動し、ファイルを書き換えさせません。  
   `--fix` を付けたときだけ workspace-write で起動し、見つかった問題を直接修正させます。  
-- **CLI を起動できない環境にも対応**: クラウド / リモート実行で `codex` / `claude` CLI を起動できない（または API 接続が通らない）ときは、`subagent` モードがレビュー用プロンプトを stdout に出力します。  
+- **CLI を起動できない環境にも対応**：クラウド / リモート実行で `codex` / `claude` CLI を起動できない（または API 接続が通らない）ときは、`subagent` モードがレビュー用プロンプトを stdout に出力します。  
   それを Claude の客観サブエージェントへ渡せば、外部 CLI 無しで同じ観点のレビューを回せます（後述「CLI を起動できない環境（`subagent` モード）」）。  
-- **トークンを節約**: ロックファイル・生成物（`package-lock.json` / `*.min.js` / `*.map` など）を既定で差分から除外し、巨大なファイル差分は stat 要約に置換します。  
+- **トークンを節約**：ロックファイル、生成物（`package-lock.json` / `*.min.js` / `*.map` など）を既定で差分から除外し、巨大なファイル差分は stat 要約に置換します。  
   既定の比較先は `origin/main` を優先解決し、差分サイズが閾値を超えたらレビュアーを起動せず中断します（stale なローカル `main` による差分の肥大を防ぎます）。  
-- **観点を分離**: プロジェクト固有のレビュー観点は `.cross-review.md` に分けてあります。  
+- **観点を分離**：プロジェクト固有のレビュー観点は `.cross-review.md` に分けてあります。  
   本体は完全に汎用です。  
   導入するときは、決まったファイル一式をコピーし、`.cross-review.md` だけを自分のプロジェクト向けに編集します。  
-- **配布と更新を仕組み化**: 同期スクリプト（`tools/cross-review.sync.js`）と一括同期ツール（`tools/cross-review.sync-all.js`）で、上流の更新を導入先へまとめて反映できます。  
+- **配布と更新を仕組み化**：同期スクリプト（`tools/cross-review.sync.js`）と一括同期ツール（`tools/cross-review.sync-all.js`）で、上流の更新を導入先へまとめて反映できます。  
   Claude Code 用の実行手順スキル（`.claude/skills/cross-review/SKILL.md`）も同梱します。
 
 ## 前提
@@ -32,11 +32,11 @@ git の差分をそのままレビュアー CLI（`codex` / `claude`）へ渡し
 - `codex` / `claude` の **スタンドアロン CLI** が PATH にあること（VS Code 拡張やデスクトップアプリとは別物です）。  
   実際にレビューを走らせるのに必要です。  
   `review:codex*` / `review:claude` はレビュアー CLI のネットワーク/API 接続も必要です。  
-  CLI が見えていても API 接続だけ失敗することがあります。`claude -p "Reply with OK only."` のような最小コマンドが通常サンドボックスで無応答 / `ConnectionRefused` になり、ネットワーク許可・サンドボックス外で成功するなら、原因は CLI ではなく実行環境のネットワーク制限です。  
+  CLI が見えていても API 接続だけ失敗することがあります。`claude -p "Reply with OK only."` のような最小コマンドが通常サンドボックスで無応答 / `ConnectionRefused` になり、ネットワーク許可、サンドボックス外で成功するなら、原因は CLI ではなく実行環境のネットワーク制限です。  
   CLI が無くても、引数の解析や差分の生成は動きます。  
   クラウド実行などで CLI を起動できないときは、後述の `subagent` モードを使えば CLI 無しでレビュー用プロンプトを出力できます。
 
-> **課金メモ（Claude サブスクプラン）**: Anthropic のサブスク（Pro / Max / Team / Enterprise）では、**2026-06-15 以降** `claude -p`（`review:claude` が内部で使うヘッドレス実行）や Agent SDK 経由の利用が、インタラクティブの利用上限とは**別の月次 Agent SDK クレジット枠**から消費されます（枠超過時は停止、または extra usage 有効なら API 従量課金）。`review:codex*`（OpenAI の Codex CLI）や `subagent`（外部 API を呼ばずプロンプトを出力するだけ）は**この枠の対象外**です。挙動・認証方法に変更はなく、影響は課金・利用枠のみです。詳細は [Use the Claude Agent SDK with your Claude plan](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) を参照。
+> **課金メモ（Claude サブスクプラン）**：Anthropic のサブスク（Pro / Max / Team / Enterprise）では、**2026-06-15 以降** `claude -p`（`review:claude` が内部で使うヘッドレス実行）や Agent SDK 経由の利用が、インタラクティブの利用上限とは**別の月次 Agent SDK クレジット枠**から消費されます（枠超過時は停止、または extra usage 有効なら API 従量課金）。`review:codex*`（OpenAI の Codex CLI）や `subagent`（外部 API を呼ばずプロンプトを出力するだけ）は**この枠の対象外**です。挙動、認証方法に変更はなく、影響は課金、利用枠のみです。詳細は [Use the Claude Agent SDK with your Claude plan](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) を参照。
 
 ## 使い方
 
@@ -69,7 +69,7 @@ npm run review:claude -- --uncommitted    # Claude が妥当性確認
 ```
 
 `../review-notes.md` は自動生成されません。Claude のレビュー結果から今回直す指摘だけを確認して書き出してください。  
-リポジトリ外（例: 親ディレクトリ）に置くのは、最後の妥当性確認 `npm run review:claude -- --uncommitted` で、このファイル自体が未追跡差分としてレビューに混ざるのを防ぐためです（`--instructions` 指定時は対象から自動除外されますが、妥当性確認は `--instructions` を付けないため除外されません）。  
+リポジトリ外（例：親ディレクトリ）に置くのは、最後の妥当性確認 `npm run review:claude -- --uncommitted` で、このファイル自体が未追跡差分としてレビューに混ざるのを防ぐためです（`--instructions` 指定時は対象から自動除外されますが、妥当性確認は `--instructions` を付けないため除外されません）。  
 この手順を飛ばすと、存在しない / 古い指摘ファイルを `--instructions` に渡して `--fix` が走るおそれがあります。
 
 ### CLI を起動できない環境（`subagent` モード）
@@ -88,11 +88,11 @@ CLI は起動できても、ネットワーク/API 接続が許可されずレ�
 |------------|------|
 | `--fix` | 修正まで依頼する（`codex` は `-s workspace-write` で直接修正 / `subagent` は FIX 指示付きでプロンプト出力。`claude` CLI 経路は非対応） |
 | `--uncommitted` | 未コミットの作業ツリー差分（tracked + untracked）をレビュー |
-| `--base <ref>` | 比較先ブランチを指定（既定: 未指定なら `origin/main` を優先解決し、無ければ `main`） |
-| `--max-diff-kb <n>` | レビュー差分サイズの上限（KB）。超過時はレビュアーを起動せず中断（既定 256・`0` で無効。環境変数 `CROSS_REVIEW_MAX_DIFF_KB` でも指定可） |
-| `--max-file-diff-kb <n>` | ファイル単位の差分がこの KB を超えたら本文を stat 要約に置換（既定 64・`0` で無効。環境変数 `CROSS_REVIEW_MAX_FILE_DIFF_KB` でも指定可） |
-| `--no-exclude` | 既定除外も含めすべての除外を無効化（生成物・ロックファイルもまとめてレビューしたいとき） |
-| `--instructions <path>` | レビュアーへの申し送り・重点指摘ファイルをプロンプトに追加する（観点 `.cross-review.md` は置き換えず追加。`--fix` と併用すると、その指摘を直接修正させる） |
+| `--base <ref>` | 比較先ブランチを指定（既定：未指定なら `origin/main` を優先解決し、無ければ `main`） |
+| `--max-diff-kb <n>` | レビュー差分サイズの上限（KB）。超過時はレビュアーを起動せず中断（既定 256、`0` で無効。環境変数 `CROSS_REVIEW_MAX_DIFF_KB` でも指定可） |
+| `--max-file-diff-kb <n>` | ファイル単位の差分がこの KB を超えたら本文を stat 要約に置換（既定 64、`0` で無効。環境変数 `CROSS_REVIEW_MAX_FILE_DIFF_KB` でも指定可） |
+| `--no-exclude` | 既定除外も含めすべての除外を無効化（生成物、ロックファイルもまとめてレビューしたいとき） |
+| `--instructions <path>` | レビュアーへの申し送り、重点指摘ファイルをプロンプトに追加する（観点 `.cross-review.md` は置き換えず追加。`--fix` と併用すると、その指摘を直接修正させる） |
 | `-h`, `--help` | ヘルプを表示 |
 
 ## レビュー観点（`.cross-review.md`）
@@ -110,8 +110,8 @@ CLI は起動できても、ネットワーク/API 接続が許可されずレ�
 
 ## 差分の除外（`.cross-review-ignore`）
 
-ロックファイル・生成物（`package-lock.json` / `*.min.js` / `*.map` など）はレビュー価値が低くトークンを浪費するため、**既定で差分本文から除外**します（除外したファイル名はプロンプトに残るので、必要なら個別に読めます）。  
-除外を増やしたいときは `.cross-review-ignore` に **1 行 1 パターン**で足します（`#` 始まりはコメント・空行は無視。観点と同じ解決順で `CROSS_REVIEW_IGNORE` / `<cwd>` / スクリプト基準から探す）。
+ロックファイル、生成物（`package-lock.json` / `*.min.js` / `*.map` など）はレビュー価値が低くトークンを浪費するため、**既定で差分本文から除外**します（除外したファイル名はプロンプトに残るので、必要なら個別に読めます）。  
+除外を増やしたいときは `.cross-review-ignore` に **1 行 1 パターン**で足します（`#` 始まりはコメント、空行は無視。観点と同じ解決順で `CROSS_REVIEW_IGNORE` / `<cwd>` / スクリプト基準から探す）。
 
 ```text
 # .cross-review-ignore の例（既定パターンに追加される）
@@ -119,7 +119,7 @@ docs/generated/*.md
 *.snap
 ```
 
-`--no-exclude` で既定除外も含めすべて無効化できます。巨大なファイル差分は `--max-file-diff-kb`（既定 64KB・`0` で無効）で stat 要約に置換します。詳しくは [docs/cross-review.md](docs/cross-review.md) を参照してください。
+`--no-exclude` で既定除外も含めすべて無効化できます。巨大なファイル差分は `--max-file-diff-kb`（既定 64KB、`0` で無効）で stat 要約に置換します。詳しくは [docs/cross-review.md](docs/cross-review.md) を参照してください。
 
 ## 相互レビューの回し方
 
@@ -140,7 +140,7 @@ docs/generated/*.md
 | `tools/cross-review.sync.js` | 同期スクリプト本体（上流から取り込む / ドリフト検査） | なし（そのまま）。手動コピーの代わりに使える（後述「同期スクリプトで更新する」） |
 | `tools/cross-review.sync-all.js`（任意） | 一括同期ツール（作業ルート配下の導入プロジェクトをまとめて同期） | なし（そのまま）。`/Develop` などをまとめて更新する人だけ入れればよい（後述「複数プロジェクトへ一括で反映する」） |
 | `tools/cross-review.sync.example.json` | 同期マニフェストのテンプレート | なし。**コピーして `tools/cross-review.sync.json` を作り、そちらを編集する** |
-| `.claude/skills/cross-review/SKILL.md`（任意） | 相互レビューの実行手順（Claude Code スキル・汎用） | なし（そのまま）。Claude Code を使うなら入れる。プロジェクト固有の運用は `.cross-review.md` と自分の doc に分け、スキルには書かない |
+| `.claude/skills/cross-review/SKILL.md`（任意） | 相互レビューの実行手順（Claude Code スキル、汎用） | なし（そのまま）。Claude Code を使うなら入れる。プロジェクト固有の運用は `.cross-review.md` と自分の doc に分け、スキルには書かない |
 | `tests/cross-review.test.js`（任意） | 本体のユニットテスト（vitest） | **取り込み先が vitest のときだけ同梱**。require のパスをコピー先のテスト配置に合わせる（engine は upstream のテストが担保） |
 | `tests/cross-review.sync.test.js`（任意） | 同期スクリプトのユニットテスト（vitest） | **取り込み先が vitest のときだけ同梱**。require のパスをコピー先のテスト配置に合わせる |
 | `tests/cross-review.sync-all.test.js`（任意） | 一括同期ツールのユニットテスト（vitest） | **`cross-review.sync-all.js` を入れ、かつ vitest のときだけ同梱**。require のパスを合わせる |
@@ -152,9 +152,9 @@ docs/generated/*.md
 |----------|------|
 | `.cross-review.md` | そのプロジェクトのレビュー観点（`.cross-review.example.md` を雛形に作る） |
 | `CLAUDE.md` / `AGENTS.md`（あれば） | そのリポジトリの運用メモ。手順の詳細はコピーした `docs/cross-review.md` へリンクする |
-| そのプロジェクト用の doc（任意） | 手順書に書かない、プロジェクト固有のメモ（検証コマンド・CI・例 など） |
+| そのプロジェクト用の doc（任意） | 手順書に書かない、プロジェクト固有のメモ（検証コマンド、CI、例 など） |
 | `tools/package.json` | `tools/*.js` を CommonJS にする設定（`"type": "commonjs"`）。そのリポジトリのツール依存もここに足す |
-| `tools/cross-review.sync.json` | そのプロジェクトの同期マニフェスト（`tools/cross-review.sync.example.json` を雛形に作る）。取り込むファイルの `from`/`to`・取り込み元 `repo`/`ref` を書く。`lastSyncedCommit` は同期時に自動で更新される（どの版から取り込んだかの記録） |
+| `tools/cross-review.sync.json` | そのプロジェクトの同期マニフェスト（`tools/cross-review.sync.example.json` を雛形に作る）。取り込むファイルの `from`/`to`、取り込み元 `repo`/`ref` を書く。`lastSyncedCommit` は同期時に自動で更新される（どの版から取り込んだかの記録） |
 
 ### 手順
 1. 上の「そのままコピーするファイル」を全部コピー先へコピーする（`tools/*.js` は CommonJS なので、コピー先のルート `package.json` が `"type": "module"` のときは `tools/package.json` に `"type": "commonjs"` を置く）。  
@@ -162,8 +162,8 @@ docs/generated/*.md
 2. `.cross-review.example.md` を `.cross-review.md` にコピーし、そのプロジェクトで壊れやすい注意点を書く。  
 3. ルート `package.json` の `scripts` に `review:codex` / `review:codex:fix` / `review:claude` を足す。  
    同期スクリプトを使うなら `sync` / `sync:check` も足す（後述「同期スクリプトで更新する」）。  
-4. Claude Code を使うなら `.claude/skills/cross-review/SKILL.md` をコピーする（実行手順スキル・汎用）。  
-   このスキルは vendored（上書き更新の対象）なので**直接編集せず**、プロジェクト固有の運用（検証コマンド・CI・同期スクリプト名など）は `.cross-review.md` や自分の doc 側に書く。  
+4. Claude Code を使うなら `.claude/skills/cross-review/SKILL.md` をコピーする（実行手順スキル、汎用）。  
+   このスキルは vendored（上書き更新の対象）なので**直接編集せず**、プロジェクト固有の運用（検証コマンド、CI、同期スクリプト名など）は `.cross-review.md` や自分の doc 側に書く。  
 5. `codex` / `claude` の CLI を PATH に通す（CLI を起動できないときは `subagent` モードを使う）。  
 6. 更新するときは、コピーするファイルを上書きでコピーし直すだけ。  
    自分で編集するファイルは触らない。  
@@ -179,7 +179,7 @@ docs/generated/*.md
 2. `upstream.repo`（このツールの git URL）と `upstream.ref`（取り込む版。既定 `main`）を書く。  
 3. `files` に取り込むファイルを `from`（上流相対）/ `to`（自分のプロジェクト相対）で並べる。  
    テストのように require パスを取り込み先へ合わせたいときは `replace`（文字列の全置換）を足す。  
-4. ルート `package.json` の `scripts` に登録する（任意。コマンド名は自由）:
+4. ルート `package.json` の `scripts` に登録する（任意。コマンド名は自由）：
 
    ```json
    "scripts": {
@@ -188,7 +188,7 @@ docs/generated/*.md
    }
    ```
 
-5. 取り込み・検査を実行する:
+5. 取り込み、検査を実行する：
 
    ```bash
    node tools/cross-review.sync.js            # 上流から取り込む（差分のあるファイルだけ上書き）
@@ -199,21 +199,21 @@ docs/generated/*.md
 
 取り込み元の取得は **git のみ**で行います（`upstream.ref` を一時ディレクトリへ shallow fetch）。  
 取り込んだ実コミットは `lastSyncedCommit` に記録され、どの版から取り込んだかが残ります。  
-詳細・マニフェストの形は [docs/cross-review.md](docs/cross-review.md) の「同期スクリプト」節を参照してください。
+詳細、マニフェストの形は [docs/cross-review.md](docs/cross-review.md) の「同期スクリプト」節を参照してください。
 
-> **メモ（末尾空白）**: `docs/cross-review.md` などは Markdown のハード改行（行末スペース 2 つ）を使います。
+> **メモ（末尾空白）**：`docs/cross-review.md` などは Markdown のハード改行（行末スペース 2 つ）を使います。
 > `git diff --check` や CI で末尾空白を弾く場合は、コピー先の `.gitattributes` に
 > `*.md whitespace=-blank-at-eol` を足して許容してください（このリポジトリにも同じ設定があります）。
 
-> **メモ（doc を生成する / エントリ doc を分けるプロジェクト）**: 取り込み先が Markdown を HTML へ生成する（docs パイプラインを持つ）場合や、相互レビューの「入口 doc」を別に置きたい場合は、次のようにマニフェストで吸収できます。
-> - `docs/cross-review.md`（汎用フロー）を、自分のプロジェクトのパスへ `to` で map する（例: `documents/developer/md/cross-review-flow.md`）。これは **vendored（再同期で上書き）** のまま扱う。
-> - **プロジェクト固有の運用**（検証コマンド・CI・配置・例）は、vendored doc に書かず、別の **overlay doc**（取り込み先が所有・編集する）と `.cross-review.md` に分ける。overlay からは vendored フロー doc へリンクする。
+> **メモ（doc を生成する / エントリ doc を分けるプロジェクト）**：取り込み先が Markdown を HTML へ生成する（docs パイプラインを持つ）場合や、相互レビューの「入口 doc」を別に置きたい場合は、次のようにマニフェストで吸収できます。
+> - `docs/cross-review.md`（汎用フロー）を、自分のプロジェクトのパスへ `to` で map する（例：`documents/developer/md/cross-review-flow.md`）。これは **vendored（再同期で上書き）** のまま扱う。
+> - **プロジェクト固有の運用**（検証コマンド、CI、配置、例）は、vendored doc に書かず、別の **overlay doc**（取り込み先が所有、編集する）と `.cross-review.md` に分ける。overlay からは vendored フロー doc へリンクする。
 > - 同期はファイル内容を上書きするだけで、`docs:build` のような **生成 / ビルドは取り込み先の責務**です。再同期後に各自の docs ビルドを回してください（drift 検査があれば CI で取りこぼしを検出できます）。
 
 ### 複数プロジェクトへ一括で反映する（sync-all）
 
 導入プロジェクトが増えると、上流を更新するたびに 1 リポずつ `cross-review.sync.js` を回すのは手間です。  
-`tools/cross-review.sync-all.js` は、ローカルの作業ルート（例: `/Develop`）配下を走査して、**同期マニフェスト `cross-review.sync.json` を持つディレクトリ＝導入プロジェクト**を自動判定し、まとめて同期します。
+`tools/cross-review.sync-all.js` は、ローカルの作業ルート（例：`/Develop`）配下を走査して、**同期マニフェスト `cross-review.sync.json` を持つディレクトリ＝導入プロジェクト**を自動判定し、まとめて同期します。
 
 ```bash
 node tools/cross-review.sync-all.js --root /Develop --list    # 検出したプロジェクトを列挙するだけ
@@ -224,7 +224,7 @@ node tools/cross-review.sync-all.js --root /Develop --ref v1.2.3  # 取り込む
 ```
 
 - 各プロジェクトの同期は、そのプロジェクトに同梱された版ではなく、**この checkout の `cross-review.sync.js`（最新ロジック）を再利用**して回します。導入先の sync スクリプトが古くても最新の挙動で反映できます。取り込むファイルや上流 ref は各プロジェクトの `cross-review.sync.json` を尊重します（`--ref` で一時的に上書き可）。
-- **1 プロジェクトの失敗（マニフェスト不正・上流取得失敗など）で全体は止まりません**。各プロジェクトを独立に回し、最後に「更新 / 変更なし / ドリフト / エラー」の集計を出します。終了コードは「いずれかが失敗」または「`--check` でいずれかにドリフト」のとき 1（CI 向け）。
+- **1 プロジェクトの失敗（マニフェスト不正、上流取得失敗など）で全体は止まりません**。各プロジェクトを独立に回し、最後に「更新 / 変更なし / ドリフト / エラー」の集計を出します。終了コードは「いずれかが失敗」または「`--check` でいずれかにドリフト」のとき 1（CI 向け）。
 - 走査の最大深さは `--depth <n>`（既定 4）で調整します。`node_modules` / `.git` / 隠しディレクトリは走査しません。
 - このリポジトリの `package.json` には `npm run sync:all` / `npm run sync:all:check` を用意しています（`--root` を付けて使います）。
 
@@ -237,7 +237,7 @@ npm run sync:all:check -- --root /Develop     # 一括ドリフト検査（CI �
 
 ```bash
 npm install        # devDependencies (vitest / eslint) を入れる
-npm test           # ユニットテスト (引数解析・差分生成・プロンプト生成・観点解決・申し送り注入・除外/要約・同期スクリプト・一括同期)
+npm test           # ユニットテスト (引数解析、差分生成、プロンプト生成、観点解決、申し送り注入、除外/要約、同期スクリプト、一括同期)
 npm run lint       # ESLint
 ```
 

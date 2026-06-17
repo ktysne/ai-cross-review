@@ -32,13 +32,13 @@
 //   (観点 + スコープ + 差分本文 + モード別指示) を stdout に出すだけにする。呼び出し側 (Claude) が
 //   その出力を Agent ツールの客観レビュー用サブエージェントへ渡してレビューさせる
 //   (Codex の代わりに「Claude の客観的な観点を持つサブエージェント」がレビュアーになる)。
-//   プロンプト組み立て・観点解決・差分収集は codex/claude 経路と同一なので観点が揺れない。
+//   プロンプト組み立て、観点解決、差分収集は codex/claude 経路と同一なので観点が揺れない。
 // - プロジェクト固有のレビュー観点は、リポジトリ直下の `.cross-review.md` を単一ソースとして
 //   読み込み、各レビュアー (codex / claude / subagent) へ同じチェックリストとして添える (無ければ汎用観点 GENERIC_CHECKLIST へ
 //   フォールバック)。この CLI は engine 部分が完全に汎用なので、他リポへ `tools/cross-review.js` を
 //   コピーし `.cross-review.md` を置くだけで観点を差し替えて再利用できる。観点を更新したら
 //   `.cross-review.md` を直す。
-// - レビュアー個別の「申し送り・重点指摘」は `--instructions <path>` で渡す。これは観点
+// - レビュアー個別の「申し送り、重点指摘」は `--instructions <path>` で渡す。これは観点
 //   (.cross-review.md) を置き換えず、それに加えてプロンプトへ添える別系統。一方のレビュアーが
 //   出した指摘をファイルに書き、`codex --fix --instructions <path>` で他方に直接修正させる用途を
 //   一級でサポートする (この目的で CROSS_REVIEW_CHECKLIST を流用すると観点が消えるため非推奨)。
@@ -46,7 +46,7 @@
 //   揃えるため、tracked 変更 (git diff HEAD) に加えて未追跡ファイルも new file 差分として含める。
 // - 前提: codex / claude レビュアーは「スタンドアロン CLI」が PATH にあること
 //   (VS Code プラグイン / デスクトップアプリとは別物)。CLI レビューはレビュアー CLI が
-//   ネットワーク/API 接続を使うため、必要に応じてサンドボックス無効・ネットワーク許可で起動する
+//   ネットワーク/API 接続を使うため、必要に応じてサンドボックス無効、ネットワーク許可で起動する
 //   (cross-review フロー ドキュメント参照)。
 //   subagent レビュアーは外部 CLI を起動しない (プロンプトを stdout に出すだけ) ので CLI 不要。
 
@@ -65,7 +65,7 @@ const CHECKLIST_FILENAME = '.cross-review.md';
 // 除外パターンファイル名。観点 (.cross-review.md) と同じ解決順で探す。
 const IGNORE_FILENAME = '.cross-review-ignore';
 
-// 既定で差分本文から除外するファイル群 (ロックファイル・生成物・ソースマップ)。
+// 既定で差分本文から除外するファイル群 (ロックファイル、生成物、ソースマップ)。
 // レビュー価値が低くトークンを浪費しがちなので、明示的に除外する。
 // パターンはファイル名のみ (どの階層でも一致させたい) で、git パススペックでは
 // glob + top マジックワード + `**/` 接頭で再帰一致させる (toExcludePathspecs 参照)。
@@ -145,7 +145,7 @@ function loadChecklist(deps = {}) {
 }
 
 // `--instructions <path>` のファイル本文を読む。観点 (.cross-review.md) とは別系統で、
-// 「レビュアーからの申し送り・重点指摘」をプロンプトへ追加で添えるためのもの。
+// 「レビュアーからの申し送り、重点指摘」をプロンプトへ追加で添えるためのもの。
 // 読めなければ例外を投げ、呼び出し側 (runReview) がエラー終了させる。
 // deps.readFile でテストから差し替え可能。
 function loadInstructions(instructionsPath, deps = {}) {
@@ -157,7 +157,7 @@ function loadInstructions(instructionsPath, deps = {}) {
 //   1. 環境変数 CROSS_REVIEW_IGNORE (パス)
 //   2. <cwd>/.cross-review-ignore
 //   3. <スクリプト>/../.cross-review-ignore
-// 形式は 1 行 1 パターン・`#` 始まりはコメント・空行無視。見つかった最初の 1 つだけを読む。
+// 形式は 1 行 1 パターン、`#` 始まりはコメント、空行無視。見つかった最初の 1 つだけを読む。
 // 戻り値は「既定パターン (DEFAULT_EXCLUDE_PATTERNS) + ファイルのパターン」の配列
 // (ファイルが無ければ既定のみ)。env 明示指定が読めない場合は警告して次の候補へ (loadChecklist と同じ流儀)。
 // deps で env / cwd / scriptDir / fs / 警告出力を差し替え可能にする (テスト用)。
@@ -228,7 +228,7 @@ const FIX_INSTRUCTION = [
   '構文チェック / lint / テスト / プロジェクト固有の整合性チェックは呼び出し側が後で実行する。',
 ].join('\n');
 
-// `--instructions <path>` で渡された「レビュアーからの申し送り・重点指摘」をプロンプトへ
+// `--instructions <path>` で渡された「レビュアーからの申し送り、重点指摘」をプロンプトへ
 // 添えるときの見出し。観点 (.cross-review.md) を置き換えず、それに加える位置づけ。
 // 主用途: 一方のレビュアーが出した指摘を他方に渡して `--fix` で直接修正させる。
 const REVIEWER_NOTES_HEADER = [
@@ -281,7 +281,7 @@ const USAGE = [
 ].join('\n');
 
 // 非負整数として解釈できれば数値を、できなければ null を返す。
-// 受理するのは数字だけからなる文字列 (前後空白は許容)。負号・小数点・指数表記・空文字は不可。
+// 受理するのは数字だけからなる文字列 (前後空白は許容)。負号、小数点、指数表記、空文字は不可。
 // --max-diff-kb のフラグ値と CROSS_REVIEW_MAX_DIFF_KB の解釈に共通で使う。
 function parseNonNegativeInt(value) {
   if (value == null) return null;
@@ -434,7 +434,7 @@ function defaultGitRunner(args, opts) {
   const res = spawnSync('git', args, spawnOpts);
   const ok = res.status === 0 || (allowDiffExit && res.status === 1);
   if (!ok) {
-    // allowFailure 経路では、リモート無し・オフライン・タイムアウト・参照不在などを
+    // allowFailure 経路では、リモート無し、オフライン、タイムアウト、参照不在などを
     // 例外ではなく null で表現し、呼び出し側がベストエフォートで続行できるようにする。
     if (allowFailure) return null;
     const detail = res.stderr || (res.error && res.error.message) || `exit ${res.status}`;
@@ -521,13 +521,13 @@ function collectReviewDiff(opts, gitRun) {
   return { diffText: parts.join('\n'), excludedFiles };
 }
 
-// 既定 base (--base 未指定・コミット済み差分モード) のとき、ローカル main が stale だと
+// 既定 base (--base 未指定、コミット済み差分モード) のとき、ローカル main が stale だと
 // merge-base が古くなり HEAD 取り込み済みの main 側コミットまで差分に混入する。これを避けるため、
 // origin/main をベストエフォートで取得し、解決できれば base を origin/main に切り替える。
 // 解決順: fetch (ベストエフォート) → origin/main が verify できれば 'origin/main' → だめなら 'main'。
 //   - opts.mode === 'uncommitted' または opts.baseExplicit のときは何もせず opts.baseRef を返す
 //     (ユーザが明示した base / 未コミット差分には介入しない。fetch もしない)。
-//   - 人向け通知 (fetch 失敗・origin/main 採用) は deps.err (無ければ process.stderr.write) へ。
+//   - 人向け通知 (fetch 失敗、origin/main 採用) は deps.err (無ければ process.stderr.write) へ。
 // gitRun は (args, opts) => stdout | null の関数 (allowFailure 経路で失敗時 null)。
 function resolveBaseRef(opts, gitRun, deps = {}) {
   if (opts.mode === 'uncommitted' || opts.baseExplicit) return opts.baseRef;
@@ -671,7 +671,7 @@ function buildReviewPrompt(diffText, opts, checklist, instructions, excludedFile
   return parts.join('\n');
 }
 
-// reviewer / fix から「起動コマンド・引数・端末通知」を決める純粋関数。
+// reviewer / fix から「起動コマンド、引数、端末通知」を決める純粋関数。
 // 主変更点 (どのレビュアーをどのサンドボックスで呼ぶか) を spawn 抜きで検証できるよう、
 // runReview の配線部分を分離する。stdin に渡すプロンプトは prompt をそのまま使う。
 function reviewerInvocation(opts) {
@@ -794,9 +794,9 @@ function runReview(opts, deps = {}) {
       return null;
     }
   }
-  // 既定 base (--base 未指定・コミット済み差分) のときは origin/main を優先解決する
+  // 既定 base (--base 未指定、コミット済み差分) のときは origin/main を優先解決する
   // (ローカル main が stale だと無関係な差分が混入するため)。opts を直接書き換えず、
-  // 解決後の base を以降のスコープ表記・差分収集で使う。
+  // 解決後の base を以降のスコープ表記、差分収集で使う。
   const resolvedBaseRef = resolveBaseRef(opts, gitRun, deps);
   // 除外パススペックを解決する (--no-exclude 指定時は無効化)。観点と同じ流儀で .cross-review-ignore を読む。
   const excludePatterns = opts.noExclude
@@ -832,7 +832,7 @@ function runReview(opts, deps = {}) {
   if (summarized.replacedCount > 0) {
     writeErr(`[cross-review] 大きなファイル差分 ${summarized.replacedCount} 件を要約に置換しました (--max-file-diff-kb で調整可)\n`);
   }
-  // 差分サイズを常に表示し、閾値超過ならレビュアーを起動せず中断する (トークン浪費・stale base 検知)。
+  // 差分サイズを常に表示し、閾値超過ならレビュアーを起動せず中断する (トークン浪費、stale base 検知)。
   const diffBytes = Buffer.byteLength(diffText, 'utf8');
   const diffKb = diffBytes / 1024;
   writeErr(`[cross-review] レビュー差分サイズ: ${diffKb.toFixed(1)}KB\n`);
