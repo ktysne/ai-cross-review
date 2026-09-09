@@ -57,20 +57,27 @@ node tools/cross-review.js subagent --uncommitted   # CLI を起動せずレビ�
 node tools/cross-review.js --help
 ```
 
-### Codex 起点で Claude レビューから回す例
+### Codex が実装した差分を Claude がレビューする例
 
-Codex が実装し、Claude レビューから往復を始める場合の最短例です。
+レビュアーを実装者と別のベンダーにする最短例です（Codex が実装したので、レビュアーは Claude になります）。
 
 ```bash
 npm run review:claude -- --uncommitted    # Claude がレビュー（結果を確認）
-# ↑の指摘を ../review-notes.md に書き出す（手作業。リポ外に置き、最後の --uncommitted 差分へ混ぜない）
-node tools/cross-review.js codex --fix --uncommitted --instructions ../review-notes.md  # Codex が修正
+# 主セッションが指摘を裏取りし、直すと決めたものを適用する
 npm run review:claude -- --uncommitted    # Claude が妥当性確認
 ```
 
-`../review-notes.md` は自動生成されません。Claude のレビュー結果から今回直す指摘だけを確認して書き出してください。  
-リポジトリ外（例：親ディレクトリ）に置くのは、最後の妥当性確認 `npm run review:claude -- --uncommitted` で、このファイル自体が未追跡差分としてレビューに混ざるのを防ぐためです（`--instructions` 指定時は対象から自動除外されますが、妥当性確認は `--instructions` を付けないため除外されません）。  
+確定した指摘の適用だけを Codex に任せたいときは、指摘をファイルへ書き出して `--fix --instructions` を使います。
+
+```bash
+node tools/cross-review.js codex --fix --uncommitted --instructions ../review-notes.md
+```
+
+`../review-notes.md` は自動生成されません。レビュー結果から今回直す指摘だけを確認して書き出してください。  
+リポジトリ外（例：親ディレクトリ）に置くのは、妥当性確認 `npm run review:claude -- --uncommitted` で、このファイル自体が未追跡差分としてレビューに混ざるのを防ぐためです（`--instructions` 指定時は対象から自動除外されますが、妥当性確認は `--instructions` を付けないため除外されません）。  
 この手順を飛ばすと、存在しない / 古い指摘ファイルを `--instructions` に渡して `--fix` が走るおそれがあります。
+
+実装を一区切りしたときに示す 3 択と、どちらのベンダーがレビュアーになるかの決め方は [docs/cross-review.md](docs/cross-review.md) の「実装完了後の起点」節を参照してください。
 
 ### CLI を起動できない環境（`subagent` モード）
 
@@ -81,7 +88,7 @@ CLI は起動できても、ネットワーク/API 接続が許可されずレ�
 すると外部プロセスを起動せず、組み立てたレビュー用プロンプト（観点 + 差分 + モード別の指示）を stdout に出力するだけになります（人向けの通知は stderr に分けます）。  
 この出力を呼び出し側が利用できる客観レビュー用エージェントへ渡します。  
 `--uncommitted` / `--base` / `--fix` / `--instructions` は他のレビュアーと同じように使えます。  
-ただし `subagent --fix`（修正まで任せる）は **Claude 起点 B**（レビュアーが修正）の代替に限ります。**Codex 起点**では `subagent` はレビューのみで、修正は Codex が行います。  
+ただし `subagent --fix`（修正まで任せる）は、主セッションがレビュアーに修正まで任せると決めたときだけ使います。実装完了後に示す 3 択には、レビュアーが修正する選択肢はありません。  
 詳しくは [docs/cross-review.md](docs/cross-review.md) を参照してください。
 
 | オプション | 意味 |

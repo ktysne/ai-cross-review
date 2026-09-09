@@ -578,6 +578,12 @@ describe('cross-review buildReviewPrompt', () => {
     expect(buildReviewPrompt('diff', { mode: 'base', baseRef: 'main' }, '   ')).toContain(GENERIC_CHECKLIST);
   });
 
+  it('汎用観点は指摘の出し方 (件数上限と反例) を含む', () => {
+    expect(GENERIC_CHECKLIST).toContain('指摘の出し方');
+    expect(GENERIC_CHECKLIST).toContain('10 件');
+    expect(GENERIC_CHECKLIST).toContain('反例');
+  });
+
   it('既定 (fix なし) はレビューのみ指示を含み、修正指示は含めない', () => {
     const prompt = buildReviewPrompt('diff', { mode: 'base', baseRef: 'main', fix: false }, 'CL');
     expect(prompt).toContain(REVIEW_ONLY_INSTRUCTION);
