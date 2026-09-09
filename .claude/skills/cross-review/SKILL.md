@@ -58,7 +58,10 @@ node tools/cross-review.js codex --fix --instructions notes.md
                                       # レビューの指摘 (notes.md) を渡して修正させる
 ```
 
-差分ガード `--max-diff-kb` / 巨大ファイル要約 `--max-file-diff-kb` / 除外無効化 `--no-exclude`、既定 base の `origin/main` 優先解決、ロックファイル等の既定除外 (`.cross-review-ignore` / `CROSS_REVIEW_IGNORE`) は `docs/cross-review.md` 参照。
+Codex が利用上限に達したときは、subagent 代替のプロンプトが自動でファイルへ書き出され、終了コード 75 で終わる（書き出し先は stderr に出る。既定は一時ディレクトリ、`--fallback-prompt <path>` で変更可）。
+その中身をそのまま Agent ツールの客観レビュー用サブエージェント（読み取り専用。`--fix` 時は書込権限付き）へ渡し、PR コメントに「Codex を直接実行できないため (利用上限) subagent 代替で確認した」と残す（切り替えたくないときは `--no-fallback`）。
+
+差分ガード `--max-diff-kb` / 巨大ファイル要約 `--max-file-diff-kb` / 除外無効化 `--no-exclude`、既定 base の `origin/main` 優先解決、ロックファイル等の既定除外 (`.cross-review-ignore` / `CROSS_REVIEW_IGNORE`)、bridge (codex-agent.sh) 経由の起動と `--no-codex-agent` は `docs/cross-review.md` 参照。
 
 ### リモートコントロール (クラウド実行) 環境
 

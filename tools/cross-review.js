@@ -27,6 +27,15 @@
 //   `--fix` 指定時のみ codex を `-s workspace-write` で起動し、検出事項を作業ツリーへ直接
 //   修正させる (相互レビューフローの 3B「レビュー + 修正を依頼」)。claude CLI 経路 (claude -p) の
 //   自動修正は未対応 (--fix は codex / subagent のみ)。
+// - codex の起動は、claude-codex-bridge の起動スクリプト (codex-agent.sh) があればそれを経由する。
+//   モデル、推論 effort、認証ホーム (CODEX_HOME) を定義ファイル `~/.claude/gpt-agents/<name>.md` 側で
+//   一元管理し、Claude Code のサブエージェント経由の起動と条件を揃えるため。サンドボックスも定義側の
+//   `codex_sandbox` で決まるので、read-only の `codex-review` と workspace-write の `codex-subagent` を
+//   --fix の有無で選び分けて「レビューのみは read-only」の不変条件を保つ。スクリプトが無い環境では
+//   従来どおり codex を直接起動する (`--no-codex-agent` で明示的に直接起動へ戻せる)。
+// - Codex が利用上限に達したときは、レビューを失敗で終わらせず subagent 経路と同じプロンプトを
+//   ファイルへ書き出し、終了コード 75 で「客観サブエージェントへ渡してください」と促す
+//   (`--no-fallback` で従来どおりの失敗終了に戻せる)。
 // - リモートコントロール環境では codex/claude スタンドアロン CLI を spawn できない。その場合は
 //   reviewer に `subagent` を指定すると、外部プロセスを起動せず、組み立てたレビュープロンプト
 //   (観点 + スコープ + 差分本文 + モード別指示) を stdout に出すだけにする。呼び出し側 (Claude) が
@@ -54,6 +63,7 @@
 
 const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 // レビュー観点はプロジェクト固有なので、リポジトリ直下の `.cross-review.md` を単一ソースとして
@@ -64,6 +74,28 @@ const CHECKLIST_FILENAME = '.cross-review.md';
 
 // 除外パターンファイル名。観点 (.cross-review.md) と同じ解決順で探す。
 const IGNORE_FILENAME = '.cross-review-ignore';
+
+// claude-codex-bridge の Codex 起動スクリプト。ホームディレクトリからの相対パスで探す
+// (環境変数 CROSS_REVIEW_CODEX_AGENT で明示指定も可能)。
+const CODEX_AGENT_SCRIPT_SUBPATH = ['.claude', 'tools', 'codex-agent.sh'];
+
+// bridge 経由で使う定義名。サンドボックスは定義ファイル側の codex_sandbox で決まるため、
+// 「レビューのみは read-only、--fix のときだけ workspace-write」の不変条件は定義名の選択で守る。
+// codex-review = read-only / codex-subagent = workspace-write。
+const CODEX_AGENT_REVIEW_NAME = 'codex-review';
+const CODEX_AGENT_FIX_NAME = 'codex-subagent';
+
+// codex-agent.sh の終了コード。3 = bridge が未導入 (codex コマンドや定義が無い、codex_enabled: false)、
+// 75 = Codex が利用上限で実行できなかった。
+const CODEX_AGENT_EXIT_MISSING = 3;
+const USAGE_LIMIT_EXIT_CODE = 75;
+
+// 直接起動時に利用上限を見分けるための出力パターン。codex-agent.sh 側の判定と同じ語を使う。
+// 429 は単語境界で照合し、ID や桁数の一致で誤検出しないようにする。
+const USAGE_LIMIT_PATTERN = /usage limit|rate limit|too many requests|\b429\b/i;
+
+// 利用上限の判定に使う出力の保持量 (末尾のみ)。ログ全体を溜め込まないための上限。
+const OUTPUT_TAIL_LIMIT = 64 * 1024;
 
 // 既定で差分本文から除外するファイル群 (ロックファイル、生成物、ソースマップ)。
 // レビュー価値が低くトークンを浪費しがちなので、明示的に除外する。
@@ -269,8 +301,19 @@ const USAGE = [
   '  --no-exclude          既定除外も含めすべての除外を無効化 (緊急時の逃げ道)',
   '  --instructions <path> レビュアーからの申し送り・重点指摘ファイルをプロンプトへ添付',
   '                        (観点 .cross-review.md は置き換えず追加。--fix と併用で指摘を直接修正させる)',
+  '  --codex-agent <name>  bridge (codex-agent.sh) で使う定義名を明示 (既定: レビューのみ codex-review /',
+  '                        --fix は codex-subagent。--fix と食い違う定義名はエラー)',
+  '  --no-codex-agent      bridge を使わず codex を直接起動する (従来の起動方法)',
+  '  --no-fallback         Codex が利用上限でも subagent 代替へ切り替えず、そのまま失敗終了する',
+  '  --fallback-prompt <path> 利用上限時に出力する代替プロンプトの書き出し先',
+  '                        (既定: OS の一時ディレクトリ/cross-review-fallback-<pid>.md)',
   '  -h, --help            このヘルプを表示',
   '',
+  'codex の起動: claude-codex-bridge の codex-agent.sh があれば経由します',
+  '  (解決順は 環境変数 CROSS_REVIEW_CODEX_AGENT → ~/.claude/tools/codex-agent.sh。無ければ codex を直接起動)。',
+  '  モデル・推論 effort・認証ホーム・サンドボックスは定義 ~/.claude/gpt-agents/<name>.md に従います。',
+  '利用上限時: Codex が利用上限に達したら subagent 代替のプロンプトをファイルへ書き出し、終了コード 75 で終わります',
+  '  (--no-fallback で無効化)。',
   'レビュー観点: リポジトリ直下の .cross-review.md を読み込みます',
   '  (環境変数 CROSS_REVIEW_CHECKLIST でパス指定可。スクリプト位置からも解決。無ければ汎用観点)。',
   '差分の除外: ロックファイル・生成物 (package-lock.json / *.min.js / *.map 等) を既定で除外します',
@@ -286,6 +329,10 @@ const USAGE = [
   '  node tools/cross-review.js subagent --uncommitted',
   '      (リモートコントロール用: 未コミット差分のレビュープロンプトを stdout に出力し、',
   '       Agent ツールの客観サブエージェントへ渡す)',
+  '  node tools/cross-review.js codex --no-codex-agent',
+  '      (bridge を使わず codex を直接起動する)',
+  '  node tools/cross-review.js codex --no-fallback',
+  '      (利用上限でも subagent 代替へ切り替えない)',
 ].join('\n');
 
 // 非負整数として解釈できれば数値を、できなければ null を返す。
@@ -312,6 +359,14 @@ function parseArgs(argv) {
     maxDiffKb: null, // --max-diff-kb の値 (未指定は null。閾値の最終解決は resolveMaxDiffKb)
     maxFileDiffKb: null, // --max-file-diff-kb の値 (未指定は null。最終解決は resolveMaxFileDiffKb)
     noExclude: false, // --no-exclude で既定除外も含めすべての除外を無効化する (緊急時の逃げ道)
+    // codex-agent.sh (bridge) 経由の起動設定。3 状態を 1 フィールドで表す:
+    //   null   = 既定 (スクリプトがあれば bridge、無ければ直接起動)
+    //   false  = --no-codex-agent (常に直接起動)
+    //   文字列 = --codex-agent <name> (使う定義名を明示)
+    // --codex-agent と --no-codex-agent を併記した場合は後に書いたほうが勝つ。
+    codexAgent: null,
+    noFallback: false, // --no-fallback で利用上限時の subagent 代替への切り替えを無効化する
+    fallbackPromptPath: null, // --fallback-prompt の書き出し先 (未指定なら一時ディレクトリ)
     help: false,
     error: null,
   };
@@ -324,6 +379,40 @@ function parseArgs(argv) {
       out.fix = true;
     } else if (a === '--no-exclude') {
       out.noExclude = true;
+    } else if (a === '--no-codex-agent') {
+      out.codexAgent = false;
+    } else if (a === '--no-fallback') {
+      out.noFallback = true;
+    } else if (a === '--codex-agent') {
+      const v = args[i + 1];
+      if (!v || v.startsWith('-')) {
+        out.error = '--codex-agent には定義名が必要です';
+      } else {
+        out.codexAgent = v;
+        i++;
+      }
+    } else if (a.startsWith('--codex-agent=')) {
+      const v = a.slice('--codex-agent='.length);
+      if (!v) {
+        out.error = '--codex-agent には定義名が必要です'; // `--codex-agent=` 空値は黙って素通りさせない。
+      } else {
+        out.codexAgent = v;
+      }
+    } else if (a === '--fallback-prompt') {
+      const v = args[i + 1];
+      if (!v || v.startsWith('-')) {
+        out.error = '--fallback-prompt にはファイルパスが必要です';
+      } else {
+        out.fallbackPromptPath = v;
+        i++;
+      }
+    } else if (a.startsWith('--fallback-prompt=')) {
+      const v = a.slice('--fallback-prompt='.length);
+      if (!v) {
+        out.error = '--fallback-prompt にはファイルパスが必要です';
+      } else {
+        out.fallbackPromptPath = v;
+      }
     } else if (a === '--uncommitted') {
       out.mode = 'uncommitted';
     } else if (a === '--instructions') {
@@ -407,6 +496,15 @@ function parseArgs(argv) {
       // --fix は作業ツリーを書き換える。codex は workspace-write、subagent は FIX 指示付きプロンプトを出して
       // 書込権限付きサブエージェントに直させる、で対応する。claude CLI 経路 (claude -p) のみ自動修正を未配線。
       out.error = '--fix は codex か subagent のみ対応です (claude CLI 経路の自動修正は未対応)';
+    } else if (typeof out.codexAgent === 'string') {
+      // bridge 経由のサンドボックスは定義ファイル側の codex_sandbox で決まるので、--fix の有無と
+      // 定義名が食い違うと「レビューのみなのに書き込める」「--fix なのに書けない」状態になる。
+      // 既知の 2 定義に限って食い違いを弾く (それ以外の名前は利用者が用意した定義として通す)。
+      if (out.codexAgent === CODEX_AGENT_REVIEW_NAME && out.fix) {
+        out.error = `--codex-agent ${CODEX_AGENT_REVIEW_NAME} は読み取り専用の定義です (--fix とは併用できません)`;
+      } else if (out.codexAgent === CODEX_AGENT_FIX_NAME && !out.fix) {
+        out.error = `--codex-agent ${CODEX_AGENT_FIX_NAME} は書き込み可能な定義です (--fix 無しでは使えません)`;
+      }
     }
   }
   return out;
@@ -679,14 +777,75 @@ function buildReviewPrompt(diffText, opts, checklist, instructions, excludedFile
   return parts.join('\n');
 }
 
+// claude-codex-bridge の起動スクリプト (codex-agent.sh) のパスを解決する。解決順は:
+//   1. 環境変数 CROSS_REVIEW_CODEX_AGENT (パス)
+//   2. <ホーム>/.claude/tools/codex-agent.sh
+// どちらも無ければ null (呼び出し側は codex を直接起動する)。
+// 明示指定 (env) が解決できないときは、黙って既定パスへ落ちず警告する
+// (観点ファイルの解決と同じ流儀。誤ったパスで意図しない起動経路になる運用事故を検知するため)。
+// deps で env / homedir / 存在確認 / 警告出力を差し替え可能にする (テスト用)。
+function resolveCodexAgentScript(deps = {}) {
+  const env = deps.env || process.env;
+  const exists = deps.exists || ((p) => fs.existsSync(p));
+  const warn = deps.warn || ((m) => process.stderr.write(m));
+  const home = deps.homedir || os.homedir();
+  const envPath = env.CROSS_REVIEW_CODEX_AGENT || '';
+  const candidates = [];
+  if (envPath) candidates.push(envPath);
+  candidates.push(path.join(home, ...CODEX_AGENT_SCRIPT_SUBPATH));
+  for (const p of candidates) {
+    let found = false;
+    try {
+      found = !!exists(p);
+    } catch {
+      found = false; // 存在確認が失敗したら次の候補 / 直接起動へ進む。
+    }
+    if (found) return p;
+    if (envPath && p === envPath) {
+      warn(`[cross-review] CROSS_REVIEW_CODEX_AGENT=${envPath} が見つかりません。既定パスへフォールバックします。\n`);
+    }
+  }
+  return null;
+}
+
+// bridge 経由で使う定義名を決める。--codex-agent で明示されていればそれ、無ければ
+// --fix の有無で read-only (codex-review) と workspace-write (codex-subagent) を選び分ける。
+function codexAgentNameFor(opts) {
+  if (typeof opts.codexAgent === 'string') return opts.codexAgent;
+  return opts.fix ? CODEX_AGENT_FIX_NAME : CODEX_AGENT_REVIEW_NAME;
+}
+
 // reviewer / fix から「起動コマンド、引数、端末通知」を決める純粋関数。
 // 主変更点 (どのレビュアーをどのサンドボックスで呼ぶか) を spawn 抜きで検証できるよう、
 // runReview の配線部分を分離する。stdin に渡すプロンプトは prompt をそのまま使う。
-function reviewerInvocation(opts) {
+// codex は codex-agent.sh (bridge) があればそれを経由し (via: 'agent')、無ければ
+// codex を直接起動する (via: 'direct')。via は利用上限の判定 (isUsageLimitExit) と
+// bridge 未導入時の再起動判断に使う。deps は resolveCodexAgentScript へ渡す
+// (env / homedir / exists / warn) ほか、bridge へ渡す作業ディレクトリ (deps.cwd) を差し替える。
+function reviewerInvocation(opts, deps = {}) {
   if (opts.reviewer === 'codex') {
+    // --no-codex-agent (codexAgent === false) は解決自体を行わず、常に直接起動する。
+    const script = opts.codexAgent === false ? null : resolveCodexAgentScript(deps);
+    if (script) {
+      const agentName = codexAgentNameFor(opts);
+      const cwd = deps.cwd || process.cwd();
+      // codex-agent.sh は依頼文を stdin から読み、定義ファイルのフロントマターに従って
+      // CODEX_HOME / モデル / effort / サンドボックスを決めて codex exec を起動する。
+      return {
+        cmd: 'bash',
+        args: [script, agentName, '-C', cwd],
+        via: 'agent',
+        agentName,
+        scriptPath: script,
+        notice: opts.fix
+          ? `Codex にレビュー + 検出事項の修正を依頼します (作業ツリーを編集します): codex-agent.sh 経由 (定義: ${agentName})\n`
+          : `Codex でレビューを実行します: codex-agent.sh 経由 (定義: ${agentName})\n`,
+      };
+    }
     return {
       cmd: 'codex',
       args: codexExecArgs(opts),
+      via: 'direct',
       notice: opts.fix
         ? 'Codex にレビュー + 検出事項の修正を依頼します (作業ツリーを編集します)...\n'
         : 'Codex でレビューを実行します...\n',
@@ -753,29 +912,102 @@ function resolveReviewerCommandForSpawn(cmd, deps = {}) {
 
 // レビュアー CLI を起動し、stdin にプロンプトを流し込む。出力は端末へそのまま流す。
 // Windows では起動直前に where.exe で実体を解決し、可能なら shell を使わずに起動する。
-function spawnReviewer(cmd, args, stdinText) {
+// stdio を pipe にするのは、端末へ転送しつつ末尾を保持して利用上限の判定に使うため
+// (受け取った塊をそのまま書き出すので、見た目は stdio:'inherit' と変わらない)。
+// onExit は終了時に 1 回だけ { code, outputTail, error } で呼ぶ (runReview が上限判定に使う)。
+function spawnReviewer(cmd, args, stdinText, onExit) {
   const resolved = resolveReviewerCommandForSpawn(cmd);
   const child = spawn(resolved.cmd, args, {
-    stdio: ['pipe', 'inherit', 'inherit'],
+    stdio: ['pipe', 'pipe', 'pipe'],
     // Windows では .cmd/.bat shim のことがあるため、その場合だけ shell 経由にする。
     shell: resolved.shell,
   });
+  // 末尾のみ保持する。判定に使う語 (usage limit 等) は ASCII なので、塊の境界で
+  // マルチバイト文字が割れても判定には影響しない。転送側は Buffer のまま書いてバイト列を保つ。
+  let outputTail = '';
+  const forward = (stream, sink) => {
+    if (!stream) return;
+    stream.on('data', (chunk) => {
+      sink.write(chunk);
+      outputTail += chunk.toString('utf8');
+      if (outputTail.length > OUTPUT_TAIL_LIMIT) outputTail = outputTail.slice(-OUTPUT_TAIL_LIMIT);
+    });
+  };
+  forward(child.stdout, process.stdout);
+  forward(child.stderr, process.stderr);
+  let settled = false;
+  const finish = (code, error) => {
+    if (settled) return; // error → close の順で両方発火することがあるため 1 回に絞る。
+    settled = true;
+    process.exitCode = code == null ? 1 : code;
+    if (typeof onExit === 'function') onExit({ code, outputTail, error: error || null });
+  };
   child.on('error', (err) => {
     if (err && err.code === 'ENOENT') {
       process.stderr.write(`${cmd} CLI が見つかりません。PATH に ${cmd} を通してください。\n`);
     } else {
       process.stderr.write(`${cmd} の起動に失敗しました: ${err && err.message}\n`);
     }
-    process.exitCode = 1;
+    finish(1, err);
   });
-  child.on('exit', (code) => {
-    process.exitCode = code == null ? 1 : code;
+  // 'exit' ではなく 'close' を待つ。pipe した stdout/stderr を読み切ってから判定するため。
+  child.on('close', (code) => {
+    finish(code, null);
   });
   if (child.stdin) {
+    // 相手がプロンプトを読み切らずに終了することがある (bridge が定義不備で早期終了する等)。
+    // その場合 stdin が EPIPE で error を出すので、握りつぶして終了コード側で判断する
+    // (未処理の error イベントにすると、フォールバックの前にこのプロセスごと落ちる)。
+    child.stdin.on('error', () => {});
     child.stdin.write(stdinText);
     child.stdin.end();
   }
   return child;
+}
+
+// レビュアーの終了が「Codex の利用上限」かどうかを判定する純粋関数。
+//   - bridge 経由 (via: 'agent') は codex-agent.sh が上限を終了コード 75 に写像するのでそれだけを見る。
+//   - 直接起動 (via: 'direct') は終了コードに上限専用の値が無いため、非ゼロ終了かつ
+//     出力の末尾に上限を示す語があるときに限って上限と判定する。
+// 正常終了 (0) とシグナル終了 (code == null) は上限として扱わない。
+function isUsageLimitExit(result) {
+  const { via, code, outputTail } = result || {};
+  if (via === 'agent') return code === USAGE_LIMIT_EXIT_CODE;
+  if (code === 0 || code == null) return false;
+  return USAGE_LIMIT_PATTERN.test(String(outputTail || ''));
+}
+
+// 利用上限時に出す代替プロンプトの書き出し先を決める。--fallback-prompt があればそれ、
+// 無ければ一時ディレクトリに pid 付きのファイル名を作る (同時実行でぶつからないように)。
+function resolveFallbackPromptPath(opts, deps = {}) {
+  if (opts && opts.fallbackPromptPath) return opts.fallbackPromptPath;
+  const tmp = deps.tmpdir || os.tmpdir();
+  const pid = deps.pid || process.pid;
+  return path.join(tmp, `cross-review-fallback-${pid}.md`);
+}
+
+// 利用上限時のフォールバック。subagent 経路と同じプロンプト本文をファイルへ書き出し、
+// 次に何をすればよいかを stderr に出して終了コードを 75 にする。
+// stdout はレビュアーの出力で使われているので、プロンプト本文を stdout に混ぜない。
+// 戻り値は書き出したパス (書けなければ null)。
+function emitFallbackPrompt(prompt, opts, deps = {}) {
+  const writeErr = deps.err || ((s) => process.stderr.write(s));
+  const writeFile = deps.writeFile || ((p, body) => fs.writeFileSync(p, body, 'utf8'));
+  const promptPath = resolveFallbackPromptPath(opts, deps);
+  try {
+    writeFile(promptPath, `${prompt}\n`);
+  } catch (err) {
+    writeErr(`[cross-review] 代替プロンプトを書き出せません: ${promptPath} (${(err && err.message) || 'write error'})\n`);
+    process.exitCode = 1;
+    return null;
+  }
+  writeErr(
+    `[cross-review] Codex の利用上限のため subagent 代替に切り替えます。プロンプト: ${promptPath}\n`
+    + '  その内容を Claude の客観サブエージェント (読み取り専用。--fix 時は書込権限付き) へ渡してください。\n'
+    + '  PR コメントには「Codex を直接実行できないため (利用上限) subagent 代替で確認した」と残してください。\n',
+  );
+  process.exitCode = USAGE_LIMIT_EXIT_CODE;
+  return promptPath;
 }
 
 // deps で gitRun / spawnFn を差し替え可能にする (テストから stdin 本文まで検証するため)。
@@ -857,7 +1089,7 @@ function runReview(opts, deps = {}) {
   const prompt = buildReviewPrompt(diffText, resolvedOpts, checklist, instructions, excludedFiles);
   // reviewerInvocation も解決後の opts で揃える (現状 baseRef は参照しないが、プロンプトの
   // スコープ表記と起動引数が将来食い違わないよう、解決後の値だけを下流に渡す)。
-  const inv = reviewerInvocation(resolvedOpts);
+  const inv = reviewerInvocation(resolvedOpts, deps);
   if (inv.emit) {
     // subagent: 外部プロセスを起動せず、組み立てたプロンプト本文だけを stdout に出す。
     // 通知は stderr に分けて、stdout を「そのまま客観サブエージェントへ渡せるプロンプト」に保つ。
@@ -865,8 +1097,34 @@ function runReview(opts, deps = {}) {
     writeOut(prompt + '\n');
     return null;
   }
-  writeOut(inv.notice);
-  return spawnFn(inv.cmd, inv.args, prompt);
+  // レビュアーを起動し、終了コードで「bridge 未導入」「利用上限」を切り分ける。
+  // 起動を関数にするのは、bridge 未導入のときに同じプロンプトで直接起動をやり直すため。
+  const start = (invocation) => {
+    writeOut(invocation.notice);
+    return spawnFn(invocation.cmd, invocation.args, prompt, (result) => {
+      const exit = result || {};
+      // 上限フォールバックと bridge の切り替えは codex 経路だけの仕組み
+      // (claude CLI 経路は対象外。subagent はここに来ない)。
+      if (resolvedOpts.reviewer !== 'codex') return;
+      // bridge が未導入 (codex コマンドや定義が無い)、または bash 自体が無い場合は直接起動へ戻す。
+      const bridgeUnavailable = exit.code === CODEX_AGENT_EXIT_MISSING
+        || (exit.error && exit.error.code === 'ENOENT');
+      if (invocation.via === 'agent' && bridgeUnavailable) {
+        writeErr('[cross-review] bridge が未導入のため直接起動へ切り替えます。\n');
+        start(reviewerInvocation({ ...resolvedOpts, codexAgent: false }, deps));
+        return;
+      }
+      if (opts.noFallback) return; // --no-fallback は従来どおり失敗終了 (終了コードはそのまま)。
+      if (!isUsageLimitExit({ via: invocation.via, code: exit.code, outputTail: exit.outputTail })) return;
+      emitFallbackPrompt(prompt, opts, {
+        err: writeErr,
+        writeFile: deps.writeFile,
+        tmpdir: deps.tmpdir,
+        pid: deps.pid,
+      });
+    });
+  };
+  return start(inv);
 }
 
 function main() {
@@ -887,6 +1145,11 @@ module.exports = {
   parseArgs,
   codexExecArgs,
   reviewerInvocation,
+  resolveCodexAgentScript,
+  codexAgentNameFor,
+  isUsageLimitExit,
+  resolveFallbackPromptPath,
+  emitFallbackPrompt,
   collectReviewDiff,
   resolveBaseRef,
   resolveMaxDiffKb,
@@ -901,6 +1164,10 @@ module.exports = {
   resolveReviewerCommandForSpawn,
   CHECKLIST_FILENAME,
   IGNORE_FILENAME,
+  CODEX_AGENT_REVIEW_NAME,
+  CODEX_AGENT_FIX_NAME,
+  CODEX_AGENT_EXIT_MISSING,
+  USAGE_LIMIT_EXIT_CODE,
   DEFAULT_EXCLUDE_PATTERNS,
   GENERIC_CHECKLIST,
   REVIEW_ONLY_INSTRUCTION,

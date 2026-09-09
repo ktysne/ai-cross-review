@@ -163,6 +163,20 @@ CLI と API 接続を切り分ける場合は、まず `Get-Command claude` / `c
 > 同じ種類の AI が実装とレビューを兼ねる場合でも、サブエージェントは**別の文脈**で差分だけを見るので、「客観的な第三者レビュー」の利点（実装時の思い込みに引きずられない）は保てます。  
 > `codex` / `claude` CLI が使える環境では、これまでどおり対象レビュアー CLI を優先します。この代替は、CLI を起動できない、接続できないときの代わりです。
 
+### Codex が利用上限に達したときは自動でこの代替へ切り替える
+
+`npm run review:codex*` の実行中に Codex が利用上限に達した場合、レビューを失敗で終わらせず、この subagent 代替へ自動で切り替えます。  
+上限は往復の途中で不意に来るので、そのたびに手で `node tools/cross-review.js subagent` を打ち直さずに済ませるためです。
+
+- **判定**：bridge 経由なら**終了コード 75**（`codex-agent.sh` が上限をこのコードに写像します）。直接起動なら**非ゼロ終了かつ出力に `usage limit` / `rate limit` / `too many requests` / `429` のいずれか**があるとき。
+- **切り替え時の動作**：`subagent` と同じプロンプト本文（`--fix` なら FIX 指示付き）を**ファイルへ書き出し**、次に何をすればよいかを stderr に出して、**終了コード 75** で終わります。  
+  書き出し先の既定は OS の一時ディレクトリの `cross-review-fallback-<pid>.md` で、`--fallback-prompt <path>` で変えられます。  
+  プロンプトを stdout に混ぜないのは、stdout がレビュアーの出力で埋まっているためです。
+- **その後**：書き出されたファイルの内容を、`Agent` ツール等の客観レビュー用サブエージェント（読み取り専用。`--fix` 時は書込権限付き）へ渡してレビューさせます。以降の手順は上の subagent 経路と同じです。  
+  PR コメントには「Codex を直接実行できないため（利用上限）subagent 代替で確認した」ことを残します。
+- **切り替えたくないとき**：`--no-fallback` を付けると、従来どおり失敗終了します（終了コードはレビュアーのまま）。
+- `claude` CLI 経路（`npm run review:claude`）はこの自動切り替えの対象外です。
+
 ### レビュアーの指摘を渡して直させる（`--instructions`）
 
 **「片方のレビュアー（または直前のレビュー結果）で、すでに具体的な指摘が出ていて、それを Codex に直接修正させたい」** ときの基本フローです。  
@@ -256,7 +270,7 @@ node tools/cross-review.js subagent      # CLI を起動せずレビュー用プ
 - codex のサンドボックスでモードを切り替えます：
   - レビューだけ（既定）→ `codex exec -s read-only`（ファイルを変えさせない）
   - `--fix` → `codex exec -s workspace-write`（見つかった問題を作業ツリーへ直接修正させる）
-- codex は `-c approval_policy=never` で**承認を never に固定**します（非対話の自走が承認待ちで止まらないように）。  
+- codex は `-c approval_policy=never` で**承認を never に固定**します（直接起動のとき。非対話の自走が承認待ちで止まらないように）。  
 - **専用サブコマンド `codex exec review` は使いません**。  
   codex v0.137.0 で `--uncommitted` / `--base` が `[PROMPT]` と併用できなくなり、観点チェックリストを同時に渡せなくなったため、汎用の `exec` と差分の埋め込みに統一しました。  
 - 差分の対象範囲：
@@ -268,6 +282,35 @@ node tools/cross-review.js subagent      # CLI を起動せずレビュー用プ
 - 差分の間引き：ロックファイル、生成物（`package-lock.json` / `*.min.js` / `*.map` ほか）を**既定で除外**し、巨大なファイル差分は **stat 要約に置換**してトークンを節約します（`.cross-review-ignore` で除外を追加、`--no-exclude` で無効化、`--max-file-diff-kb` で置換しきい値。詳細は後述「差分の除外と要約」）。  
 - 引数解析、差分生成、プロンプト生成、観点解決、申し送り注入は `tests/cross-review.test.js`（vitest）が担保します。  
   このテストは**取り込み先では任意**で、vitest を使うときだけ同梱します（同梱しなくても engine の振る舞いは upstream のテストが担保）。
+
+### codex の起動は bridge（codex-agent.sh）を経由する
+
+claude-codex-bridge を入れている環境では、codex を直接起動する代わりに bridge の起動スクリプトを経由します。  
+モデル、推論 effort、認証ホーム（`CODEX_HOME`）を定義ファイル側で一元管理し、Claude Code のサブエージェント経由の Codex 起動と条件を揃えるためです。
+
+起動経路は次の順で決まります。
+
+1. `--no-codex-agent` が付いていれば、解決せずに **codex を直接起動**します（従来の起動方法）。
+2. スクリプトを **環境変数 `CROSS_REVIEW_CODEX_AGENT`（パス）→ `~/.claude/tools/codex-agent.sh`** の順に探し、見つかれば `bash <script> <定義名> -C <cwd>` で起動します（プロンプトは従来どおり stdin で渡します）。  
+   環境変数で指定したパスが見つからないときは、黙って既定パスへ落ちず stderr に警告を出します。
+3. どこにも無ければ **codex を直接起動**します。
+
+定義名は `--fix` の有無で選び分けます（`--codex-agent <name>` で明示もできます）。
+
+| モード | 定義名 | 定義側の `codex_sandbox` |
+|---|---|---|
+| レビューのみ（既定） | `codex-review` | `read-only` |
+| `--fix` | `codex-subagent` | `workspace-write` |
+
+bridge 経由ではサンドボックスが**定義ファイル（`~/.claude/gpt-agents/<定義名>.md`）側**で決まるため、「レビューのみは read-only、`--fix` のときだけ workspace-write」という不変条件は**定義名の選択**で守ります。  
+`--fix` と `--codex-agent codex-review` の併用、および `--fix` 無しの `--codex-agent codex-subagent` は、起動前にエラー（終了コード 2）で止めます。  
+`codex-review` / `codex-subagent` 以外の名前は、利用者が用意した定義とみなしてそのまま通します。
+
+**承認方針の注意**：bridge 経由では `-c approval_policy=never` を渡せません（スクリプトが codex への追加引数を受け付けないため）。  
+bridge 経由では承認方針を定義側の codex 設定に委ねます。非対話で止まらないよう `codex-agent.sh` 側で never を明示することを bridge に依頼済みです。
+
+**bridge が未導入のとき**：スクリプトはあるが Codex 側が使えない（`codex` コマンドが無い、定義ファイルが無い、`codex_enabled: false`）場合、スクリプトは終了コード 3 を返します。  
+このときは stderr に 1 行出したうえで、**同じプロンプトのまま直接起動へ切り替えて**やり直します（`bash` 自体が見つからない場合も同じ扱いです）。
 
 ## 既定 base の解決と差分サイズのガード
 
