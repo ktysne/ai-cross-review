@@ -15,6 +15,7 @@
 //   node tools/cross-review.js claude --base develop  # 比較先ブランチを変更
 //   node tools/cross-review.js state            # この枝の往復回数・直前レビュー SHA・非対応指摘を表示
 //   node tools/cross-review.js dismiss "<要約>" # 非対応と判断した指摘を記録し、以降再指摘させない
+//   node tools/cross-review.js comment --round 1  # 保存済みレビュー出力と判断ファイルから PR コメント本文を生成
 //   npm run review:codex                        # = node tools/cross-review.js codex
 //   npm run review:codex:fix                    # = node tools/cross-review.js codex --fix
 //   npm run review:claude -- --uncommitted      # npm 経由で追加引数を渡す (-- が必要)
@@ -69,6 +70,16 @@
 // - 既定 base は「前回レビュー SHA → PR の base ブランチ → origin/main → ローカル main」の順で
 //   解決する。前者ほど差分が小さく、かつ人の指定なしで決まる情報だから。決めた base と解決方法は
 //   差分サイズと同じ stderr 行に必ず出し、stale な比較に気づけるようにする。
+// - 往復を記録できたときは、レビュアーの出力 (subagent 経路は渡したプロンプト) と実行経路の
+//   メタ情報を `.cross-review/round-<N>-*` へ保存する。PR コメントの定型はレビュー出力、主セッションが
+//   書く判断ファイル、検証出力の 3 つからの機械的な変換なので、材料を会話の外へ残しておく。
+//   保存の失敗はレビューを失敗にしない (出力は端末に出ているため)。整形は `comment` サブコマンドが
+//   行い、投稿はしない。判断内容は主セッションが書くもので、CLI が PR へ直接書くと誤投稿の取り消しが
+//   難しいため、`gh pr comment --body-file` のコマンド例を出すに留める。
+// - レビュー実行前に PR の有無を `gh pr view` で確かめ、無いと分かったときだけ警告する。
+//   PR コメントを共有ログにする運用なので、PR 未作成のまま往復を始めると記録が揮発する。
+//   gh 不在やネットワーク断は「分からない」に倒して黙って続行する (リモートを持たない
+//   取り込み先を止めないため)。PR の番号と base ブランチは同じ 1 回の呼び出しから得る。
 // - 差分サイズが閾値を超えたときは即中断せず、ファイル単位の要約閾値を段階的に下げて縮退を試す。
 //   閾値をわずかに超えただけの差分で再実行を強いると、差分収集を二重に行うことになるため。
 //   縮退しても収まらないときだけ中断する (--strict-diff-guard で従来の即中断に戻せる)。
@@ -101,6 +112,15 @@ const IGNORE_FILENAME = '.cross-review-ignore';
 // (サブディレクトリから起動しても同じ枝の記録を読み書きするため。resolveStatePath 参照)。
 // git 管理下に置かない前提なので、取り込み先でも .gitignore へ追加する。
 const STATE_FILENAME = '.cross-review-state.json';
+
+// レビュー出力と PR コメント生成物の置き場 (リポジトリ直下)。状態ファイルと同じく
+// スクリプト位置から解決し、cwd に依存させない (resolveReviewDir 参照)。
+// 生成物なので git 管理下に置かない前提。取り込み先でも .gitignore へ追加する。
+const REVIEW_DIR_NAME = '.cross-review';
+
+// PR コメントに載せる検証出力の行数上限 (末尾から数える)。長いテスト出力で
+// コメントが埋まらないようにするための上限で、切り詰めたときはその旨を本文に書く。
+const VERIFY_TAIL_LINES = 200;
 
 // 差分サイズガードの段階的縮退で試す「ファイル単位の要約閾値」(KB)。大きい順に下げる。
 // 既定 64KB で全体閾値を超えた差分を、再度 git を叩かずに縮めるための段。
@@ -149,6 +169,11 @@ const USAGE_LIMIT_PATTERN = /usage limit|rate limit|too many requests|\b429\b/i;
 
 // 利用上限の判定に使う出力の保持量 (末尾のみ)。ログ全体を溜め込まないための上限。
 const OUTPUT_TAIL_LIMIT = 64 * 1024;
+
+// レビュー出力を `.cross-review/` へ保存するために保持する量の上限。上限判定の末尾 64KB とは別に、
+// 保存用は全文を溜める。青天井にすると異常出力でメモリを食い潰すため上限を設け、
+// 超えた分は先頭を捨てて末尾を残す (保存時に切り詰めた旨を書き添える)。
+const OUTPUT_CAPTURE_LIMIT = 4 * 1024 * 1024;
 
 // 既定で差分本文から除外するファイル群 (ロックファイル、生成物、ソースマップ)。
 // レビュー価値が低くトークンを浪費しがちなので、明示的に除外する。
@@ -361,7 +386,7 @@ function joinReviewerNotes(instructions, dismissedSection) {
 const USAGE = [
   'Claude ↔ Codex 相互レビュー CLI ブリッジ',
   '',
-  '使い方: node tools/cross-review.js <codex|claude|subagent|state|dismiss> [options]',
+  '使い方: node tools/cross-review.js <codex|claude|subagent|state|dismiss|comment> [options]',
   '',
   'レビュアー:',
   '  codex      codex スタンドアロン CLI でレビュー (既定 read-only、--fix で workspace-write)',
@@ -379,6 +404,11 @@ const USAGE = [
   '                    終えた後など、CLI がレビューの成立を観測できないときに手で記録する',
   '  dismiss "<要約>"  非対応と判断した指摘を記録する (以降のレビュープロンプトに',
   '                    「再指摘しない」節として添えられる。同じ要約は重複追加しない)',
+  '',
+  'サブコマンド (PR コメントの生成):',
+  '  comment --round <N>   保存済みのレビュー出力 (.cross-review/round-<N>-<reviewer>.md)、判断ファイル',
+  '                        (round-<N>-triage.md)、検証出力を定型に整形し、gh pr comment --body-file 用の',
+  '                        ファイルを書き出す (投稿はしない。コマンド例は stderr に出る)',
   '',
   'options:',
   '  --fix                 修正まで依頼 (codex: workspace-write で直接編集 / subagent: FIX 指示付きで出力。claude CLI 経路は非対応)',
@@ -400,6 +430,10 @@ const USAGE = [
   '                        --fix は codex-subagent。--fix と食い違う定義名はエラー)',
   '  --no-codex-agent      bridge を使わず codex を直接起動する (従来の起動方法)',
   '  --no-fallback         Codex が利用上限でも subagent 代替へ切り替えず、そのまま失敗終了する',
+  '  --no-pr-check         レビュー実行前の PR 存在確認 (gh pr view) を省く',
+  '  --reviewer <name>     comment: 対象のレビュアーを明示 (省略時は .cross-review/round-<N>-*.json から自動選択)',
+  '  --verify <path>       comment: 検証コマンドの出力ファイルを「確認内容」節へ入れる (末尾 200 行まで)',
+  '  --out <path>          comment: 生成した本文の書き出し先 (既定 .cross-review/round-<N>-comment.md)',
   '  --fallback-prompt <path> 利用上限時に出力する代替プロンプトの書き出し先',
   '                        (既定: OS の一時ディレクトリ/cross-review-fallback-<pid>.md)',
   '  -h, --help            このヘルプを表示',
@@ -422,6 +456,12 @@ const USAGE = [
   '  環境変数 CROSS_REVIEW_NO_FETCH=1 で fetch と gh の呼び出しを省きます (オフライン作業向け)。',
   '状態ファイル: <スクリプト>/../.cross-review-state.json にブランチ単位で往復回数・直前レビュー SHA・',
   '  非対応と判断した指摘を記録します (git 管理外を想定。--no-state で無効化)。',
+  'レビュー出力: 往復を記録できたときだけ <スクリプト>/../.cross-review/ へ保存します',
+  '  (codex / claude はレビュアーの出力を round-<N>-<reviewer>.md、subagent は渡したプロンプトを',
+  '   round-<N>-<reviewer>-prompt.md、いずれも実行経路と base を round-<N>-<reviewer>.json に記録)。',
+  '  subagent 経路はサブエージェントの出力を round-<N>-subagent.md へ貼ってから comment を使います。',
+  'PR の確認: レビュー実行前に gh pr view で PR の有無を調べ、無いと分かったときだけ警告します',
+  '  (実行は止めません。--no-pr-check と CROSS_REVIEW_NO_FETCH=1 で省略)。',
   '',
   '例:',
   '  npm run review:codex',
@@ -443,6 +483,8 @@ const USAGE = [
   '      (サブエージェントでのレビューを終えた後に、往復を 1 回分記録する)',
   '  node tools/cross-review.js dismiss "運用上到達しない入力への指摘"',
   '      (非対応と判断した指摘を記録し、以降のレビューで再指摘させない)',
+  '  node tools/cross-review.js comment --round 1 --verify verify.log',
+  '      (1 往復目の PR コメント本文を生成する。生成後 gh pr comment --body-file で投稿する)',
 ].join('\n');
 
 // 非負整数として解釈できれば数値を、できなければ null を返す。
@@ -456,13 +498,18 @@ function parseNonNegativeInt(value) {
   return Number.isSafeInteger(n) ? n : null;
 }
 
-// process.argv.slice(2) を受け取り、サブコマンド (レビュアー / state / dismiss) と
+// `--reviewer` で受け付ける名前の形。`.cross-review/` のファイル名へ埋めるので、
+// パス区切りや `..` を含む値は弾く。
+const SAFE_REVIEWER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+// process.argv.slice(2) を受け取り、サブコマンド (レビュアー / state / dismiss / comment) と
 // 差分スコープを解釈する。
 function parseArgs(argv) {
   const args = argv.slice();
   const out = {
     // 実行するサブコマンド。'review' はレビュアー (codex / claude / subagent) の実行、
-    // 'state' は状態ファイルの表示と初期化、'dismiss' は非対応と判断した指摘の記録。
+    // 'state' は状態ファイルの表示と初期化、'dismiss' は非対応と判断した指摘の記録、
+    // 'comment' は保存済みレビュー出力と判断ファイルからの PR コメント本文の生成。
     command: 'review',
     reviewer: null,
     dismissText: null, // dismiss の要約 (command === 'dismiss' のときだけ使う)
@@ -486,6 +533,13 @@ function parseArgs(argv) {
     codexAgent: null,
     noFallback: false, // --no-fallback で利用上限時の subagent 代替への切り替えを無効化する
     fallbackPromptPath: null, // --fallback-prompt の書き出し先 (未指定なら一時ディレクトリ)
+    noPrCheck: false, // --no-pr-check でレビュー実行前の PR 存在確認を省く
+    // comment サブコマンド用。round は対象の往復番号、reviewerName は `--reviewer`
+    // (省略時は .cross-review/round-<N>-*.json から自動で選ぶ)。
+    round: null,
+    reviewerName: null,
+    verifyPath: null, // --verify の検証出力ファイル
+    outPath: null, // --out の書き出し先 (未指定は .cross-review/round-<N>-comment.md)
     help: false,
     error: null,
   };
@@ -510,6 +564,47 @@ function parseArgs(argv) {
       out.codexAgent = false;
     } else if (a === '--no-fallback') {
       out.noFallback = true;
+    } else if (a === '--no-pr-check') {
+      out.noPrCheck = true;
+    } else if (a === '--round' || a.startsWith('--round=')) {
+      const v = a === '--round' ? args[i + 1] : a.slice('--round='.length);
+      const n = parseNonNegativeInt(v);
+      if (n == null || n < 1) {
+        out.error = '--round には 1 以上の整数を指定してください';
+        // 値トークン (例: -1) が次ループで「不明なオプション」と誤判定されないよう消費する。
+        if (a === '--round' && v != null && !v.startsWith('--')) i++;
+      } else {
+        out.round = n;
+        if (a === '--round') i++;
+      }
+    } else if (a === '--reviewer' || a.startsWith('--reviewer=')) {
+      const v = a === '--reviewer' ? args[i + 1] : a.slice('--reviewer='.length);
+      if (!v || v.startsWith('-')) {
+        out.error = '--reviewer にはレビュアー名が必要です';
+      } else if (!SAFE_REVIEWER_NAME.test(v)) {
+        // `.cross-review/` のファイル名に埋めるので、パスに化ける名前は受けない。
+        out.error = `--reviewer に使えない名前です: ${v}`;
+        if (a === '--reviewer') i++;
+      } else {
+        out.reviewerName = v;
+        if (a === '--reviewer') i++;
+      }
+    } else if (a === '--verify' || a.startsWith('--verify=')) {
+      const v = a === '--verify' ? args[i + 1] : a.slice('--verify='.length);
+      if (!v || v.startsWith('-')) {
+        out.error = '--verify にはファイルパスが必要です';
+      } else {
+        out.verifyPath = v;
+        if (a === '--verify') i++;
+      }
+    } else if (a === '--out' || a.startsWith('--out=')) {
+      const v = a === '--out' ? args[i + 1] : a.slice('--out='.length);
+      if (!v || v.startsWith('-')) {
+        out.error = '--out にはファイルパスが必要です';
+      } else {
+        out.outPath = v;
+        if (a === '--out') i++;
+      }
     } else if (a === '--codex-agent') {
       const v = args[i + 1];
       if (!v || v.startsWith('-')) {
@@ -612,11 +707,25 @@ function parseArgs(argv) {
       rest.push(a);
     }
   }
-  if (!out.help && !out.error && (rest[0] === 'state' || rest[0] === 'dismiss')) {
+  if (!out.help && !out.error && rest[0] === 'comment') {
+    // PR コメント本文の生成。保存済みのレビュー出力と判断ファイルを読むだけで、
+    // レビュアーの起動も状態ファイルの更新も行わない。
+    out.command = 'comment';
+    if (out.noState) {
+      // comment は状態ファイルを読み書きしない。指定しても効かないので黙って無視しない。
+      out.error = '--no-state は state / dismiss / comment サブコマンドとは併用できません';
+    } else if (out.reset) {
+      out.error = '--reset は state サブコマンドでのみ使えます';
+    } else if (out.mark) {
+      out.error = '--mark は state サブコマンドでのみ使えます';
+    } else if (out.round == null) {
+      out.error = 'comment には --round <N> が必要です (例: comment --round 1)';
+    }
+  } else if (!out.help && !out.error && (rest[0] === 'state' || rest[0] === 'dismiss')) {
     // レビュアー以外のサブコマンド。状態ファイルだけを扱うので、レビュアーは決めない。
     out.command = rest[0];
     if (out.noState) {
-      out.error = '--no-state は state / dismiss サブコマンドとは併用できません';
+      out.error = '--no-state は state / dismiss / comment サブコマンドとは併用できません';
     } else if (out.command === 'dismiss') {
       if (out.reset) {
         out.error = '--reset は state サブコマンドでのみ使えます';
@@ -660,6 +769,18 @@ function parseArgs(argv) {
     if (!out.error && out.reset) out.error = '--reset は state サブコマンドでのみ使えます';
     if (!out.error && out.mark) out.error = '--mark は state サブコマンドでのみ使えます';
   }
+  // comment 専用のオプションを他のサブコマンドで受けても効かないので、黙って無視せずエラーにする。
+  if (!out.help && !out.error && out.command !== 'comment') {
+    const given = [
+      out.round != null ? '--round' : null,
+      out.reviewerName != null ? '--reviewer' : null,
+      out.verifyPath != null ? '--verify' : null,
+      out.outPath != null ? '--out' : null,
+    ].filter(Boolean);
+    if (given.length > 0) {
+      out.error = `${given.join(' / ')} は comment サブコマンドでのみ使えます`;
+    }
+  }
   return out;
 }
 
@@ -702,8 +823,10 @@ function defaultGitRunner(args, opts) {
   return res.stdout || '';
 }
 
-// gh CLI を実行して stdout を返す。gh 不在、PR 無し、タイムアウトはいずれも null
-// (呼び出し側は黙って次の解決へ進む)。git と同じく 10 秒でタイムアウトさせる。
+// gh CLI を実行して結果を返す。戻り値は { status, stdout, stderr }、起動自体ができないとき
+// (gh 不在、タイムアウト) は null。非ゼロ終了でも null にせず結果を返すのは、gh が
+// 「PR が無い」ことも非ゼロ終了で知らせるため。この 2 つは扱いが違う (readPrInfo 参照)。
+// git と同じく 10 秒でタイムアウトさせる。
 // Windows では gh が .cmd shim のことがあるため、レビュアー CLI と同じ解決を通す。
 function defaultGhRunner(args) {
   const resolved = resolveReviewerCommandForSpawn('gh');
@@ -713,8 +836,78 @@ function defaultGhRunner(args) {
     maxBuffer: 1024 * 1024,
     shell: resolved.shell,
   });
-  if (res.status !== 0) return null;
-  return res.stdout || '';
+  if (res.error || res.status == null) return null;
+  return { status: res.status, stdout: res.stdout || '', stderr: res.stderr || '' };
+}
+
+// ghRun の戻り値を { status, stdout, stderr } に正規化する純粋関数。
+// 文字列を返す実装 (テストの簡易スタブなど) は「成功して stdout を返した」とみなす。
+function normalizeGhResult(res) {
+  if (res == null) return null;
+  if (typeof res === 'string') return { status: 0, stdout: res, stderr: '' };
+  if (typeof res !== 'object') return null;
+  return {
+    status: Number.isInteger(res.status) ? res.status : 0,
+    stdout: String(res.stdout == null ? '' : res.stdout),
+    stderr: String(res.stderr == null ? '' : res.stderr),
+  };
+}
+
+// gh が「この枝に PR が無い」と答えたときの出力パターン。非ゼロ終了の理由がこれだと
+// 判定できたときだけ「PR 未作成」を確定させ、それ以外の失敗 (未認証、ネットワーク断など) は
+// 「分からない」に倒す (誤警告を出さないため)。
+const NO_PR_PATTERN = /no pull requests found|could not resolve to a pullrequest/i;
+
+// PR の情報が分からないときの戻り値 (gh 不在、実行失敗、CROSS_REVIEW_NO_FETCH=1)。
+function unknownPrInfo() {
+  return { known: false, present: false, number: null, baseRefName: null };
+}
+
+// `gh pr view --json number,baseRefName` を 1 回だけ実行して PR の有無、番号、base ブランチを得る。
+// 番号は「PR 未作成の警告」と `comment` のコマンド例に、base ブランチは既定 base の解決に使う。
+// 同じ情報を 2 か所が必要とするので、呼び出しを 1 本にまとめる (createPrInfoReader が結果を保持する)。
+// 戻り値:
+//   - { known:false } … gh 不在 / 実行失敗 / noFetch。PR の有無が分からないので黙って続行する。
+//   - { known:true, present:false } … gh が「PR が無い」と答えた。未作成の警告を出してよい。
+//   - { known:true, present:true, number, baseRefName } … PR がある。
+function readPrInfo(ghRun, noFetch) {
+  if (noFetch) return unknownPrInfo();
+  let res;
+  try {
+    res = normalizeGhResult(ghRun(['pr', 'view', '--json', 'number,baseRefName']));
+  } catch {
+    return unknownPrInfo(); // gh の起動自体に失敗しても黙って続行する。
+  }
+  if (res == null) return unknownPrInfo();
+  if (res.status !== 0) {
+    if (NO_PR_PATTERN.test(`${res.stderr}\n${res.stdout}`)) {
+      return { known: true, present: false, number: null, baseRefName: null };
+    }
+    return unknownPrInfo();
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(res.stdout);
+  } catch {
+    return unknownPrInfo(); // JSON として読めない出力は判断材料にしない。
+  }
+  if (!parsed || typeof parsed !== 'object') return unknownPrInfo();
+  const number = Number.isSafeInteger(parsed.number) && parsed.number > 0 ? parsed.number : null;
+  const baseRefName = typeof parsed.baseRefName === 'string' && parsed.baseRefName.trim()
+    ? parsed.baseRefName.trim()
+    : null;
+  return { known: true, present: true, number, baseRefName };
+}
+
+// readPrInfo を 1 回だけ呼び、結果を保持して返すリーダを作る。
+// 既定 base の解決と PR 未作成の警告が同じ情報を使うので、gh の起動を 1 回に抑える。
+function createPrInfoReader(deps = {}, noFetch = false) {
+  const ghRun = deps.ghRun || defaultGhRunner;
+  let cached = null;
+  return () => {
+    if (cached == null) cached = readPrInfo(ghRun, noFetch);
+    return cached;
+  };
 }
 
 // 環境変数で fetch (とネットワークを使う gh 呼び出し) を省略する指定かを判定する。
@@ -955,20 +1148,11 @@ function collectReviewDiff(opts, gitRun) {
   return { diffText: parts.join('\n'), excludedFiles };
 }
 
-// gh から「この枝の PR の base ブランチ」を得て、origin/<name> として解決できれば返す。
+// PR の base ブランチ (readPrInfo の結果) を origin/<name> として解決できれば返す。
 // gh 不在、PR 無し、失敗、解決不能はいずれも null で、呼び出し側は黙って次の解決へ進む
 // (gh を入れていない取り込み先の挙動を変えないため)。
-// noFetch のときはネットワークに触らないので gh も呼ばない。
-function resolvePrBaseRef(gitRun, deps, noFetch) {
-  if (noFetch) return null;
-  const ghRun = deps.ghRun || defaultGhRunner;
-  let name = null;
-  try {
-    const out = ghRun(['pr', 'view', '--json', 'baseRefName', '-q', '.baseRefName']);
-    name = out == null ? null : String(out).trim();
-  } catch {
-    name = null; // gh の起動自体に失敗しても既定解決へ進む。
-  }
+function resolvePrBaseRef(gitRun, prInfo) {
+  const name = prInfo && prInfo.present ? prInfo.baseRefName : null;
   if (!name || !SAFE_REF_NAME.test(name)) return null;
   // origin/main と同じくベストエフォートで取得してから verify する。
   gitRun(['fetch', 'origin', name, '--quiet'], { allowFailure: true, timeoutMs: 10000 });
@@ -977,6 +1161,22 @@ function resolvePrBaseRef(gitRun, deps, noFetch) {
     { allowFailure: true },
   );
   return verified != null ? `origin/${name}` : null;
+}
+
+// 既定 base の解決方法 (source) に対応する人向けの表記。差分サイズと同じ stderr 行と、
+// PR コメントの要約行 (buildRoundComment) が同じ語を使うよう 1 か所にまとめる。
+const BASE_SOURCE_LABELS = {
+  uncommitted: '未コミットの作業ツリー差分',
+  explicit: '--base 指定',
+  state: '前回レビュー時の SHA',
+  pr: 'PR の base',
+  'origin-main': 'origin/main 優先解決',
+  'local-main': 'ローカル main',
+};
+
+// source に対応する表記を返す。未知の値はそのまま返す (メタ情報が古い形でも壊さない)。
+function baseSourceLabel(source) {
+  return BASE_SOURCE_LABELS[source] || String(source == null ? '不明' : source);
 }
 
 // 既定 base (--base 未指定、コミット済み差分モード) を解決し、「何をどう決めたか」まで返す。
@@ -998,10 +1198,10 @@ function resolvePrBaseRef(gitRun, deps, noFetch) {
 // deps.branchState に状態ファイルの当該ブランチ分を渡すと 1 段目が有効になる。
 function resolveBaseSelection(opts, gitRun, deps = {}) {
   if (opts.mode === 'uncommitted') {
-    return { ref: opts.baseRef, source: 'uncommitted', label: '未コミットの作業ツリー差分', display: opts.baseRef };
+    return { ref: opts.baseRef, source: 'uncommitted', label: baseSourceLabel('uncommitted'), display: opts.baseRef };
   }
   if (opts.baseExplicit) {
-    return { ref: opts.baseRef, source: 'explicit', label: '--base 指定', display: opts.baseRef };
+    return { ref: opts.baseRef, source: 'explicit', label: baseSourceLabel('explicit'), display: opts.baseRef };
   }
   const writeErr = deps.err || ((s) => process.stderr.write(s));
   const noFetch = isNoFetch(deps.env);
@@ -1012,14 +1212,16 @@ function resolveBaseSelection(opts, gitRun, deps = {}) {
   if (lastSha && commitExists(gitRun, lastSha)) {
     const round = (branchState.round || 0) + 1;
     writeErr(`[cross-review] base として前回レビュー時の ${shortSha(lastSha)} を使用します (往復 ${round} 回目。--base で変更可)。\n`);
-    return { ref: lastSha, source: 'state', label: '前回レビュー時の SHA', display: shortSha(lastSha) };
+    return { ref: lastSha, source: 'state', label: baseSourceLabel('state'), display: shortSha(lastSha) };
   }
 
-  // 2. PR の base ブランチ。
-  const prBase = resolvePrBaseRef(gitRun, deps, noFetch);
+  // 2. PR の base ブランチ。PR の情報は deps.prInfo (呼び出し側が保持するリーダ) から得る。
+  // 未指定なら自前で 1 回だけ読む (この関数を単体で呼ぶ経路のため)。
+  const prInfoOf = deps.prInfo || createPrInfoReader(deps, noFetch);
+  const prBase = resolvePrBaseRef(gitRun, prInfoOf());
   if (prBase) {
     writeErr(`[cross-review] base として PR の base ブランチ ${prBase} を使用します (--base で変更可)。\n`);
-    return { ref: prBase, source: 'pr', label: 'PR の base', display: prBase };
+    return { ref: prBase, source: 'pr', label: baseSourceLabel('pr'), display: prBase };
   }
 
   // 3. origin/main → ローカル main。
@@ -1048,9 +1250,9 @@ function resolveBaseSelection(opts, gitRun, deps = {}) {
   }
   if (ref === 'origin/main') {
     writeErr('[cross-review] base として origin/main を使用します (--base で変更可)。\n');
-    return { ref, source: 'origin-main', label: 'origin/main 優先解決', display: ref };
+    return { ref, source: 'origin-main', label: baseSourceLabel('origin-main'), display: ref };
   }
-  return { ref: 'main', source: 'local-main', label: 'ローカル main', display: 'main' };
+  return { ref: 'main', source: 'local-main', label: baseSourceLabel('local-main'), display: 'main' };
 }
 
 // 既定 base の解決結果からブランチ / SHA だけを取り出す薄いラッパ。
@@ -1208,6 +1410,155 @@ function buildReviewPrompt(diffText, opts, checklist, instructions, excludedFile
   }
   parts.push('', '--- DIFF START ---', diffText, '--- DIFF END ---');
   return parts.join('\n');
+}
+
+// レビュー出力と PR コメント生成物の置き場。状態ファイルと同じく cwd に依存させず、
+// スクリプト位置からリポジトリ直下に固定する (サブディレクトリから起動しても同じ場所を使う)。
+function resolveReviewDir(deps = {}) {
+  const scriptDir = deps.scriptDir || __dirname;
+  return path.join(scriptDir, '..', REVIEW_DIR_NAME);
+}
+
+// 往復 N とレビュアー名から、`.cross-review/` に置くファイル名一式を返す純粋関数。
+// 保存側 (runReview) と読み出し側 (runCommentCommand)、ドキュメントで名前がずれないよう 1 か所で決める。
+//   - review: レビュアーの出力全文 (subagent 経路は主セッションが貼る)
+//   - prompt: subagent へ渡したプロンプト (subagent 経路のみ保存する)
+//   - meta:   実行経路や base を記録する JSON
+//   - triage: 主セッションが書く判断ファイル (指摘ごとの裏取りと対応)
+//   - comment: 生成した PR コメント本文
+function roundFileNames(round, reviewer) {
+  return {
+    review: `round-${round}-${reviewer}.md`,
+    prompt: `round-${round}-${reviewer}-prompt.md`,
+    meta: `round-${round}-${reviewer}.json`,
+    triage: `round-${round}-triage.md`,
+    comment: `round-${round}-comment.md`,
+  };
+}
+
+// `.cross-review/` へ 1 ファイル書く既定の実装 (ディレクトリが無ければ作る)。
+// 状態ファイル (writeStateFile) や利用上限の代替プロンプト (writeFile) とは別の口にして、
+// 片方のテスト注入がもう片方を巻き込まないようにする。
+function defaultReviewFileWriter(filePath, body) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, body, 'utf8');
+}
+
+// レビュー出力 (または subagent へ渡したプロンプト) とメタ情報を `.cross-review/` へ保存する。
+// 保存は往復が記録できたときだけ行う (往復番号が確定しないとファイル名を決められないため)。
+// 保存の失敗はレビュー自体の失敗にしない。レビュアーの出力は端末に出ているので、
+// 書けなかったことを警告するに留める。
+// 戻り値は書いたパス ({ bodyPath, metaPath })、書けなければ null。
+function saveRoundArtifacts({ round, reviewer, body, bodyName, meta }, deps = {}) {
+  const writeReviewFile = deps.writeReviewFile || defaultReviewFileWriter;
+  const warn = deps.warn || ((m) => process.stderr.write(m));
+  const dir = resolveReviewDir(deps);
+  const names = roundFileNames(round, reviewer);
+  const bodyPath = path.join(dir, bodyName || names.review);
+  const metaPath = path.join(dir, names.meta);
+  try {
+    const text = String(body == null ? '' : body);
+    writeReviewFile(bodyPath, text.endsWith('\n') ? text : `${text}\n`);
+    writeReviewFile(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+    return { bodyPath, metaPath };
+  } catch (err) {
+    warn(`[cross-review] レビュー出力を保存できません: ${bodyPath} (${(err && err.message) || 'write error'})\n`);
+    return null;
+  }
+}
+
+// PR コメントに出すレビュアーの表示名。
+const REVIEWER_DISPLAY_NAMES = {
+  codex: 'Codex',
+  claude: 'Claude',
+  subagent: 'Claude 客観サブエージェント',
+};
+function reviewerDisplayName(reviewer) {
+  return REVIEWER_DISPLAY_NAMES[reviewer] || String(reviewer == null ? '' : reviewer);
+}
+
+// メタ情報の via (実行経路) に対応する表示。
+const VIA_LABELS = {
+  agent: 'bridge 経由',
+  direct: '直接起動',
+  subagent: 'subagent',
+};
+
+// 判断ファイルの雛形。主セッションが指摘ごとに裏取りと対応を書くための形。
+// 指摘が複数あるときは同じ形の節を並べる。
+const TRIAGE_TEMPLATE = [
+  '### 指摘 1（<重大度>）: <要約>',
+  '> <レビュアーの指摘の引用>',
+  '',
+  '**裏取り**: <妥当 / 誤り / 過剰 と理由>',
+  '**対応**: <対応内容とコミット、または非対応の理由>',
+].join('\n');
+
+// 本文をコードフェンスで囲むときの区切り。本文に含まれるバックティック連なりより 1 つ長くし、
+// 検証出力に ``` が含まれていてもフェンスが割れないようにする。
+function fenceFor(text) {
+  const runs = String(text == null ? '' : text).match(/`{3,}/g) || [];
+  const longest = runs.reduce((max, run) => Math.max(max, run.length), 2);
+  return '`'.repeat(Math.max(3, longest + 1));
+}
+
+// メタ情報 (round-<N>-<reviewer>.json) を PR コメント冒頭の 1 行にまとめる純粋関数。
+// メタが無い / 壊れているときも本文生成は止めず、「不明」と書く。
+function buildMetaSummary(meta) {
+  if (!meta || typeof meta !== 'object') {
+    return '実行経路: 不明 / base: 不明 / 差分サイズ: 不明 (メタ情報が読めませんでした)';
+  }
+  const via = VIA_LABELS[meta.via] || (meta.via ? String(meta.via) : '不明');
+  const base = meta.base && typeof meta.base === 'object' ? meta.base : {};
+  const scope = base.source === 'uncommitted'
+    ? `対象: ${baseSourceLabel('uncommitted')}`
+    : `base: ${base.ref ? `${base.ref} (${baseSourceLabel(base.source)})` : '不明'}`;
+  const size = typeof meta.diffKb === 'number' && Number.isFinite(meta.diffKb)
+    ? `${meta.diffKb.toFixed(1)}KB`
+    : '不明';
+  return `実行経路: ${via} / ${scope} / 差分サイズ: ${size}`;
+}
+
+// 1 往復分の PR コメント本文を組み立てる純粋関数 (I/O は持たない)。
+//   - round / reviewer: 見出しに使う往復番号とレビュアー。
+//   - meta:    round-<N>-<reviewer>.json の内容 (無ければ null)。
+//   - triage:  判断ファイルの本文 (無ければ null。指摘の節は空にして、その旨を書く)。
+//   - verify:  検証コマンドの出力 (無ければ節ごと省く)。長ければ末尾 VERIFY_TAIL_LINES 行に切る。
+//   - review:  レビュアーの出力全文 (details で折りたたむ)。
+// 見出しは運用で使ってきた「## クロスレビュー N 往復目: <レビュアー> の指摘と対応」に合わせる。
+function buildRoundComment({ round, reviewer, meta, triage, verify, review } = {}) {
+  const parts = [
+    `## クロスレビュー ${round} 往復目: ${reviewerDisplayName(reviewer)} の指摘と対応`,
+    '',
+    buildMetaSummary(meta),
+    '',
+  ];
+  const triageBody = triage == null ? '' : String(triage).replace(/\s+$/, '');
+  parts.push(
+    triageBody || '（判断ファイルが未記入のため、指摘と対応の節は空です）',
+    '',
+  );
+  const verifyBody = verify == null ? '' : String(verify).replace(/\s+$/, '');
+  if (verifyBody) {
+    const lines = verifyBody.split('\n');
+    const truncated = lines.length > VERIFY_TAIL_LINES;
+    const shown = truncated ? lines.slice(-VERIFY_TAIL_LINES) : lines;
+    parts.push('### 確認内容', '');
+    if (truncated) {
+      parts.push(`（出力が長いため末尾 ${VERIFY_TAIL_LINES} 行のみ。全 ${lines.length} 行）`, '');
+    }
+    const fence = fenceFor(verifyBody);
+    parts.push(`${fence}text`, shown.join('\n'), fence, '');
+  }
+  const reviewBody = review == null ? '' : String(review).replace(/\s+$/, '');
+  parts.push(
+    '<details><summary>レビュー出力（全文）</summary>',
+    '',
+    reviewBody,
+    '',
+    '</details>',
+  );
+  return `${parts.join('\n')}\n`;
 }
 
 // claude-codex-bridge の起動スクリプト (codex-agent.sh) のパスを解決する。解決順は:
@@ -1490,7 +1841,8 @@ function resolveReviewerCommandForSpawn(cmd, deps = {}) {
 // Windows では起動直前に where.exe で実体を解決し、可能なら shell を使わずに起動する。
 // stdio を pipe にするのは、端末へ転送しつつ末尾を保持して利用上限の判定に使うため
 // (受け取った塊をそのまま書き出すので、見た目は stdio:'inherit' と変わらない)。
-// onExit は終了時に 1 回だけ { code, outputTail, error } で呼ぶ (runReview が上限判定に使う)。
+// onExit は終了時に 1 回だけ { code, outputTail, output, error } で呼ぶ
+// (runReview が outputTail を上限判定に、output を `.cross-review/` への保存に使う)。
 function spawnReviewer(cmd, args, stdinText, onExit) {
   const resolved = resolveReviewerCommandForSpawn(cmd);
   const child = spawn(resolved.cmd, args, {
@@ -1498,15 +1850,20 @@ function spawnReviewer(cmd, args, stdinText, onExit) {
     // Windows では .cmd/.bat shim のことがあるため、その場合だけ shell 経由にする。
     shell: resolved.shell,
   });
-  // 末尾のみ保持する。判定に使う語 (usage limit 等) は ASCII なので、塊の境界で
+  // 上限判定には末尾のみ保持する。判定に使う語 (usage limit 等) は ASCII なので、塊の境界で
   // マルチバイト文字が割れても判定には影響しない。転送側は Buffer のまま書いてバイト列を保つ。
+  // 保存用の output は全文を溜めるが、異常出力でメモリを食い潰さないよう上限で先頭を捨てる。
   let outputTail = '';
+  let output = '';
   const forward = (stream, sink) => {
     if (!stream) return;
     stream.on('data', (chunk) => {
       sink.write(chunk);
-      outputTail += chunk.toString('utf8');
+      const text = chunk.toString('utf8');
+      outputTail += text;
       if (outputTail.length > OUTPUT_TAIL_LIMIT) outputTail = outputTail.slice(-OUTPUT_TAIL_LIMIT);
+      output += text;
+      if (output.length > OUTPUT_CAPTURE_LIMIT) output = output.slice(-OUTPUT_CAPTURE_LIMIT);
     });
   };
   forward(child.stdout, process.stdout);
@@ -1516,7 +1873,7 @@ function spawnReviewer(cmd, args, stdinText, onExit) {
     if (settled) return; // error → close の順で両方発火することがあるため 1 回に絞る。
     settled = true;
     process.exitCode = code == null ? 1 : code;
-    if (typeof onExit === 'function') onExit({ code, outputTail, error: error || null });
+    if (typeof onExit === 'function') onExit({ code, outputTail, output, error: error || null });
   };
   child.on('error', (err) => {
     if (err && err.code === 'ENOENT') {
@@ -1628,10 +1985,24 @@ function runReview(opts, deps = {}) {
   // レビュアーを起動する前の HEAD を控える。--fix は作業ツリーしか触らないので、
   // 起動前後で HEAD は変わらない。
   const headSha = stateUsable && opts.mode !== 'uncommitted' ? currentHeadSha(gitRun) : null;
+  // PR の情報 (番号と base ブランチ) は 1 回の `gh pr view --json number,baseRefName` から得て
+  // 使い回す。既定 base の解決と PR 未作成の警告が同じ情報を必要とするため。
+  const noFetch = isNoFetch(deps.env);
+  const prInfoOf = deps.prInfo || createPrInfoReader(deps, noFetch);
+  // レビューの往復は PR コメントを共有ログにする運用なので、PR が無いまま始めると記録が揮発する。
+  // gh が「PR が無い」と答えたときだけ警告し、実行は止めない (gh 不在やネットワーク断で
+  // 止めると、リモートを持たない取り込み先の作業まで妨げるため)。
+  // CROSS_REVIEW_NO_FETCH=1 のときは gh を呼ばない方針に合わせて確認自体を省く。
+  if (!opts.noPrCheck && !noFetch) {
+    const prInfo = prInfoOf();
+    if (prInfo.known && !prInfo.present) {
+      writeErr('[cross-review] この枝の PR が見つかりません。レビューを回す前に PR を作成してください (例: gh pr create)。\n');
+    }
+  }
   // 既定 base (--base 未指定、コミット済み差分) は「前回レビュー SHA → PR の base →
   // origin/main → ローカル main」の順に解決する。opts を直接書き換えず、解決後の base を
   // 以降のスコープ表記、差分収集で使う。
-  const baseSelection = resolveBaseSelection(opts, gitRun, { ...invDeps, branchState });
+  const baseSelection = resolveBaseSelection(opts, gitRun, { ...invDeps, branchState, prInfo: prInfoOf });
   const resolvedBaseRef = baseSelection.ref;
   // 除外パススペックを解決する (--no-exclude 指定時は無効化)。観点と同じ流儀で .cross-review-ignore を読む。
   const excludePatterns = opts.noExclude
@@ -1730,11 +2101,13 @@ function runReview(opts, deps = {}) {
   // 「差分なし」になって再試行できなくなるため。フォールバック後の記録は、サブエージェントでの
   // レビューを終えた利用者が `state --mark` で行う。
   // 1 実行につき最大 1 回 (bridge のやり直しを 2 往復と数えない)。
+  // 戻り値は記録できた往復番号 (記録しなかったときは null)。レビュー出力の保存先
+  // `.cross-review/round-<N>-<reviewer>.md` の N に使うので、記録と保存の番号がずれない。
   let roundRecorded = false;
   const recordRound = () => {
-    if (roundRecorded) return;
+    if (roundRecorded) return null;
     roundRecorded = true;
-    if (!stateUsable) return;
+    if (!stateUsable) return null;
     // 書き込む直前に状態を読み直す (read-modify-write)。レビュアーの実行中に別プロセスが
     // dismiss や別ブランチのレビュー完了を書いていることがあり、起動前のスナップショットを
     // 基に書くとその更新を消してしまうため。
@@ -1742,12 +2115,34 @@ function runReview(opts, deps = {}) {
     if (latest.corrupt) {
       // 壊れたファイルへ書き戻すと他の枝の記録まで消える。往復は記録せず警告に留める。
       writeErr(`[cross-review] 状態ファイルを読めません (JSON 不正)。往復を記録しません: ${latest.path}\n`);
-      return;
+      return null;
     }
-    writeStateFn(
-      nextState(latest.state, { branch, sha: headSha, reviewer: opts.reviewer }),
-      invDeps,
-    );
+    const updated = nextState(latest.state, { branch, sha: headSha, reviewer: opts.reviewer });
+    // 状態を書けなかったら往復番号が確定しないので、レビュー出力も保存しない
+    // (次回の実行で同じ番号のファイルを上書きしてしまうため)。
+    if (!writeStateFn(updated, invDeps)) return null;
+    return branchStateOf(updated, branch).round;
+  };
+  // レビュー出力 (codex / claude) か、サブエージェントへ渡したプロンプト (subagent) を
+  // `.cross-review/` へ保存する。往復番号が確定したときだけ保存し、失敗しても警告に留める。
+  const nowIso = () => (deps.now ? String(deps.now()) : new Date().toISOString());
+  const saveRound = (round, { body, isPrompt, via }) => {
+    if (round == null) return;
+    const names = roundFileNames(round, opts.reviewer);
+    saveRoundArtifacts({
+      round,
+      reviewer: opts.reviewer,
+      body,
+      bodyName: isPrompt ? names.prompt : names.review,
+      meta: {
+        reviewer: opts.reviewer,
+        via,
+        base: { ref: baseSelection.ref, source: baseSelection.source },
+        diffKb: Number(diffKb.toFixed(1)),
+        headSha,
+        recordedAt: nowIso(),
+      },
+    }, invDeps);
   };
   // reviewerInvocation も解決後の opts で揃える (現状 baseRef は参照しないが、プロンプトの
   // スコープ表記と起動引数が将来食い違わないよう、解決後の値だけを下流に渡す)。
@@ -1765,7 +2160,9 @@ function runReview(opts, deps = {}) {
     // 通知は stderr に分けて、stdout を「そのまま客観サブエージェントへ渡せるプロンプト」に保つ。
     writeErr(inv.notice);
     writeOut(prompt + '\n');
-    recordRound();
+    // 保存するのは「渡したプロンプト」。レビュー結果はサブエージェントから戻るので、
+    // 主セッションがその出力を round-<N>-subagent.md へ貼ってから `comment` を使う。
+    saveRound(recordRound(), { body: prompt, isPrompt: true, via: 'subagent' });
     return null;
   }
   // レビュアーを起動し、終了コードで「bridge 未導入」「利用上限」を切り分ける。
@@ -1785,8 +2182,13 @@ function runReview(opts, deps = {}) {
         return;
       }
       if (exit.code === 0) {
-        // レビュアーが最後まで走った。ここで初めて 1 往復として数える。
-        recordRound();
+        // レビュアーが最後まで走った。ここで初めて 1 往復として数え、出力を保存する
+        // (bridge のやり直しがあった場合は、やり直した後の実行経路を記録する)。
+        saveRound(recordRound(), {
+          body: exit.output,
+          isPrompt: false,
+          via: invocation.via || 'direct',
+        });
         return;
       }
       // 上限フォールバックは codex 経路だけの仕組み (claude CLI 経路は対象外。subagent はここに来ない)。
@@ -1899,6 +2301,129 @@ function runDismissCommand(opts, deps = {}) {
   return null;
 }
 
+// `.cross-review/` から `round-<N>-<reviewer>.json` を探し、その往復のレビュアー名を列挙する。
+// メタ情報 (json) を目印にするのは、レビュー出力 (md) が subagent 経路では後から人の手で
+// 置かれるのに対し、メタ情報は CLI が必ず書くため。
+function detectRoundReviewers(dir, round, deps = {}) {
+  const readdir = deps.readdir || ((p) => fs.readdirSync(p));
+  let entries;
+  try {
+    entries = readdir(dir);
+  } catch {
+    return []; // ディレクトリが無い = まだ 1 度もレビューを保存していない。
+  }
+  const pattern = new RegExp(`^round-${round}-(.+)\\.json$`);
+  const found = [];
+  for (const entry of entries || []) {
+    const matched = pattern.exec(String(entry));
+    if (matched) found.push(matched[1]);
+  }
+  return found.sort();
+}
+
+// `comment --round <N>` サブコマンド。保存済みのレビュー出力、主セッションが書いた判断ファイル、
+// 検証出力を定型に整形し、`gh pr comment --body-file` へ渡すファイルを書き出す。
+// 投稿はしない。判断内容は主セッションが書くものなので、CLI が PR へ直接書くと誤投稿の
+// 取り消しが難しいため。コマンド例だけを stderr に出す。
+// deps で出力、ファイル読み書き、gh の呼び出しを差し替えられる (runReview と同じ流儀)。
+function runCommentCommand(opts, deps = {}) {
+  const writeErr = deps.err || ((s) => process.stderr.write(s));
+  const exists = deps.exists || ((p) => fs.existsSync(p));
+  const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
+  const writeReviewFile = deps.writeReviewFile || defaultReviewFileWriter;
+  const dir = resolveReviewDir(deps);
+  const round = opts.round;
+  const fail = (message) => {
+    writeErr(message);
+    process.exitCode = 1;
+    return null;
+  };
+  const readIfPresent = (filePath) => {
+    try {
+      if (!exists(filePath)) return null;
+      return String(readFile(filePath));
+    } catch {
+      return null;
+    }
+  };
+
+  // レビュアーは明示が無ければメタ情報から自動で決める。複数あるときに黙って片方を選ぶと、
+  // 別のレビュアーの出力を貼ったコメントができてしまうのでエラーにする。
+  let reviewer = opts.reviewerName;
+  if (!reviewer) {
+    const found = detectRoundReviewers(dir, round, deps);
+    if (found.length === 0) {
+      return fail(`[cross-review] ${round} 往復目のレビュー出力が見つかりません: ${path.join(dir, `round-${round}-<reviewer>.json`)}\n`
+        + '  レビューを実行すると保存されます (--no-state では保存しません)。\n');
+    }
+    if (found.length > 1) {
+      return fail(`[cross-review] ${round} 往復目のレビュアーが複数あります: ${found.join(' / ')}\n`
+        + '  --reviewer <name> でどれを使うか指定してください。\n');
+    }
+    reviewer = found[0];
+  }
+  const names = roundFileNames(round, reviewer);
+  const reviewPath = path.join(dir, names.review);
+  const review = readIfPresent(reviewPath);
+  if (review == null) {
+    return fail(`[cross-review] レビュー出力を読めません: ${reviewPath}\n`
+      + `  subagent 経路ではサブエージェントの出力をこのファイルへ貼ってから実行してください (CLI が保存するのは ${names.prompt} です)。\n`);
+  }
+
+  // メタ情報が無くてもコメントは作れる (要約行が「不明」になるだけ) ので、警告に留める。
+  const metaPath = path.join(dir, names.meta);
+  const metaText = readIfPresent(metaPath);
+  let meta = null;
+  if (metaText == null) {
+    writeErr(`[cross-review] メタ情報がありません: ${metaPath} (実行経路と base は「不明」と書きます)。\n`);
+  } else {
+    try {
+      meta = JSON.parse(metaText);
+    } catch {
+      writeErr(`[cross-review] メタ情報を読めません (JSON 不正): ${metaPath} (実行経路と base は「不明」と書きます)。\n`);
+    }
+  }
+
+  // 判断ファイルが無いのはエラーにしない。雛形を書き出し、指摘の節を空にしたコメントを作る
+  // (レビュー出力と検証出力だけ先に整形しておき、裏取りを書いてから作り直せるようにする)。
+  const triagePath = path.join(dir, names.triage);
+  const triage = readIfPresent(triagePath);
+  if (triage == null) {
+    let hint = '';
+    try {
+      writeReviewFile(triagePath, `${TRIAGE_TEMPLATE}\n`);
+      hint = '  雛形を書き出したので、指摘ごとの裏取りと対応を書いてから再実行してください。\n';
+    } catch (err) {
+      hint = `  雛形を書き出せませんでした (${(err && err.message) || 'write error'})。\n`;
+    }
+    writeErr(`[cross-review] 判断ファイルがありません: ${triagePath} (指摘と対応の節は空になります)。\n${hint}`);
+  }
+
+  // 検証出力は明示指定なので、読めないときは黙って省かずエラーにする。
+  let verify = null;
+  if (opts.verifyPath) {
+    try {
+      verify = String(readFile(opts.verifyPath));
+    } catch (err) {
+      return fail(`[cross-review] --verify のファイルを読めません: ${opts.verifyPath} (${(err && err.message) || 'read error'})\n`);
+    }
+  }
+
+  const body = buildRoundComment({ round, reviewer, meta, triage, verify, review });
+  const outPath = opts.outPath || path.join(dir, names.comment);
+  try {
+    writeReviewFile(outPath, body);
+  } catch (err) {
+    return fail(`[cross-review] PR コメント本文を書けません: ${outPath} (${(err && err.message) || 'write error'})\n`);
+  }
+  const prInfoOf = deps.prInfo || createPrInfoReader(deps, isNoFetch(deps.env));
+  const prInfo = prInfoOf();
+  const prNumber = prInfo.known && prInfo.present && prInfo.number ? String(prInfo.number) : '<PR番号>';
+  writeErr(`[cross-review] PR コメントの本文を生成しました: ${outPath}\n`
+    + `  gh pr comment ${prNumber} --body-file ${outPath}\n`);
+  return outPath;
+}
+
 function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -1916,6 +2441,10 @@ function main() {
   }
   if (opts.command === 'dismiss') {
     runDismissCommand(opts);
+    return;
+  }
+  if (opts.command === 'comment') {
+    runCommentCommand(opts);
     return;
   }
   runReview(opts);
@@ -1962,6 +2491,18 @@ module.exports = {
   runReview,
   runStateCommand,
   runDismissCommand,
+  runCommentCommand,
+  buildRoundComment,
+  buildMetaSummary,
+  reviewerDisplayName,
+  baseSourceLabel,
+  roundFileNames,
+  resolveReviewDir,
+  saveRoundArtifacts,
+  detectRoundReviewers,
+  normalizeGhResult,
+  readPrInfo,
+  createPrInfoReader,
   loadChecklist,
   loadInstructions,
   loadIgnorePatterns,
@@ -1970,6 +2511,9 @@ module.exports = {
   CHECKLIST_FILENAME,
   IGNORE_FILENAME,
   STATE_FILENAME,
+  REVIEW_DIR_NAME,
+  VERIFY_TAIL_LINES,
+  TRIAGE_TEMPLATE,
   DIFF_SHRINK_STEPS,
   NO_FETCH_ENV,
   CODEX_AGENT_REVIEW_NAME,

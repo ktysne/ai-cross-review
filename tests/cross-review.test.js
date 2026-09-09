@@ -62,25 +62,40 @@ const {
   runStateCommand,
   runDismissCommand,
   STATE_FILENAME,
+  runCommentCommand,
+  buildRoundComment,
+  reviewerDisplayName,
+  roundFileNames,
+  resolveReviewDir,
+  detectRoundReviewers,
+  normalizeGhResult,
+  readPrInfo,
+  REVIEW_DIR_NAME,
+  VERIFY_TAIL_LINES,
+  TRIAGE_TEMPLATE,
 } = require('../tools/cross-review.js');
 
-// 実行環境の状態ファイル (.cross-review-state.json) と gh CLI に依存しないためのスタブ。
-// runReview の deps へ展開して使う。状態は「空・壊れていない」、gh は「PR 無し」を返す。
+// 実行環境の状態ファイル (.cross-review-state.json)、`.cross-review/`、gh CLI に依存しないためのスタブ。
+// runReview の deps へ展開して使う。状態は「空・壊れていない」、gh は「起動できない (不明)」を返し、
+// レビュー出力の保存は捨てる (実リポジトリへ書かない)。
 const isolated = (overrides = {}) => ({
   readState: () => ({ path: '<test-state>', state: { branches: {} }, corrupt: false }),
   writeState: () => true,
   ghRun: () => null,
+  writeReviewFile: () => {},
   ...overrides,
 });
 
 // 状態ファイルの読み書きをメモリ上で行うスタブ。書かれた内容を後から検証できる。
+// `.cross-review/` への保存もメモリに溜め、実リポジトリを汚さない。
 const memoryState = (initial = { branches: {} }, opts = {}) => {
-  const store = { state: initial, writes: [], corrupt: !!opts.corrupt };
+  const store = { state: initial, writes: [], corrupt: !!opts.corrupt, files: {} };
   return {
     store,
     readState: () => ({ path: '<test-state>', state: store.state, corrupt: store.corrupt }),
     writeState: (next) => { store.writes.push(next); store.state = next; return true; },
     ghRun: () => null,
+    writeReviewFile: (p, body) => { store.files[p] = body; },
   };
 };
 
@@ -1349,7 +1364,7 @@ describe('cross-review resolveBaseSelection (既定 base の 3 段解決)', () =
     const sel = resolveBaseSelection(opts, gitRun, {
       env: {},
       err: (s) => { err += s; },
-      ghRun: () => 'develop\n',
+      ghRun: () => '{"number":12,"baseRefName":"develop"}',
     });
     expect(sel.ref).toBe('origin/develop');
     expect(sel.source).toBe('pr');
@@ -1362,17 +1377,20 @@ describe('cross-review resolveBaseSelection (既定 base の 3 段解決)', () =
       if (args[0] === 'rev-parse') return args[3] === 'origin/main' ? 'abc\n' : null;
       return '';
     };
-    const sel = resolveBaseSelection(opts, gitRun, { env: {}, err: () => {}, ghRun: () => 'develop\n' });
+    const sel = resolveBaseSelection(opts, gitRun, { env: {}, err: () => {}, ghRun: () => '{"number":12,"baseRefName":"develop"}' });
     expect(sel.ref).toBe('origin/main');
   });
 
   it('2 段目: gh が無い / PR が無い / 危険なブランチ名は黙って次へ進む', () => {
     const gitRun = (args) => (args[0] === 'rev-parse' ? 'abc\n' : '');
     const run = (ghRun) => resolveBaseSelection(opts, gitRun, { env: {}, err: () => {}, ghRun }).ref;
-    expect(run(() => null)).toBe('origin/main');                       // gh 不在 / PR 無し
-    expect(run(() => '')).toBe('origin/main');                          // 空出力
+    expect(run(() => null)).toBe('origin/main');                       // gh 不在
+    // PR 無し (gh は非ゼロ終了 + メッセージで知らせる)
+    expect(run(() => ({ status: 1, stdout: '', stderr: 'no pull requests found for branch "x"' }))).toBe('origin/main');
+    expect(run(() => '')).toBe('origin/main');                          // 空出力 (JSON にならない)
     expect(run(() => { throw new Error('spawn failed'); })).toBe('origin/main');
-    expect(run(() => '--upload-pack=evil\n')).toBe('origin/main');      // オプションに化ける名前は使わない
+    // オプションに化ける名前は使わない
+    expect(run(() => '{"number":1,"baseRefName":"--upload-pack=evil"}')).toBe('origin/main');
   });
 
   it('CROSS_REVIEW_NO_FETCH=1 なら fetch も gh も呼ばない', () => {
@@ -2526,6 +2544,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
   // 「差分なし」で再試行できなくなるので、レビューが成立した結果でのみ数える。
   describe('往復を数えるタイミング', () => {
     const recordDeps = (mem, extra = {}) => ({
+      writeReviewFile: () => {}, // mem が保存用スタブを持たないとき用の既定 (実リポジトリへ書かない)
       ...mem,
       gitRun: stateGitRun(),
       checklist: 'CL',
@@ -2706,5 +2725,527 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
       expect(mem.store.writes).toHaveLength(1);
       expect(branchStateOf(mem.store.state, 'feat/x')).toEqual({ round: 1, lastReviewedSha: sha, dismissed: [] });
     });
+  });
+});
+
+describe('cross-review buildRoundComment (PR コメントの定型)', () => {
+  const meta = {
+    reviewer: 'codex',
+    via: 'agent',
+    base: { ref: 'origin/main', source: 'origin-main' },
+    diffKb: 12.34,
+    headSha: 'a'.repeat(40),
+    recordedAt: '2026-09-10T00:00:00.000Z',
+  };
+
+  it('見出し・要約行・判断ファイル本文・レビュー出力の折りたたみを並べる', () => {
+    const body = buildRoundComment({
+      round: 2,
+      reviewer: 'codex',
+      meta,
+      triage: '### 指摘 1（要修正）: X\n**対応**: 直した',
+      verify: null,
+      review: 'REVIEW_BODY',
+    });
+    expect(body).toContain('## クロスレビュー 2 往復目: Codex の指摘と対応');
+    expect(body).toContain('実行経路: bridge 経由 / base: origin/main (origin/main 優先解決) / 差分サイズ: 12.3KB');
+    expect(body).toContain('### 指摘 1（要修正）: X');
+    expect(body).toContain('<details><summary>レビュー出力（全文）</summary>');
+    expect(body).toContain('REVIEW_BODY');
+    expect(body).toContain('</details>');
+    expect(body).not.toContain('### 確認内容'); // 検証出力が無ければ節ごと出さない
+  });
+
+  it('判断ファイルが無いときは指摘の節を空にし、その旨を書く', () => {
+    const body = buildRoundComment({ round: 1, reviewer: 'subagent', meta: null, triage: null, review: 'R' });
+    expect(body).toContain('## クロスレビュー 1 往復目: Claude 客観サブエージェント の指摘と対応');
+    expect(body).toContain('判断ファイルが未記入');
+    expect(body).toContain('実行経路: 不明'); // メタ情報が無くても本文は作る
+  });
+
+  it('検証出力があれば「確認内容」節にコードブロックで入れる', () => {
+    const body = buildRoundComment({ round: 1, reviewer: 'claude', meta, triage: 'T', verify: 'PASS 10 tests', review: 'R' });
+    expect(body).toContain('### 確認内容');
+    expect(body).toContain('```text\nPASS 10 tests\n```');
+  });
+
+  it('検証出力が長ければ末尾 200 行に切り、切ったことを書く', () => {
+    const lines = Array.from({ length: VERIFY_TAIL_LINES + 50 }, (_, i) => `line ${i + 1}`);
+    const body = buildRoundComment({ round: 1, reviewer: 'codex', meta, triage: 'T', verify: lines.join('\n'), review: 'R' });
+    expect(body).toContain(`（出力が長いため末尾 ${VERIFY_TAIL_LINES} 行のみ。全 ${lines.length} 行）`);
+    expect(body).toContain(`line ${lines.length}`);
+    expect(body).not.toContain('\nline 1\n'); // 先頭は落ちている
+  });
+
+  it('検証出力にコードフェンスが含まれても囲みが割れない', () => {
+    const body = buildRoundComment({ round: 1, reviewer: 'codex', meta, triage: 'T', verify: '```\ninner\n```', review: 'R' });
+    expect(body).toContain('````text');
+    expect(body).toContain('\n````\n');
+  });
+
+  it('--uncommitted のレビューは base ではなく対象として書く', () => {
+    const body = buildRoundComment({
+      round: 1,
+      reviewer: 'codex',
+      meta: { ...meta, via: 'direct', base: { ref: 'main', source: 'uncommitted' } },
+      triage: 'T',
+      review: 'R',
+    });
+    expect(body).toContain('実行経路: 直接起動 / 対象: 未コミットの作業ツリー差分 / 差分サイズ: 12.3KB');
+  });
+
+  it('レビュアー表示名は codex / claude / subagent を運用の呼び名に対応させる', () => {
+    expect(reviewerDisplayName('codex')).toBe('Codex');
+    expect(reviewerDisplayName('claude')).toBe('Claude');
+    expect(reviewerDisplayName('subagent')).toBe('Claude 客観サブエージェント');
+  });
+});
+
+describe('cross-review レビュー出力の保存 (.cross-review/)', () => {
+  const sha = 'e'.repeat(40);
+  const scriptDir = path.join(path.sep, 'repo', 'tools');
+  const dir = resolveReviewDir({ scriptDir });
+  const settle = (onExit, result) => {
+    process.exitCode = result.code == null ? 1 : result.code;
+    onExit({ outputTail: '', output: '', error: null, ...result });
+  };
+  const gitRun = (args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/save\n';
+    if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+    if (args[0] === 'diff') return 'SAVE_DIFF\n';
+    return '';
+  };
+  const saveOpts = (extra = {}) => ({
+    reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: true, fix: false, maxDiffKb: 0, ...extra,
+  });
+  const saveDeps = (mem, extra = {}) => ({
+    ...mem,
+    gitRun,
+    checklist: 'CL',
+    out: () => {},
+    err: () => {},
+    exists: () => false,
+    scriptDir,
+    now: () => '2026-09-10T00:00:00.000Z',
+    ...extra,
+  });
+
+  it('レビュアーが正常終了したら出力とメタ情報を保存する', () => {
+    const mem = memoryState();
+    process.exitCode = 0;
+    runReview(saveOpts(), saveDeps(mem, {
+      spawnFn: (cmd, args, stdin, onExit) => { settle(onExit, { code: 0, output: 'REVIEWER_OUTPUT\n' }); return null; },
+    }));
+    const names = roundFileNames(1, 'codex');
+    expect(mem.store.files[path.join(dir, names.review)]).toBe('REVIEWER_OUTPUT\n');
+    expect(JSON.parse(mem.store.files[path.join(dir, names.meta)])).toEqual({
+      reviewer: 'codex',
+      via: 'direct',
+      base: { ref: 'main', source: 'explicit' },
+      diffKb: 0,
+      headSha: sha,
+      recordedAt: '2026-09-10T00:00:00.000Z',
+    });
+    process.exitCode = 0;
+  });
+
+  it('非ゼロ終了では保存しない (往復も数えない)', () => {
+    const mem = memoryState();
+    process.exitCode = 0;
+    runReview(saveOpts({ noFallback: true }), saveDeps(mem, {
+      spawnFn: (cmd, args, stdin, onExit) => { settle(onExit, { code: 1, output: 'BROKEN' }); return null; },
+    }));
+    expect(mem.store.files).toEqual({});
+    expect(mem.store.writes).toEqual([]);
+    process.exitCode = 0;
+  });
+
+  it('subagent は渡したプロンプトを round-<N>-<reviewer>-prompt.md に保存する', () => {
+    const mem = memoryState();
+    runReview(saveOpts({ reviewer: 'subagent' }), saveDeps(mem, {
+      spawnFn: () => { throw new Error('subagent では spawn してはいけない'); },
+      out: () => {},
+    }));
+    const names = roundFileNames(1, 'subagent');
+    expect(Object.keys(mem.store.files).sort()).toEqual(
+      [path.join(dir, names.prompt), path.join(dir, names.meta)].sort(),
+    );
+    expect(mem.store.files[path.join(dir, names.prompt)]).toContain('SAVE_DIFF');
+    expect(JSON.parse(mem.store.files[path.join(dir, names.meta)]).via).toBe('subagent');
+  });
+
+  it('--no-state では往復番号が無いので保存しない', () => {
+    const written = {};
+    process.exitCode = 0;
+    runReview(saveOpts({ noState: true }), saveDeps({}, {
+      readState: () => { throw new Error('--no-state では状態を読まない'); },
+      writeState: () => { throw new Error('--no-state では状態を書かない'); },
+      ghRun: () => null,
+      writeReviewFile: (p, body) => { written[p] = body; },
+      spawnFn: (cmd, args, stdin, onExit) => { settle(onExit, { code: 0, output: 'X' }); return null; },
+    }));
+    expect(written).toEqual({});
+    process.exitCode = 0;
+  });
+
+  it('保存に失敗してもレビューは失敗にせず警告だけ出す', () => {
+    const mem = memoryState();
+    let err = '';
+    process.exitCode = 0;
+    runReview(saveOpts(), saveDeps(mem, {
+      writeReviewFile: () => { throw new Error('disk full'); },
+      err: (s) => { err += s; },
+      spawnFn: (cmd, args, stdin, onExit) => { settle(onExit, { code: 0, output: 'X' }); return null; },
+    }));
+    expect(err).toMatch(/レビュー出力を保存できません/);
+    expect(process.exitCode).toBe(0);
+    expect(mem.store.writes).toHaveLength(1); // 往復自体は記録されている
+    process.exitCode = 0;
+  });
+
+  it('利用上限フォールバックでは保存しない', () => {
+    const mem = memoryState();
+    process.exitCode = 0;
+    runReview(saveOpts({ fallbackPromptPath: 'fb.md' }), saveDeps(mem, {
+      spawnFn: (cmd, args, stdin, onExit) => {
+        settle(onExit, { code: 1, outputTail: 'usage limit reached', output: 'usage limit reached' });
+        return null;
+      },
+      writeFile: () => {},
+    }));
+    expect(mem.store.files).toEqual({});
+    process.exitCode = 0;
+  });
+});
+
+describe('cross-review PR 未作成の警告', () => {
+  const gitRun = (args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/pr\n';
+    if (args[0] === 'rev-parse') return 'abc\n';
+    if (args[0] === 'diff') return 'PR_DIFF\n';
+    return '';
+  };
+  const prOpts = (extra = {}) => ({
+    reviewer: 'subagent', mode: 'base', baseRef: 'main', baseExplicit: true, fix: false, maxDiffKb: 0, ...extra,
+  });
+  const prDeps = (extra = {}) => ({
+    ...isolated(),
+    gitRun,
+    checklist: 'CL',
+    out: () => {},
+    exists: () => false,
+    env: {},
+    ...extra,
+  });
+  const noPr = { status: 1, stdout: '', stderr: 'no pull requests found for branch "feat/pr"' };
+
+  it('PR が無いと分かったら警告する (実行は止めない)', () => {
+    let err = '';
+    let out = '';
+    runReview(prOpts(), prDeps({ ghRun: () => noPr, err: (s) => { err += s; }, out: (s) => { out += s; } }));
+    expect(err).toMatch(/PR が見つかりません/);
+    expect(err).toMatch(/gh pr create/);
+    expect(out).toContain('PR_DIFF'); // 警告だけでレビューは進む
+  });
+
+  it('PR があれば警告しない', () => {
+    let err = '';
+    runReview(prOpts(), prDeps({
+      ghRun: () => '{"number":42,"baseRefName":"main"}',
+      err: (s) => { err += s; },
+    }));
+    expect(err).not.toMatch(/PR が見つかりません/);
+  });
+
+  it('gh を起動できない (不在等) ときは黙って続行する', () => {
+    let err = '';
+    runReview(prOpts(), prDeps({ ghRun: () => null, err: (s) => { err += s; } }));
+    expect(err).not.toMatch(/PR が見つかりません/);
+  });
+
+  it('PR 不在以外の失敗 (未認証など) では警告しない', () => {
+    let err = '';
+    runReview(prOpts(), prDeps({
+      ghRun: () => ({ status: 4, stdout: '', stderr: 'gh: To get started with GitHub CLI, please run: gh auth login' }),
+      err: (s) => { err += s; },
+    }));
+    expect(err).not.toMatch(/PR が見つかりません/);
+  });
+
+  it('--no-pr-check では gh を呼ばない', () => {
+    let called = 0;
+    let err = '';
+    runReview(prOpts({ noPrCheck: true }), prDeps({
+      ghRun: () => { called += 1; return noPr; },
+      err: (s) => { err += s; },
+    }));
+    expect(called).toBe(0);
+    expect(err).not.toMatch(/PR が見つかりません/);
+  });
+
+  it('CROSS_REVIEW_NO_FETCH=1 では確認自体を省く', () => {
+    let err = '';
+    runReview(prOpts(), prDeps({
+      env: { CROSS_REVIEW_NO_FETCH: '1' },
+      ghRun: () => { throw new Error('NO_FETCH では gh を呼ばない'); },
+      err: (s) => { err += s; },
+    }));
+    expect(err).not.toMatch(/PR が見つかりません/);
+  });
+
+  it('PR の確認と既定 base の解決で gh は 1 回しか呼ばない', () => {
+    const calls = [];
+    runReview(prOpts({ baseExplicit: false }), prDeps({
+      ghRun: (args) => { calls.push(args); return '{"number":42,"baseRefName":"develop"}'; },
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/pr\n';
+        if (args[0] === 'rev-parse') return args[3] === 'origin/develop' ? 'def\n' : null;
+        if (args[0] === 'diff') return 'PR_DIFF\n';
+        return '';
+      },
+      err: () => {},
+    }));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(['pr', 'view', '--json', 'number,baseRefName']);
+  });
+});
+
+describe('cross-review readPrInfo / normalizeGhResult', () => {
+  it('文字列を返すスタブは「成功して stdout を返した」とみなす', () => {
+    expect(normalizeGhResult('x')).toEqual({ status: 0, stdout: 'x', stderr: '' });
+    expect(normalizeGhResult(null)).toBeNull();
+  });
+
+  it('PR 無しの非ゼロ終了だけを present:false と確定させる', () => {
+    expect(readPrInfo(() => ({ status: 1, stdout: '', stderr: 'no pull requests found' }), false))
+      .toMatchObject({ known: true, present: false });
+    expect(readPrInfo(() => ({ status: 1, stdout: '', stderr: 'network error' }), false))
+      .toMatchObject({ known: false });
+    expect(readPrInfo(() => null, false)).toMatchObject({ known: false });
+    expect(readPrInfo(() => { throw new Error('spawn failed'); }, false)).toMatchObject({ known: false });
+  });
+
+  it('番号と base ブランチを取り出す (noFetch では呼ばない)', () => {
+    expect(readPrInfo(() => '{"number":7,"baseRefName":"develop"}', false))
+      .toEqual({ known: true, present: true, number: 7, baseRefName: 'develop' });
+    expect(readPrInfo(() => { throw new Error('呼ばない'); }, true)).toMatchObject({ known: false });
+  });
+});
+
+describe('cross-review comment サブコマンド', () => {
+  const scriptDir = path.join(path.sep, 'repo', 'tools');
+  const dir = resolveReviewDir({ scriptDir });
+  const at = (name) => path.join(dir, name);
+  const commentDeps = (files, extra = {}) => {
+    const written = {};
+    const logs = { err: '' };
+    return {
+      written,
+      logs,
+      deps: {
+        scriptDir,
+        env: {},
+        ghRun: () => null,
+        exists: (p) => Object.prototype.hasOwnProperty.call(files, p),
+        readFile: (p) => {
+          if (!Object.prototype.hasOwnProperty.call(files, p)) throw new Error(`ENOENT: ${p}`);
+          return files[p];
+        },
+        readdir: () => Object.keys(files).map((p) => path.basename(p)),
+        writeReviewFile: (p, body) => { written[p] = body; },
+        err: (s) => { logs.err += s; },
+        ...extra,
+      },
+    };
+  };
+  const names = roundFileNames(1, 'codex');
+
+  it('レビュアーを 1 つに決められれば、判断ファイルと合わせてコメント本文を書き出す', () => {
+    const files = {
+      [at(names.meta)]: JSON.stringify({ reviewer: 'codex', via: 'agent', base: { ref: 'origin/main', source: 'origin-main' }, diffKb: 3.5 }),
+      [at(names.review)]: 'REVIEWER_SAID',
+      [at(names.triage)]: '### 指摘 1（要修正）: A\n**対応**: 直した',
+    };
+    const { deps, written, logs } = commentDeps(files);
+    process.exitCode = 0;
+    const outPath = runCommentCommand({ round: 1 }, deps);
+    expect(outPath).toBe(at(names.comment));
+    expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目: Codex の指摘と対応');
+    expect(written[at(names.comment)]).toContain('REVIEWER_SAID');
+    expect(written[at(names.comment)]).toContain('### 指摘 1（要修正）: A');
+    expect(logs.err).toContain('gh pr comment <PR番号> --body-file');
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('PR 番号が取れればコマンド例に埋める', () => {
+    const files = {
+      [at(names.meta)]: '{}',
+      [at(names.review)]: 'R',
+      [at(names.triage)]: 'T',
+    };
+    const { deps, logs } = commentDeps(files, { ghRun: () => '{"number":42,"baseRefName":"main"}' });
+    runCommentCommand({ round: 1 }, deps);
+    expect(logs.err).toContain('gh pr comment 42 --body-file');
+  });
+
+  it('同じ往復に複数のレビュアーがあればエラーで列挙する', () => {
+    const files = {
+      [at('round-1-codex.json')]: '{}',
+      [at('round-1-claude.json')]: '{}',
+    };
+    const { deps, logs, written } = commentDeps(files);
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1 }, deps)).toBeNull();
+    expect(logs.err).toMatch(/claude \/ codex/);
+    expect(logs.err).toMatch(/--reviewer/);
+    expect(written).toEqual({});
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('--reviewer を明示すれば複数あっても選べる', () => {
+    const files = {
+      [at('round-1-codex.json')]: '{}',
+      [at('round-1-claude.json')]: '{}',
+      [at('round-1-claude.md')]: 'CLAUDE_SAID',
+      [at(names.triage)]: 'T',
+    };
+    const { deps, written } = commentDeps(files);
+    runCommentCommand({ round: 1, reviewerName: 'claude' }, deps);
+    expect(written[at(names.comment)]).toContain('Claude の指摘と対応');
+    expect(written[at(names.comment)]).toContain('CLAUDE_SAID');
+  });
+
+  it('保存されたレビューが無ければエラーにする', () => {
+    const { deps, logs } = commentDeps({});
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 3 }, deps)).toBeNull();
+    expect(logs.err).toMatch(/レビュー出力が見つかりません/);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('メタ情報だけあってレビュー出力が無ければ、貼り付け先を示してエラーにする (subagent 経路)', () => {
+    const subNames = roundFileNames(1, 'subagent');
+    const files = {
+      [at(subNames.meta)]: '{}',
+      [at(subNames.prompt)]: 'PROMPT',
+    };
+    const { deps, logs } = commentDeps(files);
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1 }, deps)).toBeNull();
+    expect(logs.err).toContain(subNames.review);
+    expect(logs.err).toContain(subNames.prompt);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('判断ファイルが無ければ雛形を書き出し、指摘の節を空にして続行する', () => {
+    const files = {
+      [at(names.meta)]: '{}',
+      [at(names.review)]: 'R',
+    };
+    const { deps, written, logs } = commentDeps(files);
+    process.exitCode = 0;
+    runCommentCommand({ round: 1 }, deps);
+    expect(written[at(names.triage)]).toBe(`${TRIAGE_TEMPLATE}\n`);
+    expect(written[at(names.comment)]).toContain('判断ファイルが未記入');
+    expect(logs.err).toMatch(/判断ファイルがありません/);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('メタ情報が壊れていても警告して本文は作る', () => {
+    const files = {
+      [at(names.meta)]: '{ broken',
+      [at(names.review)]: 'R',
+      [at(names.triage)]: 'T',
+    };
+    const { deps, written, logs } = commentDeps(files);
+    runCommentCommand({ round: 1 }, deps);
+    expect(logs.err).toMatch(/メタ情報を読めません/);
+    expect(written[at(names.comment)]).toContain('実行経路: 不明');
+  });
+
+  it('--verify の検証出力を「確認内容」節に入れる', () => {
+    const files = {
+      [at(names.meta)]: '{}',
+      [at(names.review)]: 'R',
+      [at(names.triage)]: 'T',
+      'verify.log': 'ok 347 tests',
+    };
+    const { deps, written } = commentDeps(files);
+    runCommentCommand({ round: 1, verifyPath: 'verify.log' }, deps);
+    expect(written[at(names.comment)]).toContain('### 確認内容');
+    expect(written[at(names.comment)]).toContain('ok 347 tests');
+  });
+
+  it('--verify のファイルを読めなければエラーにする (黙って省かない)', () => {
+    const files = { [at(names.meta)]: '{}', [at(names.review)]: 'R', [at(names.triage)]: 'T' };
+    const { deps, logs, written } = commentDeps(files);
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1, verifyPath: 'missing.log' }, deps)).toBeNull();
+    expect(logs.err).toMatch(/--verify のファイルを読めません/);
+    expect(written).toEqual({});
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('--out で書き出し先を変えられる', () => {
+    const files = { [at(names.meta)]: '{}', [at(names.review)]: 'R', [at(names.triage)]: 'T' };
+    const { deps, written } = commentDeps(files);
+    expect(runCommentCommand({ round: 1, outPath: 'comment.md' }, deps)).toBe('comment.md');
+    expect(written['comment.md']).toContain('## クロスレビュー 1 往復目');
+  });
+
+  it('detectRoundReviewers は同じ往復のメタ情報だけを拾う', () => {
+    const entries = ['round-1-codex.json', 'round-10-codex.json', 'round-1-claude.json', 'round-1-triage.md', 'round-1-codex.md'];
+    expect(detectRoundReviewers(dir, 1, { readdir: () => entries })).toEqual(['claude', 'codex']);
+    expect(detectRoundReviewers(dir, 10, { readdir: () => entries })).toEqual(['codex']);
+    expect(detectRoundReviewers(dir, 2, { readdir: () => { throw new Error('ENOENT'); } })).toEqual([]);
+  });
+
+  it('保存先はスクリプト位置から解決する (cwd に依存しない)', () => {
+    expect(resolveReviewDir({ scriptDir })).toBe(path.join(path.sep, 'repo', REVIEW_DIR_NAME));
+  });
+});
+
+describe('cross-review parseArgs (comment サブコマンドと PR 確認)', () => {
+  it('comment は --round が必須', () => {
+    expect(parseArgs(['comment'])).toMatchObject({ command: 'comment', error: expect.stringContaining('--round') });
+    expect(parseArgs(['comment', '--round', '2'])).toMatchObject({ command: 'comment', round: 2, error: null });
+  });
+
+  it('--reviewer / --verify / --out を受ける (= 形式も可)', () => {
+    expect(parseArgs(['comment', '--round=3', '--reviewer=codex', '--verify=v.log', '--out=o.md'])).toMatchObject({
+      command: 'comment', round: 3, reviewerName: 'codex', verifyPath: 'v.log', outPath: 'o.md', error: null,
+    });
+    expect(parseArgs(['comment', '--round', '3', '--reviewer', 'claude', '--verify', 'v.log', '--out', 'o.md'])).toMatchObject({
+      round: 3, reviewerName: 'claude', verifyPath: 'v.log', outPath: 'o.md', error: null,
+    });
+  });
+
+  it('--round は 1 以上の整数のみ', () => {
+    expect(parseArgs(['comment', '--round', '0']).error).toMatch(/--round/);
+    expect(parseArgs(['comment', '--round', '-1']).error).toMatch(/--round/);
+    expect(parseArgs(['comment', '--round', 'x']).error).toMatch(/--round/);
+  });
+
+  it('--reviewer はファイル名に化ける値を弾く', () => {
+    expect(parseArgs(['comment', '--round', '1', '--reviewer', '../evil']).error).toMatch(/--reviewer/);
+    expect(parseArgs(['comment', '--round', '1', '--reviewer', 'a/b']).error).toMatch(/--reviewer/);
+  });
+
+  it('comment 専用オプションをレビュアー実行に付けたらエラーにする', () => {
+    expect(parseArgs(['codex', '--round', '1']).error).toMatch(/comment サブコマンドでのみ/);
+    expect(parseArgs(['state', '--out', 'x.md']).error).toMatch(/comment サブコマンドでのみ/);
+  });
+
+  it('--no-state は comment とも併用できない (効かないオプションを黙って無視しない)', () => {
+    expect(parseArgs(['comment', '--round', '1', '--no-state']).error).toMatch(/--no-state/);
+  });
+
+  it('--no-pr-check を受ける', () => {
+    expect(parseArgs(['codex', '--no-pr-check'])).toMatchObject({ reviewer: 'codex', noPrCheck: true, error: null });
+    expect(parseArgs(['codex'])).toMatchObject({ noPrCheck: false });
   });
 });
