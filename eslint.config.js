@@ -6,7 +6,10 @@ import globals from 'globals';
 
 export default [
   {
-    ignores: ['node_modules/**', 'tools/node_modules/**'],
+    // `.claude/worktrees/<name>/` には git worktree (別ブランチの完全なコピー) が置かれる。
+    // 除外しないと配下の tools/ と tests/ もルートの `eslint .` の対象になり、そちらの
+    // ファイルには per-file 設定 (下の files: ['tools/**/*.js'] 等) がマッチせず no-undef になる。
+    ignores: ['node_modules/**', 'tools/node_modules/**', '.claude/worktrees/**'],
   },
   js.configs.recommended,
 
