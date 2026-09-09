@@ -571,6 +571,27 @@ describe('cross-review scriptPinsApprovalNever', () => {
     expect(scriptPinsApprovalNever('codex exec -c "approval_policy=never" -\n')).toBe(true);
     expect(scriptPinsApprovalNever("codex exec \\\n  -c 'approval_policy=never' \\\n  -\n")).toBe(true);
   });
+
+  it('codex exec 以外のコマンドの引数や、行末コメントに書かれていても false', () => {
+    expect(scriptPinsApprovalNever('echo -c approval_policy=never\ncodex exec -\n')).toBe(false);
+    expect(scriptPinsApprovalNever('codex exec - # TODO: -c approval_policy=never\n')).toBe(false);
+    expect(scriptPinsApprovalNever('codex exec \\\n  - # -c approval_policy=never\n')).toBe(false);
+  });
+
+  it('実物の codex-agent.sh と同じ形 (環境変数の前置、継続行、変数展開の引数) は true', () => {
+    const real = [
+      'CODEX_HOME="$codex_home" codex exec \\',
+      '  --skip-git-repo-check \\',
+      '  --sandbox "$codex_sandbox" \\',
+      '  -m "$codex_model" \\',
+      '  -c "model_reasoning_effort=\\"$codex_effort\\"" \\',
+      '  -c approval_policy=never \\',
+      '  -C "$workdir" \\',
+      '  - <<<"$prompt" >"$out_file" 2>"$err_file"',
+      '',
+    ].join('\n');
+    expect(scriptPinsApprovalNever(real)).toBe(true);
+  });
 });
 
 describe('cross-review codexAgentNameFor', () => {

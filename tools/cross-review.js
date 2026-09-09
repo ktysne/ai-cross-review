@@ -908,17 +908,34 @@ function checkCodexAgentSandbox({ fix, sandbox } = {}) {
 // codex-agent.sh が承認方針を never に固定しているかを判定する純粋関数。
 // スクリプトが codex への追加引数を受け付けない以上、この明示が無ければ承認方針は
 // codex の config.toml 次第になり、「Codex の承認は never 固定」を保証できない。
-// 文字列の存在ではなく「コメント行を除いた本文に、-c の引数として approval_policy=never が
-// 書かれている」ことを要求する (コメントや TODO に書かれているだけでは起動引数に乗らないため)。
+// 文字列の存在ではなく「codex exec の呼び出し (行末の \\ による継続行を含む) の引数に
+// -c approval_policy=never がある」ことを要求する。コメント (# 以降) は行末のものも含めて
+// 取り除き、echo 等の別コマンドの引数は数えない (どちらも codex の起動引数に乗らないため)。
 // 引用符の有無 (-c approval_policy=never / -c "approval_policy=never" / -c 'approval_policy=never')
-// は問わない。
-const APPROVAL_NEVER_ARG_PATTERN = /(^|\s)-c\s+["']?approval_policy=never["']?(\s|$)/m;
+// は問わない。判定は文字列ベースなので、bridge スクリプトが変数展開や関数経由で引数を組み立てる
+// 形に変わったら追従が要る (そのときは直接起動へ戻るだけで、不変条件は破れない)。
+const APPROVAL_NEVER_ARG_PATTERN = /(^|\s)-c\s+["']?approval_policy=never["']?(\s|$)/;
 function scriptPinsApprovalNever(text) {
-  const withoutComments = String(text == null ? '' : text)
-    .split(/\r?\n/)
-    .filter((line) => !/^\s*#/.test(line))
-    .join('\n');
-  return APPROVAL_NEVER_ARG_PATTERN.test(withoutComments);
+  const lines = String(text == null ? '' : text).split(/\r?\n/);
+  // 1. 各行から # 以降のコメントを落とす (引用符内の # は bash スクリプトでは稀なので区別しない)。
+  // 2. 行末が \\ の行は次の行と連結し、1 コマンド 1 行にする。
+  const commands = [];
+  let current = '';
+  for (const raw of lines) {
+    const line = raw.replace(/(^|\s)#.*$/, '');
+    if (/\\\s*$/.test(line)) {
+      current += line.replace(/\\\s*$/, ' ');
+      continue;
+    }
+    commands.push(current + line);
+    current = '';
+  }
+  if (current) commands.push(current);
+  // 3. codex exec の呼び出しを含むコマンドに限って、その引数列に -c approval_policy=never を求める。
+  return commands.some((cmd) => {
+    const at = cmd.search(/(^|\s)codex\s+exec(\s|$)/);
+    return at >= 0 && APPROVAL_NEVER_ARG_PATTERN.test(cmd.slice(at));
+  });
 }
 
 // bridge (codex-agent.sh) 経由の起動を組み立てる。起動前に 2 つの不変条件を確かめる:
