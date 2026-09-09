@@ -362,6 +362,7 @@ claude-codex-bridge を入れている環境では、codex を直接起動する
 node tools/cross-review.js state             # 現在の枝の round / lastReviewedSha / dismissed を JSON で表示
 node tools/cross-review.js state --reset     # 現在の枝の記録を消す（他の枝は残る）
 node tools/cross-review.js state --mark      # 往復を 1 回分記録する（round を 1 増やし、lastReviewedSha を現在の HEAD にする）
+node tools/cross-review.js state --mark --uncommitted   # 同上だが lastReviewedSha は据え置く（--uncommitted のレビュー後に使う）
 node tools/cross-review.js dismiss "運用上到達しない入力への指摘"   # 非対応と判断した指摘を記録
 ```
 

@@ -1629,6 +1629,17 @@ describe('cross-review state / dismiss サブコマンド', () => {
     expect(err).toMatch(/往復を記録しました/);
   });
 
+  it('state --mark --uncommitted は往復だけ進め、直前レビュー SHA を据え置く (--uncommitted のレビューと同じ規則)', () => {
+    const prevSha = 'd'.repeat(40);
+    const mem = memoryState({
+      branches: { 'feat/x': { round: 1, lastReviewedSha: prevSha, dismissed: [] } },
+    });
+    runStateCommand({ mark: true, mode: 'uncommitted' }, {
+      ...mem, gitRun: markGitRun, out: () => {}, err: () => {},
+    });
+    expect(branchStateOf(mem.store.state, 'feat/x')).toEqual({ round: 2, lastReviewedSha: prevSha, dismissed: [] });
+  });
+
   it('state --mark は書き込みに失敗したら成功通知を出さずエラー終了する', () => {
     let err = '';
     process.exitCode = 0;
@@ -2598,7 +2609,24 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
       expect(Object.keys(written)).toEqual(['fb.md']);
       expect(mem.store.writes).toEqual([]);
       expect(err).toMatch(/state --mark/); // 記録の手順を案内する
+      expect(err).not.toMatch(/state --mark --uncommitted/); // コミット済み差分のレビューなら SHA を進めてよい
       expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+      process.exitCode = 0;
+    });
+
+    it('--uncommitted のレビューが利用上限で代替になったら、案内は state --mark --uncommitted にする', () => {
+      const mem = memoryState();
+      let err = '';
+      process.exitCode = 0;
+      runReview(stateOpts({ mode: 'uncommitted', baseRef: 'HEAD', fallbackPromptPath: 'fb.md' }), recordDeps(mem, {
+        spawnFn: (cmd, args, stdin, onExit) => {
+          settle(onExit, { code: 1, outputTail: 'You have hit your usage limit.' });
+          return null;
+        },
+        writeFile: () => {},
+        err: (s) => { err += s; },
+      }));
+      expect(err).toMatch(/state --mark --uncommitted/);
       process.exitCode = 0;
     });
 

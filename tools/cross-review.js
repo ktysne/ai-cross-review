@@ -374,6 +374,7 @@ const USAGE = [
   '  state             現在のブランチの往復回数・直前レビュー SHA・非対応指摘を JSON で表示',
   '  state --reset     現在のブランチの記録を消す',
   '  state --mark      往復を 1 回分記録する (round を 1 増やし、直前レビュー SHA を現在の HEAD にする)。',
+  '                    --uncommitted を付けると SHA を据え置く (--uncommitted のレビュー後に使う)。',
   '                    利用上限フォールバックのプロンプトを客観サブエージェントへ渡してレビューを',
   '                    終えた後など、CLI がレビューの成立を観測できないときに手で記録する',
   '  dismiss "<要約>"  非対応と判断した指摘を記録する (以降のレビュープロンプトに',
@@ -1579,7 +1580,8 @@ function emitFallbackPrompt(prompt, opts, deps = {}) {
   writeErr(
     `[cross-review] Codex の利用上限のため subagent 代替に切り替えます。プロンプト: ${promptPath}\n`
     + '  その内容を Claude の客観サブエージェント (読み取り専用。--fix 時は書込権限付き) へ渡してください。\n'
-    + '  サブエージェントでのレビューが終わったら `node tools/cross-review.js state --mark` で往復を記録してください。\n'
+    // --uncommitted のレビューだったなら、記録でも SHA を据え置く (経路によって状態遷移が食い違わないように)。
+    + `  サブエージェントでのレビューが終わったら \`node tools/cross-review.js state --mark${opts.mode === 'uncommitted' ? ' --uncommitted' : ''}\` で往復を記録してください。\n`
     + '  PR コメントには「Codex を直接実行できないため (利用上限) subagent 代替で確認した」と残してください。\n',
   );
   process.exitCode = USAGE_LIMIT_EXIT_CODE;
@@ -1833,7 +1835,10 @@ function runStateCommand(opts, deps = {}) {
   if (opts.mark) {
     // 直前に読んだ状態へ 1 往復分の遷移を適用する。SHA を取れなければ nextState が
     // lastReviewedSha を据え置くので、往復だけが進む。
-    const headSha = currentHeadSha(gitRun);
+    // --uncommitted 付きなら SHA を据え置く (レビュー実行の --uncommitted と同じ規則。作業ツリー差分の
+    // レビューは「この SHA 以降の増分」の意味を持たず、HEAD まで進めると未レビューのコミットが
+    // 次回の既定差分から抜けるため)。
+    const headSha = opts.mode === 'uncommitted' ? null : currentHeadSha(gitRun);
     const updated = nextState(loaded.state, { branch, sha: headSha });
     // 書けていないのに「記録しました」とは言わない (失敗理由は writeState が警告済み)。
     if (!writeStateFn(updated, stateDeps)) {
