@@ -270,7 +270,7 @@ node tools/cross-review.js subagent      # CLI を起動せずレビュー用プ
 - codex のサンドボックスでモードを切り替えます：
   - レビューだけ（既定）→ `codex exec -s read-only`（ファイルを変えさせない）
   - `--fix` → `codex exec -s workspace-write`（見つかった問題を作業ツリーへ直接修正させる）
-- codex は `-c approval_policy=never` で**承認を never に固定**します（直接起動のとき。非対話の自走が承認待ちで止まらないように）。  
+- codex は **承認を never に固定**します（非対話の自走が承認待ちで止まらないように）。直接起動では `-c approval_policy=never` を渡し、bridge 経由ではスクリプトが同じ指定を持つことを起動前に確かめます（後述「codex の起動は bridge を経由する」）。  
 - **専用サブコマンド `codex exec review` は使いません**。  
   codex v0.137.0 で `--uncommitted` / `--base` が `[PROMPT]` と併用できなくなり、観点チェックリストを同時に渡せなくなったため、汎用の `exec` と差分の埋め込みに統一しました。  
 - 差分の対象範囲：
@@ -291,9 +291,12 @@ claude-codex-bridge を入れている環境では、codex を直接起動する
 起動経路は次の順で決まります。
 
 1. `--no-codex-agent` が付いていれば、解決せずに **codex を直接起動**します（従来の起動方法）。
-2. スクリプトを **環境変数 `CROSS_REVIEW_CODEX_AGENT`（パス）→ `~/.claude/tools/codex-agent.sh`** の順に探し、見つかれば `bash <script> <定義名> -C <cwd>` で起動します（プロンプトは従来どおり stdin で渡します）。  
+2. スクリプトを **環境変数 `CROSS_REVIEW_CODEX_AGENT`（パス）→ `~/.claude/tools/codex-agent.sh`** の順に探します。  
    環境変数で指定したパスが見つからないときは、黙って既定パスへ落ちず stderr に警告を出します。
-3. どこにも無ければ **codex を直接起動**します。
+3. スクリプトが見つかったら、その本文に **`approval_policy=never` が含まれるか**を確かめます（後述「承認方針」）。含まなければ stderr に 1 行出して **codex を直接起動**します。
+4. 定義ファイルが見つかれば、その **`codex_sandbox` が `--fix` の有無と一致するか**を確かめます（後述「サンドボックス」）。食い違えば**起動せずエラー**（終了コード 2）で止めます。
+5. ここまで通れば `bash <script> <定義名> -C <cwd>` で起動します（プロンプトは従来どおり stdin で渡します）。
+6. スクリプトがどこにも無ければ **codex を直接起動**します。
 
 定義名は `--fix` の有無で選び分けます（`--codex-agent <name>` で明示もできます）。
 
@@ -302,12 +305,17 @@ claude-codex-bridge を入れている環境では、codex を直接起動する
 | レビューのみ（既定） | `codex-review` | `read-only` |
 | `--fix` | `codex-subagent` | `workspace-write` |
 
-bridge 経由ではサンドボックスが**定義ファイル（`~/.claude/gpt-agents/<定義名>.md`）側**で決まるため、「レビューのみは read-only、`--fix` のときだけ workspace-write」という不変条件は**定義名の選択**で守ります。  
-`--fix` と `--codex-agent codex-review` の併用、および `--fix` 無しの `--codex-agent codex-subagent` は、起動前にエラー（終了コード 2）で止めます。  
-`codex-review` / `codex-subagent` 以外の名前は、利用者が用意した定義とみなしてそのまま通します。
+**サンドボックス**：bridge 経由ではサンドボックスが**定義ファイル（`.claude/gpt-agents/<定義名>.md`）側**で決まるため、「レビューのみは read-only、`--fix` のときだけ workspace-write」という不変条件は、定義名の選択と**起動前の検証**の両方で守ります。
 
-**承認方針の注意**：bridge 経由では `-c approval_policy=never` を渡せません（スクリプトが codex への追加引数を受け付けないため）。  
-bridge 経由では承認方針を定義側の codex 設定に委ねます。非対話で止まらないよう `codex-agent.sh` 側で never を明示することを bridge に依頼済みです。
+- `--fix` と `--codex-agent codex-review` の併用、および `--fix` 無しの `--codex-agent codex-subagent` は、引数解析の時点でエラー（終了コード 2）で止めます。
+- 起動直前に定義ファイルを **`<cwd>/.claude/gpt-agents/<定義名>.md` → `~/.claude/gpt-agents/<定義名>.md`** の順（bridge と同じ解決順）で探し、フロントマターの `codex_sandbox` を読みます（行末の `#` コメントと引用符の扱いは `codex-agent.sh` の `fm_get` と同じ。キーが無ければ既定の `read-only`）。  
+  レビューのみで `read-only` 以外、`--fix` で `workspace-write` 以外なら**起動せずエラー**（終了コード 2）で止めます。
+- この検証は `--codex-agent` で明示した名前だけでなく、既定の `codex-review` / `codex-subagent` にも掛けます。定義ファイルの中身は利用者が変えられるため、名前だけでは不変条件を保証できないからです。
+- 定義ファイルが見つからないときは検証せず bridge に委ねます（bridge が終了コード 3 で未導入を知らせ、直接起動へ戻ります）。
+
+**承認方針**：bridge 経由では `-c approval_policy=never` を渡せません（スクリプトが codex への追加引数を受け付けないため）。  
+そのため bridge 経由を使うのは、**`codex-agent.sh` の本文に `approval_policy=never` が含まれる場合に限り**ます。含まれない、またはスクリプトを読めない場合は stderr に警告を出して**直接起動へ戻し**（直接起動なら `-c approval_policy=never` を自分で渡せます）、「Codex の承認は never 固定」という不変条件を保ちます。`--codex-agent` で定義名を明示していても同じ扱いです（明示指定を理由に不変条件を緩めません）。  
+`codex-agent.sh` 側で never を明示する対応は claude-codex-bridge #16 で依頼しています。
 
 **bridge が未導入のとき**：スクリプトはあるが Codex 側が使えない（`codex` コマンドが無い、定義ファイルが無い、`codex_enabled: false`）場合、スクリプトは終了コード 3 を返します。  
 このときは stderr に 1 行出したうえで、**同じプロンプトのまま直接起動へ切り替えて**やり直します（`bash` 自体が見つからない場合も同じ扱いです）。

@@ -31,8 +31,12 @@
 //   モデル、推論 effort、認証ホーム (CODEX_HOME) を定義ファイル `~/.claude/gpt-agents/<name>.md` 側で
 //   一元管理し、Claude Code のサブエージェント経由の起動と条件を揃えるため。サンドボックスも定義側の
 //   `codex_sandbox` で決まるので、read-only の `codex-review` と workspace-write の `codex-subagent` を
-//   --fix の有無で選び分けて「レビューのみは read-only」の不変条件を保つ。スクリプトが無い環境では
-//   従来どおり codex を直接起動する (`--no-codex-agent` で明示的に直接起動へ戻せる)。
+//   --fix の有無で選び分けたうえ、起動前に定義ファイルの `codex_sandbox` を読んで --fix の有無と
+//   一致するかを検査し (食い違えばエラー終了)、「レビューのみは read-only」の不変条件を保つ。
+//   bridge は codex への追加引数を受け付けないため、承認方針はスクリプト本文の指定がすべてになる。
+//   スクリプトが `approval_policy=never` を明示していない場合は bridge を使わず直接起動へ戻し、
+//   「Codex の承認は never 固定」を保つ。スクリプトが無い環境でも従来どおり直接起動する
+//   (`--no-codex-agent` で明示的に直接起動へ戻せる)。
 // - Codex が利用上限に達したときは、レビューを失敗で終わらせず subagent 経路と同じプロンプトを
 //   ファイルへ書き出し、終了コード 75 で「客観サブエージェントへ渡してください」と促す
 //   (`--no-fallback` で従来どおりの失敗終了に戻せる)。
@@ -80,10 +84,24 @@ const IGNORE_FILENAME = '.cross-review-ignore';
 const CODEX_AGENT_SCRIPT_SUBPATH = ['.claude', 'tools', 'codex-agent.sh'];
 
 // bridge 経由で使う定義名。サンドボックスは定義ファイル側の codex_sandbox で決まるため、
-// 「レビューのみは read-only、--fix のときだけ workspace-write」の不変条件は定義名の選択で守る。
+// 「レビューのみは read-only、--fix のときだけ workspace-write」の不変条件は、定義名の選択と
+// 起動前の codex_sandbox 検査 (checkCodexAgentSandbox) の両方で守る。
 // codex-review = read-only / codex-subagent = workspace-write。
 const CODEX_AGENT_REVIEW_NAME = 'codex-review';
 const CODEX_AGENT_FIX_NAME = 'codex-subagent';
+
+// bridge の定義ファイル置き場。codex-agent.sh と同じく <cwd> → <ホーム> の順で探す
+// (プロジェクト定義がユーザ定義を上書きする)。
+const CODEX_AGENT_DEF_SUBDIR = ['.claude', 'gpt-agents'];
+
+// 定義ファイルの codex_sandbox が取り得る値。既定は安全側の read-only (bridge 側の既定と揃える)。
+const CODEX_SANDBOX_READ_ONLY = 'read-only';
+const CODEX_SANDBOX_WORKSPACE_WRITE = 'workspace-write';
+
+// bridge 経由を許す条件。codex-agent.sh は codex への追加引数を受け付けないため、承認方針は
+// スクリプト本文の指定がすべてになる。この文字列を明示していないスクリプトは
+// 「Codex の承認は never 固定」を保証できないので bridge 経由に使わない。
+const APPROVAL_NEVER_MARKER = 'approval_policy=never';
 
 // codex-agent.sh の終了コード。3 = bridge が未導入 (codex コマンドや定義が無い、codex_enabled: false)、
 // 75 = Codex が利用上限で実行できなかった。
@@ -312,6 +330,8 @@ const USAGE = [
   'codex の起動: claude-codex-bridge の codex-agent.sh があれば経由します',
   '  (解決順は 環境変数 CROSS_REVIEW_CODEX_AGENT → ~/.claude/tools/codex-agent.sh。無ければ codex を直接起動)。',
   '  モデル・推論 effort・認証ホーム・サンドボックスは定義 ~/.claude/gpt-agents/<name>.md に従います。',
+  '  bridge 経由はスクリプトが approval_policy=never を明示している場合に限ります (無ければ直接起動)。',
+  '  定義の codex_sandbox が --fix の有無と食い違う場合は起動せずエラー終了します。',
   '利用上限時: Codex が利用上限に達したら subagent 代替のプロンプトをファイルへ書き出し、終了コード 75 で終わります',
   '  (--no-fallback で無効化)。',
   'レビュー観点: リポジトリ直下の .cross-review.md を読み込みます',
@@ -815,33 +835,139 @@ function codexAgentNameFor(opts) {
   return opts.fix ? CODEX_AGENT_FIX_NAME : CODEX_AGENT_REVIEW_NAME;
 }
 
+// 定義ファイルのフロントマター (先頭行の `---` から次の `---` まで) から 1 キーの値を取り出す。
+// 解釈は codex-agent.sh の fm_get と揃える:
+//   - 前方一致した最初の行だけを使う (`<key>:` は行頭から)
+//   - `key:` 直後の空白を落とし、そのあとに続く「空白 + #」以降を行末コメントとして落とす
+//     (値の内部の # は残す)
+//   - 前後の空白と、値全体を囲む引用符を除く
+// 先頭行が `---` でなければフロントマター無しとみなして null を返す。キーが無いときも null。
+function frontMatterValue(text, key) {
+  const lines = String(text == null ? '' : text).split(/\r?\n/);
+  if (lines[0] !== '---') return null;
+  const prefix = `${key}:`;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line === '---') break;
+    if (!line.startsWith(prefix)) continue;
+    let raw = line.slice(prefix.length).replace(/^[ \t]*/, '');
+    raw = raw.replace(/[ \t][ \t]*#.*$/, '').trim();
+    if (raw.length >= 2
+      && ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'")))) {
+      raw = raw.slice(1, -1);
+    }
+    return raw;
+  }
+  return null;
+}
+
+// 定義ファイル本文から codex_sandbox を読む。キーが無い、値が空、フロントマターが無い場合は
+// bridge 側と同じ既定 (read-only) を返す。
+function codexAgentSandboxOf(text) {
+  const value = frontMatterValue(text, 'codex_sandbox');
+  return value ? value : CODEX_SANDBOX_READ_ONLY;
+}
+
+// 定義ファイル (.claude/gpt-agents/<name>.md) を bridge と同じ順で探して本文を返す。
+// どこにも無い / 読めない場合は null (呼び出し側は検査せず bridge に委ねる)。
+// deps で cwd / homedir / 存在確認 / 読み込みを差し替え可能にする (テスト用)。
+function readCodexAgentDefinition(name, deps = {}) {
+  const cwd = deps.cwd || process.cwd();
+  const home = deps.homedir || os.homedir();
+  const exists = deps.exists || ((p) => fs.existsSync(p));
+  const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
+  for (const dir of [cwd, home]) {
+    const defPath = path.join(dir, ...CODEX_AGENT_DEF_SUBDIR, `${name}.md`);
+    try {
+      if (!exists(defPath)) continue;
+      return { path: defPath, text: readFile(defPath) };
+    } catch {
+      // 読めない候補は無いものとして次へ進む (最終的に bridge 側の検査に委ねる)。
+    }
+  }
+  return null;
+}
+
+// 定義ファイルの codex_sandbox が --fix の有無と一致するかを判定する純粋関数。
+// レビューのみ (--fix 無し) は read-only、--fix は workspace-write でなければならない。
+// bridge 経由ではサンドボックスを決めるのが定義ファイルなので、定義名が既定か明示かに関わらず
+// 起動前にここで突き合わせる (利用者が定義ファイルの中身を変えている可能性があるため)。
+function checkCodexAgentSandbox({ fix, sandbox } = {}) {
+  const expected = fix ? CODEX_SANDBOX_WORKSPACE_WRITE : CODEX_SANDBOX_READ_ONLY;
+  return { ok: sandbox === expected, expected, actual: sandbox };
+}
+
+// codex-agent.sh が承認方針を never に固定しているかを判定する純粋関数。
+// スクリプトが codex への追加引数を受け付けない以上、この明示が無ければ承認方針は
+// codex の config.toml 次第になり、「Codex の承認は never 固定」を保証できない。
+function scriptPinsApprovalNever(text) {
+  return String(text == null ? '' : text).includes(APPROVAL_NEVER_MARKER);
+}
+
+// bridge (codex-agent.sh) 経由の起動を組み立てる。起動前に 2 つの不変条件を確かめる:
+//   - 承認は never 固定: スクリプトが approval_policy=never を明示していること。
+//     明示が無い、またはスクリプトを読めない場合は null を返し、呼び出し側は直接起動へ戻す
+//     (直接起動なら -c approval_policy=never を自分で渡せる)。
+//   - サンドボックス: 定義ファイルの codex_sandbox が --fix の有無と一致すること。
+//     食い違う場合は { error } を返し、レビュアーを起動させない。
+// 定義ファイルが見つからないときは検査せず bridge に委ねる (bridge が終了コード 3 で未導入を
+// 知らせ、呼び出し側が直接起動へ戻る)。
+function codexAgentInvocation(script, opts, deps = {}) {
+  const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
+  const warn = deps.warn || ((m) => process.stderr.write(m));
+  let scriptText;
+  try {
+    scriptText = readFile(script);
+  } catch (err) {
+    warn(`[cross-review] codex-agent.sh を読めないため直接起動へ切り替えます: ${script} (${(err && err.message) || 'read error'})\n`);
+    return null;
+  }
+  if (!scriptPinsApprovalNever(scriptText)) {
+    warn(`[cross-review] codex-agent.sh が ${APPROVAL_NEVER_MARKER} を明示していないため直接起動へ切り替えます (claude-codex-bridge #16 を参照)\n`);
+    return null;
+  }
+  const agentName = codexAgentNameFor(opts);
+  const def = readCodexAgentDefinition(agentName, deps);
+  if (def) {
+    const check = checkCodexAgentSandbox({ fix: opts.fix, sandbox: codexAgentSandboxOf(def.text) });
+    if (!check.ok) {
+      return {
+        error: `定義 ${agentName} の codex_sandbox が ${check.actual} です`
+          + ` (${opts.fix ? '--fix では' : 'レビューのみでは'} ${check.expected} が必要): ${def.path}`,
+      };
+    }
+  }
+  const cwd = deps.cwd || process.cwd();
+  // codex-agent.sh は依頼文を stdin から読み、定義ファイルのフロントマターに従って
+  // CODEX_HOME / モデル / effort / サンドボックスを決めて codex exec を起動する。
+  return {
+    cmd: 'bash',
+    args: [script, agentName, '-C', cwd],
+    via: 'agent',
+    agentName,
+    scriptPath: script,
+    notice: opts.fix
+      ? `Codex にレビュー + 検出事項の修正を依頼します (作業ツリーを編集します): codex-agent.sh 経由 (定義: ${agentName})\n`
+      : `Codex でレビューを実行します: codex-agent.sh 経由 (定義: ${agentName})\n`,
+  };
+}
+
 // reviewer / fix から「起動コマンド、引数、端末通知」を決める純粋関数。
 // 主変更点 (どのレビュアーをどのサンドボックスで呼ぶか) を spawn 抜きで検証できるよう、
 // runReview の配線部分を分離する。stdin に渡すプロンプトは prompt をそのまま使う。
 // codex は codex-agent.sh (bridge) があればそれを経由し (via: 'agent')、無ければ
 // codex を直接起動する (via: 'direct')。via は利用上限の判定 (isUsageLimitExit) と
-// bridge 未導入時の再起動判断に使う。deps は resolveCodexAgentScript へ渡す
-// (env / homedir / exists / warn) ほか、bridge へ渡す作業ディレクトリ (deps.cwd) を差し替える。
+// bridge 未導入時の再起動判断に使う。deps は resolveCodexAgentScript / codexAgentInvocation へ
+// 渡す (env / homedir / exists / readFile / warn) ほか、bridge へ渡す作業ディレクトリ
+// (deps.cwd) を差し替える。
+// 戻り値に error があるときは起動してはいけない (呼び出し側がエラー終了する)。
 function reviewerInvocation(opts, deps = {}) {
   if (opts.reviewer === 'codex') {
     // --no-codex-agent (codexAgent === false) は解決自体を行わず、常に直接起動する。
     const script = opts.codexAgent === false ? null : resolveCodexAgentScript(deps);
-    if (script) {
-      const agentName = codexAgentNameFor(opts);
-      const cwd = deps.cwd || process.cwd();
-      // codex-agent.sh は依頼文を stdin から読み、定義ファイルのフロントマターに従って
-      // CODEX_HOME / モデル / effort / サンドボックスを決めて codex exec を起動する。
-      return {
-        cmd: 'bash',
-        args: [script, agentName, '-C', cwd],
-        via: 'agent',
-        agentName,
-        scriptPath: script,
-        notice: opts.fix
-          ? `Codex にレビュー + 検出事項の修正を依頼します (作業ツリーを編集します): codex-agent.sh 経由 (定義: ${agentName})\n`
-          : `Codex でレビューを実行します: codex-agent.sh 経由 (定義: ${agentName})\n`,
-      };
-    }
+    // bridge 経由が不変条件 (承認 never 固定) を満たせないときは null が返るので直接起動へ落ちる。
+    const agentInv = script ? codexAgentInvocation(script, opts, deps) : null;
+    if (agentInv) return agentInv;
     return {
       cmd: 'codex',
       args: codexExecArgs(opts),
@@ -1089,7 +1215,17 @@ function runReview(opts, deps = {}) {
   const prompt = buildReviewPrompt(diffText, resolvedOpts, checklist, instructions, excludedFiles);
   // reviewerInvocation も解決後の opts で揃える (現状 baseRef は参照しないが、プロンプトの
   // スコープ表記と起動引数が将来食い違わないよう、解決後の値だけを下流に渡す)。
-  const inv = reviewerInvocation(resolvedOpts, deps);
+  // bridge の解決で出る警告は、他の通知と同じ stderr の出口 (writeErr) へ流す。
+  const invDeps = deps.warn ? deps : { ...deps, warn: writeErr };
+  const inv = reviewerInvocation(resolvedOpts, invDeps);
+  if (inv.error) {
+    // 定義ファイルの codex_sandbox が --fix の有無と食い違う。レビューのみで書き込み可能な
+    // 定義を使わせないため、レビュアーを起動せずエラー終了する (引数エラーと同じ終了コード 2)。
+    writeErr(`[cross-review] ${inv.error}\n`
+      + '  定義ファイルの codex_sandbox を直すか、--codex-agent で適切な定義を指定してください。\n');
+    process.exitCode = 2;
+    return null;
+  }
   if (inv.emit) {
     // subagent: 外部プロセスを起動せず、組み立てたプロンプト本文だけを stdout に出す。
     // 通知は stderr に分けて、stdout を「そのまま客観サブエージェントへ渡せるプロンプト」に保つ。
@@ -1111,7 +1247,7 @@ function runReview(opts, deps = {}) {
         || (exit.error && exit.error.code === 'ENOENT');
       if (invocation.via === 'agent' && bridgeUnavailable) {
         writeErr('[cross-review] bridge が未導入のため直接起動へ切り替えます。\n');
-        start(reviewerInvocation({ ...resolvedOpts, codexAgent: false }, deps));
+        start(reviewerInvocation({ ...resolvedOpts, codexAgent: false }, invDeps));
         return;
       }
       if (opts.noFallback) return; // --no-fallback は従来どおり失敗終了 (終了コードはそのまま)。
@@ -1147,6 +1283,12 @@ module.exports = {
   reviewerInvocation,
   resolveCodexAgentScript,
   codexAgentNameFor,
+  codexAgentInvocation,
+  frontMatterValue,
+  codexAgentSandboxOf,
+  readCodexAgentDefinition,
+  checkCodexAgentSandbox,
+  scriptPinsApprovalNever,
   isUsageLimitExit,
   resolveFallbackPromptPath,
   emitFallbackPrompt,
@@ -1167,6 +1309,8 @@ module.exports = {
   CODEX_AGENT_REVIEW_NAME,
   CODEX_AGENT_FIX_NAME,
   CODEX_AGENT_EXIT_MISSING,
+  CODEX_SANDBOX_READ_ONLY,
+  CODEX_SANDBOX_WORKSPACE_WRITE,
   USAGE_LIMIT_EXIT_CODE,
   DEFAULT_EXCLUDE_PATTERNS,
   GENERIC_CHECKLIST,
