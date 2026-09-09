@@ -51,7 +51,7 @@ Codex 主導では Plan mode 等の選択 UI があればそれを使い、無�
 `npm run review:codex*` / `npm run review:claude` はレビュアー CLI がネットワーク/API 接続を使うため **Bash をサンドボックス無効、ネットワーク許可で実行**する。CLI が見えていても API 接続だけ止まることがあるので、`claude -p "Reply with OK only."` のような最小呼び出しで切り分ける。
 
 ```bash
-npm run review:codex                  # main との差分をレビュー (read-only)
+npm run review:codex                  # 既定 base との差分をレビュー (read-only)
 npm run review:codex:fix              # レビュー + 直接修正 (workspace-write)
 npm run review:codex -- --uncommitted # 未コミット差分をレビュー
 node tools/cross-review.js codex --fix --instructions notes.md
@@ -61,7 +61,23 @@ node tools/cross-review.js codex --fix --instructions notes.md
 Codex が利用上限に達したときは、subagent 代替のプロンプトが自動でファイルへ書き出され、終了コード 75 で終わる（書き出し先は stderr に出る。既定は一時ディレクトリ、`--fallback-prompt <path>` で変更可）。
 その中身をそのまま Agent ツールの客観レビュー用サブエージェント（読み取り専用。`--fix` 時は書込権限付き）へ渡し、PR コメントに「Codex を直接実行できないため (利用上限) subagent 代替で確認した」と残す（切り替えたくないときは `--no-fallback`）。
 
-差分ガード `--max-diff-kb` / 巨大ファイル要約 `--max-file-diff-kb` / 除外無効化 `--no-exclude`、既定 base の `origin/main` 優先解決、ロックファイル等の既定除外 (`.cross-review-ignore` / `CROSS_REVIEW_IGNORE`)、bridge (codex-agent.sh) 経由の起動と `--no-codex-agent` は `docs/cross-review.md` 参照。
+既定 base は **前回レビュー SHA (状態ファイル) → PR の base (`gh pr view --json baseRefName`) → `origin/main` → ローカル `main`** の順に解決し、決めた base と解決方法が差分サイズと同じ stderr 行に出る。
+**妥当性確認は `--base` を付けずにそのまま実行すればよい**（2 回目以降は前回レビュー SHA が自動で base になり、増分差分だけが送られる）。手で指定するなら従来どおり `--base <SHA>`。
+
+往復回数、直前レビュー SHA、非対応と判断した指摘はブランチ単位で `.cross-review-state.json` に残る（`.gitignore` 済み、`--no-state` で無効化）。
+
+```bash
+node tools/cross-review.js state          # この枝の往復回数 / 直前レビュー SHA / 非対応指摘を表示
+node tools/cross-review.js state --reset  # この枝の記録を消す
+node tools/cross-review.js state --mark   # 往復を 1 回分記録する (round を 1 増やし、直前レビュー SHA を現在の HEAD にする。--uncommitted 付きなら SHA は据え置く)
+node tools/cross-review.js dismiss "<要約>"  # 非対応と判断した指摘を登録 (以降のレビューで再指摘させない)
+```
+
+往復が自動で記録されるのは、`subagent` がプロンプトを stdout に出したときと、レビュアー CLI が終了コード 0 で終わったときだけ。
+**利用上限フォールバックでは記録されない**（CLI はサブエージェントのレビュー完了を観測できないため）ので、サブエージェントでのレビューを終えたら `state --mark` で記録する。
+
+差分サイズが閾値を超えたときは、ファイル要約の閾値を 32/16/8KB と下げて縮退を試し、収まらないときだけ中断する（`--strict-diff-guard` で従来の即中断）。
+差分ガード `--max-diff-kb` / 巨大ファイル要約 `--max-file-diff-kb` / 除外無効化 `--no-exclude`、fetch と gh の省略 (`CROSS_REVIEW_NO_FETCH=1`)、ロックファイル等の既定除外 (`.cross-review-ignore` / `CROSS_REVIEW_IGNORE`)、bridge (codex-agent.sh) 経由の起動と `--no-codex-agent` は `docs/cross-review.md` 参照。
 
 ### リモートコントロール (クラウド実行) 環境
 
@@ -83,7 +99,7 @@ Codex が利用上限に達したときは、subagent 代替のプロンプト�
   - 残る指摘が **要修正のみ**で、影響範囲が局所 (1 ファイル内に収まり、既存テストで検証できる) なら、主セッションの判断で対応して収束としてよい。判断の根拠を PR コメントに残す。
   - 局所の条件を満たさない要修正が残る場合は、blocker と同じく中断してユーザの判断を仰ぐ。
   - 要修正のみの収束処理やユーザの判断で 3 往復を超えて続ける場合は、PR コメントの冒頭に「何往復目まで回したか、なぜ続けたか」を書く。
-  - 同じ指摘が往復をまたいで揺り戻すなら 3 往復を待たず早期中断してよい。往復回数は会話内で数える (CLI は往復状態を持たない)。
+  - 同じ指摘が往復をまたいで揺り戻すなら 3 往復を待たず早期中断してよい。往復回数は CLI がブランチ単位で数え (`.cross-review-state.json` の `round`)、3 回目の実行で stderr に警告が出る (実行は止まらないので、上のルールに沿った判断は主セッションが行う)。`--no-state` の実行は数えられないので会話内で数える。
   - blocker の有無で分けるのは、実害のある指摘の判断をユーザに残し、局所的な要修正の判断は主セッションに委ねるため。
 - **指摘、対応、妥当性確認は PR コメントに残す** (チャットログを手コピーしない。受け渡しは git 差分 / PR)。PR 未作成なら先に作る。
 - **指摘対応のコミットは実装コミットと分ける**：`fix(scope): レビュー指摘対応 — <要約>` のように、どの往復の対応かが履歴から追える形にする。

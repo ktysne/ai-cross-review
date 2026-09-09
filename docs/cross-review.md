@@ -143,7 +143,7 @@ CLI と API 接続を切り分ける場合は、まず `Get-Command claude` / `c
 1. レビュー用プロンプトを stdout に出す（外部 CLI は起動しない）：
 
    ```bash
-   node tools/cross-review.js subagent                 # main との差分 (レビューのみ)
+   node tools/cross-review.js subagent                 # 既定 base との差分 (レビューのみ)
    node tools/cross-review.js subagent --uncommitted   # 未コミット差分 (tracked + untracked)
    node tools/cross-review.js subagent --fix           # 修正指示付きプロンプト (3 択の外。後述)
    ```
@@ -172,7 +172,8 @@ CLI と API 接続を切り分ける場合は、まず `Get-Command claude` / `c
 - **切り替え時の動作**：`subagent` と同じプロンプト本文（`--fix` なら FIX 指示付き）を**ファイルへ書き出し**、次に何をすればよいかを stderr に出して、**終了コード 75** で終わります。  
   書き出し先の既定は OS の一時ディレクトリの `cross-review-fallback-<pid>.md` で、`--fallback-prompt <path>` で変えられます。  
   プロンプトを stdout に混ぜないのは、stdout がレビュアーの出力で埋まっているためです。
-- **その後**：書き出されたファイルの内容を、`Agent` ツール等の客観レビュー用サブエージェント（読み取り専用。`--fix` 時は書込権限付き）へ渡してレビューさせます。以降の手順は上の subagent 経路と同じです。  
+- **その後**：書き出されたファイルの内容を、`Agent` ツール等の客観レビュー用サブエージェント（読み取り専用。`--fix` 時は書込権限付き）へ渡してレビューさせます。以降の手順は上の subagent 経路と同じです。
+- **往復の記録**：フォールバックした実行では `round` を増やしません（CLI はサブエージェントがレビューを終えたかを観測できないため。書き出した時点で数えると、プロンプトを渡さずに再実行したとき未レビューの差分が「差分なし」になります）。サブエージェントでのレビューが終わったら `node tools/cross-review.js state --mark` で往復を記録します。  
   PR コメントには「Codex を直接実行できないため（利用上限）subagent 代替で確認した」ことを残します。
 - **切り替えたくないとき**：`--no-fallback` を付けると、従来どおり失敗終了します（終了コードはレビュアーのまま）。
 - `claude` CLI 経路（`npm run review:claude`）はこの自動切り替えの対象外です。
@@ -189,7 +190,7 @@ Codex に一から再レビューさせるのではなく、確定した指摘�
    ```bash
    # 未コミットの作業ツリーを対象に、指摘を渡して Codex に直接修正させる
    node tools/cross-review.js codex --fix --uncommitted --instructions review-notes.md
-   # コミット済みの差分が対象なら --uncommitted を外す（既定 = main との差分）
+   # コミット済みの差分が対象なら --uncommitted を外す（既定 = 既定 base との差分）
    ```
 
 3. `--instructions` の中身は **観点 `.cross-review.md` を置き換えず**、「レビュアーからの申し送り、重点指摘」としてプロンプトに追加されます（観点はこれまでどおり自動で付きます）。  
@@ -215,7 +216,8 @@ Codex に一から再レビューさせるのではなく、確定した指摘�
 - 局所の条件を満たさない要修正が残る場合は、blocker と同じくループを止めてユーザの判断を仰ぎます。  
 - 要修正のみの収束処理やユーザの判断で 3 往復を超えて続けるときは、PR コメントの冒頭に「何往復目まで回したか、なぜ続けたか」を書きます。  
 - 同じ指摘が往復のたびに**揺り戻す**（直すと別の指摘が出て元に戻る等）と判断したら、3 往復を待たずに止めてユーザに相談してよいです。  
-- 往復の回数は会話の中で数えます（CLI は 1 回ごとのレビュー実行だけで、往復の状態は持ちません）。
+- **往復の回数は CLI が数えます**。ブランチ単位で状態ファイル（`.cross-review-state.json`）の `round` に記録し、3 回目の実行では起動前に stderr へ警告を出します（実行は止めません。止めるかどうかの判断は上のルールに従って運用側が行います）。  
+  現在値は `node tools/cross-review.js state` で確認でき、`state --reset` で数え直せます。`--no-state` を付けた実行と、状態ファイルを読めない実行は数えられないので、そのときは会話の中で数えます。
 
 blocker の有無で分けるのは、実害のある指摘の判断をユーザに残し、局所的な要修正の判断は主セッションに委ねるためです。  
 どちらもレビュアーの指摘をそのまま受け入れるのではなく、主セッションが裏取りしたうえで扱いを決めます。
@@ -239,7 +241,7 @@ blocker の有無で分けるのは、実害のある指摘の判断をユーザ
 - **1 回限りの CLI**：端末から 1 コマンドで回す。
 
 ```bash
-npm run review:codex                     # 現在のブランチ (main との差分) を Codex がレビュー (read-only)
+npm run review:codex                     # 現在のブランチ (既定 base との差分) を Codex がレビュー (read-only)
 npm run review:codex:fix                 # 同上 + 見つかった問題を Codex が作業ツリーへ直接修正 (workspace-write)
 npm run review:claude                    # 現在のブランチを Claude がレビュー (read-only)
 npm run review:codex -- --uncommitted    # 未コミット差分 (tracked + untracked) をレビュー
@@ -274,12 +276,16 @@ node tools/cross-review.js subagent      # CLI を起動せずレビュー用プ
 - **専用サブコマンド `codex exec review` は使いません**。  
   codex v0.137.0 で `--uncommitted` / `--base` が `[PROMPT]` と併用できなくなり、観点チェックリストを同時に渡せなくなったため、汎用の `exec` と差分の埋め込みに統一しました。  
 - 差分の対象範囲：
-  - 既定：`git diff <base>...HEAD`（ブランチ vs base）。**既定の base は `origin/main` を優先解決**します（後述「既定 base の解決と差分サイズのガード」）。
+  - 既定：`git diff <base>...HEAD`（ブランチ vs base）。**既定の base は「前回レビュー SHA → PR の base → `origin/main` → ローカル `main`」の順に解決**します（後述「既定 base の解決と差分サイズのガード」）。
   - `--uncommitted`：tracked（`git diff HEAD`）＋ untracked
     （`git ls-files --others --exclude-standard -z` の各ファイルを `git diff --no-index` で新規ファイル差分にする。`-z`（NUL 区切り）で空白入りパスでも壊れない）
 - 申し送り（`--instructions <path>`）：レビュアー個別の重点指摘を**観点とは別系統**で足します（`REVIEWER_NOTES_HEADER` の見出し付きでプロンプトに追加。`.cross-review.md` は置き換えない）。  
   `--uncommitted` の未追跡収集からは、申し送りファイル自体を**絶対パスの突き合わせで除外**します。  
 - 差分の間引き：ロックファイル、生成物（`package-lock.json` / `*.min.js` / `*.map` ほか）を**既定で除外**し、巨大なファイル差分は **stat 要約に置換**してトークンを節約します（`.cross-review-ignore` で除外を追加、`--no-exclude` で無効化、`--max-file-diff-kb` で置換しきい値。詳細は後述「差分の除外と要約」）。  
+- 状態（往復回数、直前レビュー SHA、非対応と判断した指摘）：ブランチ単位で `.cross-review-state.json` に持ちます。  
+  `state` / `state --reset` / `dismiss "<要約>"` サブコマンドで参照、初期化、追加します（`--no-state` で読み書きを無効化）。詳細は後述「状態ファイル」。  
+- 差分サイズが閾値を超えたときは、ファイル要約のしきい値を段階的に下げて**縮退**を試し、それでも収まらないときだけ中断します（`--strict-diff-guard` で従来の即中断に戻せます）。  
+- 既定 base の解決で使う fetch と `gh` の呼び出しは、環境変数 `CROSS_REVIEW_NO_FETCH=1` で省けます（オフライン作業向け）。  
 - 引数解析、差分生成、プロンプト生成、観点解決、申し送り注入は `tests/cross-review.test.js`（vitest）が担保します。  
   このテストは**取り込み先では任意**で、vitest を使うときだけ同梱します（同梱しなくても engine の振る舞いは upstream のテストが担保）。
 
@@ -325,32 +331,88 @@ claude-codex-bridge を入れている環境では、codex を直接起動する
 
 レビュー差分のトークン消費を抑えるための仕組みです。
 
-### 既定 base は `origin/main` を優先解決する
+### 状態ファイル（`.cross-review-state.json`）
 
-既定（`--base` 未指定、コミット済み差分モード）では、base を次の順で解決します。
+往復回数、直前レビュー時の `HEAD`、非対応と判断した指摘は、**ブランチごとに決まる値**です。  
+会話の中だけで持つと、妥当性確認のたびに人が SHA を控え直し、往復回数を数え直すことになるので、リポジトリ直下の `.cross-review-state.json` に記録します。
 
-1. `git fetch origin main --quiet` を**ベストエフォート**で実行（10 秒タイムアウト）。  
-   リモートが無い、オフライン、タイムアウトのときは stderr に警告 1 行を出して続行します（失敗で止めません）。  
-   タイムアウト等で fetch が中断された場合は、**前回取得済みの `origin/main`**（やや古い可能性あり）が使われることがあります（次回の fetch で追いつくため実害は軽微）。
-2. `git rev-parse --verify origin/main` が通れば **`origin/main` を base に採用**します（stderr に 1 行通知。`--base` で変更可）。
-3. 解決できなければ従来どおりローカル `main` を使います。
+```json
+{
+  "branches": {
+    "feat/example": { "round": 2, "lastReviewedSha": "abc123...", "dismissed": ["運用上到達しない入力への指摘"] }
+  }
+}
+```
 
-`--base` を明示したとき、および `--uncommitted` のときは、この解決を**スキップ**します（fetch もしません）。指定した base / 未コミット差分には介入しません。
-
-**stale なローカル `main` の落とし穴**：ローカル `main` が古いと merge-base が過去にずれ、HEAD が既に取り込んだ `main` 側のコミットまで `git diff main...HEAD` に混入します（実例：89 コミット、792KB に肥大。`git fetch origin main` + `--base origin/main` で 65KB に正常化）。`origin/main` の優先解決はこれを自動で避けるための既定挙動です。手動なら `git fetch origin main` 後に `--base origin/main` を明示しても同じ効果になります。
-
-### 差分サイズの表示とガード
-
-- レビュー差分の収集後、サイズを**常に stderr に 1 行表示**します（例：`[cross-review] レビュー差分サイズ: 65.2KB`）。
-- サイズが閾値（KB）を超えると、**レビュアーを起動せず中断**します（`subagent` でもプロンプトを出しません。`process.exitCode = 1`）。  
-  エラーメッセージに、原因の候補（stale な `main`、生成物 / lock ファイルの混入）と回避策を出します。
-- 閾値の解決順は **`--max-diff-kb <n>`（CLI フラグ）→ 環境変数 `CROSS_REVIEW_MAX_DIFF_KB` → 既定 256KB** です。  
-  値 `0` で**ガードを無効化**します（意図的に大きい差分をレビューしたいとき）。
+- 置き場は**スクリプト位置から解決したリポジトリ直下**（`<スクリプト>/../.cross-review-state.json`）です。cwd に依存しないので、サブディレクトリから起動しても同じ枝の記録を読み書きします。
+- **git 管理下に置きません**（`.gitignore` に追加します）。ローカルの作業状態であり、取り込み先のマニフェスト同期と衝突させないためです。
+- ブランチ名は `git rev-parse --abbrev-ref HEAD`（detached HEAD では `HEAD`）。ブランチ名を取れない場合は読み書きしません。
+- `round` は **レビューの成立を確かめられたときだけ** 1 増えます。増えるのは次の 3 つです。
+  1. `subagent` がプロンプトを stdout に出力したとき（明示的に選んだ経路なので、その場でサブエージェントへ渡す前提で数えます）。
+  2. レビュアー CLI が終了コード 0 で終わったとき（bridge 未導入で直接起動へやり直した場合は、やり直した後の結果で 1 回だけ数えます）。
+  3. `node tools/cross-review.js state --mark` を実行したとき（下記）。
+  差分なし、ガードによる中断、引数エラーに加え、**CLI の起動失敗（`ENOENT` 等）や非ゼロ終了でも増えません**（失敗時の `HEAD` を `lastReviewedSha` に残すと、次回の既定 base がそこになり「差分なし」で再試行できなくなるため）。
+  **利用上限フォールバック（代替プロンプトの書き出し）でも増えません。** CLI はサブエージェントがレビューを終えたかを観測できないので、書き出した時点で数えると、プロンプトを渡さずに再実行したとき未レビューの差分が「差分なし」になって再試行できなくなります。フォールバック後の記録は、レビューを終えた人が `state --mark` で行います。
+- 書き込みは必ず**書く直前に読み直した状態**を基にします（read-modify-write）。レビュアーの実行中に別プロセスが `dismiss` や別ブランチのレビュー完了を書いていることがあり、起動前に読んだスナップショットで上書きするとその更新が消えるためです。読み直しで JSON が壊れていたときは、警告して記録しません。
+- `lastReviewedSha` はその実行時点の `HEAD` です。`--uncommitted` では**更新しません**（作業ツリー差分は「この SHA 以降の増分」の意味を持たないため）。`round` は増えます。
+- JSON が壊れているときは、**警告して無視し、書き戻しもしません**（既存の記録を上書きで消さないため）。
+- `--no-state` で読み書きを丸ごと無効化できます（CI など、状態を持たせたくない実行向け）。
 
 ```bash
-node tools/cross-review.js codex --max-diff-kb 512   # 上限を 512KB に引き上げる
-node tools/cross-review.js codex --max-diff-kb 0     # ガードを無効化
-CROSS_REVIEW_MAX_DIFF_KB=512 npm run review:codex    # 環境変数で指定
+node tools/cross-review.js state             # 現在の枝の round / lastReviewedSha / dismissed を JSON で表示
+node tools/cross-review.js state --reset     # 現在の枝の記録を消す（他の枝は残る）
+node tools/cross-review.js state --mark      # 往復を 1 回分記録する（round を 1 増やし、lastReviewedSha を現在の HEAD にする）
+node tools/cross-review.js state --mark --uncommitted   # 同上だが lastReviewedSha は据え置く（--uncommitted のレビュー後に使う）
+node tools/cross-review.js dismiss "運用上到達しない入力への指摘"   # 非対応と判断した指摘を記録
+```
+
+`state --mark` は、**CLI がレビューの成立を観測できない経路**（利用上限フォールバックのプロンプトを客観サブエージェントへ渡した場合など）で、レビューを終えた後に往復を進めるための入口です。  
+`--reset` とは併用できません（記録を消すのと往復を進めるのは相反するため）。`--no-state` とも併用できません。
+
+`dismissed` が 1 件以上あると、レビュープロンプトの**観点と申し送りの後ろ**に「前回までに非対応と判断した指摘（再指摘しない）」の節が自動で添えられます。  
+往復のたびに同じ指摘を差し戻す手間を無くすためです（新しい根拠があるときは根拠を示して指摘してよい、と枠付けしてあります）。
+
+### 既定 base の解決順
+
+既定（`--base` 未指定、コミット済み差分モード）では、base を次の順で解決します。前の段ほど差分が小さく、かつ人の指定なしで決まります。
+
+1. **状態ファイルの `lastReviewedSha`**。`git cat-file -e <sha>^{commit}` で現存を確かめ、使えれば base にします（stderr に「前回レビュー時の `<短縮 SHA>` を使用します（往復 N 回目）」と出ます）。  
+   rebase や amend で SHA が消えていれば次へ進みます。これで**妥当性確認が自動的に増分差分**になります。
+2. **PR の base ブランチ**。`gh pr view --json baseRefName -q .baseRefName` が名前を返し、`origin/<name>` が `git rev-parse --verify` できればそれを使います（fetch は `origin/main` と同じくベストエフォート）。  
+   スタック PR（親 PR のブランチから切った枝）で親 PR の差分まで混ざるのを防ぎます。`gh` が無い、PR が無い、失敗したときは黙って次へ進みます。
+3. **`origin/main`**。`git fetch origin main --quiet` をベストエフォートで実行（10 秒タイムアウト）し、`git rev-parse --verify origin/main` が通れば採用します。  
+   fetch に失敗したときは、**使う参照とその最終コミット日時**（`git log -1 --format=%ci`）を添えて警告します（stale な比較に気づけるように）。
+4. 解決できなければ従来どおりローカル `main` を使います。
+
+決めた base と**どの方法で決めたか**は、差分サイズと同じ 1 行に必ず出ます。
+
+```
+[cross-review] base: origin/develop (PR の base) / レビュー差分サイズ: 12.3KB
+```
+
+`--base` を明示したとき、および `--uncommitted` のときは、この解決を**スキップ**します（fetch も `gh` も呼びません）。指定した base / 未コミット差分には介入しません。  
+環境変数 **`CROSS_REVIEW_NO_FETCH=1`** で fetch と `gh` の呼び出しを省けます（オフライン作業でタイムアウトを待たされないため）。
+
+**stale なローカル `main` の落とし穴**：ローカル `main` が古いと merge-base が過去にずれ、HEAD が既に取り込んだ `main` 側のコミットまで `git diff main...HEAD` に混入します（実例：89 コミット、792KB に肥大。`git fetch origin main` + `--base origin/main` で 65KB に正常化）。上の優先解決はこれを自動で避けるための既定挙動です。
+
+### 差分サイズの表示とガード（超過時は段階的に縮退する）
+
+- レビュー差分の収集後、サイズを**常に stderr に 1 行表示**します（base とその解決方法を同じ行に出します）。
+- 閾値の解決順は **`--max-diff-kb <n>`（CLI フラグ）→ 環境変数 `CROSS_REVIEW_MAX_DIFF_KB` → 既定 256KB** です。  
+  値 `0` で**ガードを無効化**します（意図的に大きい差分をレビューしたいとき）。
+- 閾値を超えたら、**即中断せずに段階的縮退**を試します。ファイル単位の要約しきい値（`--max-file-diff-kb`、既定 64KB）を **32KB → 16KB → 8KB** の順に下げて要約を掛け直し、閾値以下に収まった段階で続行します。  
+  再計算は収集済みの差分本文に対して行うので、**git は再実行しません**。どの閾値で何件を要約に置き換えたかは stderr に出ます。
+- それでも収まらないときだけ、**レビュアーを起動せず中断**します（`subagent` でもプロンプトを出しません。`process.exitCode = 1`）。  
+  エラーメッセージには、試した閾値と、原因の候補（stale な `main`、生成物 / lock ファイルの混入）、回避策を出します。
+- **`--strict-diff-guard`** で縮退を試さず従来どおり即中断に戻せます。`--max-file-diff-kb 0`（要約無効）のときも縮退は行いません。
+
+閾値をわずかに超えただけで中断すると、`--max-diff-kb 512` を付けて再実行することになり、差分収集を二重に行います。巨大なファイル差分はレビュー価値が低く、要約に置き換えても指摘の質は下がりにくいので、先に縮退を試します。
+
+```bash
+node tools/cross-review.js codex --max-diff-kb 512      # 上限を 512KB に引き上げる
+node tools/cross-review.js codex --max-diff-kb 0        # ガードを無効化
+node tools/cross-review.js codex --strict-diff-guard    # 縮退せず従来どおり即中断
+CROSS_REVIEW_MAX_DIFF_KB=512 npm run review:codex       # 環境変数で指定
 ```
 
 ### 差分の除外と要約（レビュー価値の低い差分でトークンを浪費しない）
@@ -394,16 +456,21 @@ node tools/cross-review.js codex --no-exclude            # 既定除外も含め
 ### 妥当性確認を軽くする（往復のトークンを線形に増やさない）
 
 指摘対応後の妥当性確認で、毎回**全差分**を再送するとトークンが往復ごとに膨らみます。  
-レビュー時点の HEAD を控えておき、**前回レビュー以降の増分差分だけ**を送ると線形増加を避けられます。
+レビュー時点の HEAD を base にして、**前回レビュー以降の増分差分だけ**を送ると線形増加を避けられます。
 
-1. レビュー前に SHA を控える：`git rev-parse HEAD`。
-2. 指摘対応後の妥当性確認は、その SHA を base にして増分だけ送る：
+これは**状態ファイルで自動化されています**。1 回目のレビューで `lastReviewedSha` が記録されるので、2 回目以降は `--base` を付けずにそのまま実行すれば増分差分になります。
 
-   ```bash
-   node tools/cross-review.js <reviewer> --base <そのSHA> --instructions <指摘ファイル>
-   ```
+```bash
+node tools/cross-review.js codex --instructions <指摘ファイル>   # 2 回目以降は自動で増分差分
+```
 
-   `--base` はブランチ名に限らず**任意のコミット**を受けます。これで「前回レビュー以降の増分差分 ＋ 前回指摘」だけがレビュアーへ渡り、毎回の全差分再送を避けられます（往復のトークンが線形に増えない）。
+手で base を指定したいとき（状態ファイルを使わない、別の起点から見たい）は従来どおり `--base` が効きます。  
+`--base` はブランチ名に限らず**任意のコミット**を受けます。
+
+```bash
+git rev-parse HEAD                                                  # レビュー前に SHA を控える
+node tools/cross-review.js <reviewer> --base <そのSHA> --instructions <指摘ファイル>
+```
 
 ## 同期スクリプト（tools/cross-review.sync.js）
 
