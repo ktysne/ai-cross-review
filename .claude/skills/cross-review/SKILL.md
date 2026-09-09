@@ -51,7 +51,7 @@ Codex 主導では Plan mode 等の選択 UI があればそれを使い、無�
 `npm run review:codex*` / `npm run review:claude` はレビュアー CLI がネットワーク/API 接続を使うため **Bash をサンドボックス無効、ネットワーク許可で実行**する。CLI が見えていても API 接続だけ止まることがあるので、`claude -p "Reply with OK only."` のような最小呼び出しで切り分ける。
 
 ```bash
-npm run review:codex                  # main との差分をレビュー (read-only)
+npm run review:codex                  # 既定 base との差分をレビュー (read-only)
 npm run review:codex:fix              # レビュー + 直接修正 (workspace-write)
 npm run review:codex -- --uncommitted # 未コミット差分をレビュー
 node tools/cross-review.js codex --fix --instructions notes.md

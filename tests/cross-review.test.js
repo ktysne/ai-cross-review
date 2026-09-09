@@ -1619,6 +1619,41 @@ describe('cross-review state / dismiss サブコマンド', () => {
     expect(mem.store.writes).toEqual([]);
     process.exitCode = 0;
   });
+
+  // 書き込みが失敗したのに成功通知を出すと、記録が消えた / 残ったを取り違える。
+  // 実物の writeState を使い、その下の writeStateFile だけを失敗させる。
+  const failingWriteDeps = (err) => ({
+    gitRun,
+    readState: () => ({
+      path: '<test-state>',
+      state: { branches: { 'feat/x': { round: 1, lastReviewedSha: null, dismissed: [] } } },
+      corrupt: false,
+    }),
+    writeStateFile: () => { throw new Error('EACCES'); },
+    scriptDir: path.join('/repo', 'tools'),
+    out: () => {},
+    err,
+  });
+
+  it('state --reset は書き込みに失敗したら成功通知を出さずエラー終了する', () => {
+    let err = '';
+    process.exitCode = 0;
+    runStateCommand({ reset: true }, failingWriteDeps((s) => { err += s; }));
+    expect(process.exitCode).toBe(1);
+    expect(err).toMatch(/状態ファイルを書けません/);
+    expect(err).not.toMatch(/記録を消しました/);
+    process.exitCode = 0;
+  });
+
+  it('dismiss は書き込みに失敗したら成功通知を出さずエラー終了する', () => {
+    let err = '';
+    process.exitCode = 0;
+    runDismissCommand({ dismissText: 'A の指摘' }, failingWriteDeps((s) => { err += s; }));
+    expect(process.exitCode).toBe(1);
+    expect(err).toMatch(/状態ファイルを書けません/);
+    expect(err).not.toMatch(/記録しました/);
+    process.exitCode = 0;
+  });
 });
 
 describe('cross-review currentBranchName / currentHeadSha', () => {
@@ -1661,6 +1696,15 @@ describe('cross-review resolveMaxDiffKb', () => {
 });
 
 describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
+  // 実物の spawnReviewer は終了コードを process.exitCode に載せてから onExit を呼ぶ。
+  // テスト用の spawnFn も同じ契約にし、フォールバックが終了コードを上書きするのか、
+  // 元の終了コードが維持されるのかを区別できるようにする。
+  // 往復の記録は onExit の結果で決まるので、記録を検証するテストは必ずこれで終了させる。
+  const settle = (onExit, result) => {
+    process.exitCode = result.code == null ? 1 : result.code;
+    onExit({ outputTail: '', error: null, ...result });
+  };
+
   // codex 経路でも「観点 + 差分本文 + モード指示」を stdin に渡す配線を固定する。
   // 旧挙動 (codex に観点だけ渡す) への退行を検知するための結合テスト。
   it('codex レビューのみ: read-only + 差分本文 + 観点 + レビューのみ指示を stdin に渡す', () => {
@@ -1926,12 +1970,13 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: true, fix: false, maxDiffKb: 0, ...extra,
   });
 
-  it('レビュアーを起動したら往復を 1 増やし、直前レビュー SHA を記録する', () => {
+  it('レビュアーが正常終了したら往復を 1 増やし、直前レビュー SHA を記録する', () => {
     const mem = memoryState();
+    process.exitCode = 0;
     runReview(stateOpts(), {
       ...mem,
       gitRun: stateGitRun(),
-      spawnFn: () => null,
+      spawnFn: (cmd, args, stdin, onExit) => { settle(onExit, { code: 0 }); return null; },
       checklist: 'CL',
       out: () => {},
       err: () => {},
@@ -1939,10 +1984,12 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     });
     expect(mem.store.writes).toHaveLength(1);
     expect(branchStateOf(mem.store.state, 'feat/x')).toEqual({ round: 1, lastReviewedSha: sha, dismissed: [] });
+    process.exitCode = 0;
   });
 
   it('--uncommitted は往復だけ増やし、直前レビュー SHA を更新しない', () => {
     const mem = memoryState({ branches: { 'feat/x': { round: 1, lastReviewedSha: sha, dismissed: [] } } });
+    process.exitCode = 0;
     runReview(stateOpts({ mode: 'uncommitted' }), {
       ...mem,
       gitRun: (args) => {
@@ -1951,13 +1998,14 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
         if (args[0] === 'rev-parse') throw new Error('--uncommitted では HEAD の SHA を取らない');
         return '';
       },
-      spawnFn: () => null,
+      spawnFn: (cmd, args, stdin, onExit) => { settle(onExit, { code: 0 }); return null; },
       checklist: 'CL',
       out: () => {},
       err: () => {},
       exists: () => false,
     });
     expect(branchStateOf(mem.store.state, 'feat/x')).toEqual({ round: 2, lastReviewedSha: sha, dismissed: [] });
+    process.exitCode = 0;
   });
 
   it('差分が無ければ往復を数えない', () => {
@@ -2013,10 +2061,11 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
   it('状態ファイルが壊れていれば警告して無視し、書き戻さない', () => {
     const mem = memoryState({ branches: {} }, { corrupt: true });
     let err = '';
+    process.exitCode = 0;
     runReview(stateOpts(), {
       ...mem,
       gitRun: stateGitRun(),
-      spawnFn: () => null,
+      spawnFn: (cmd, args, stdin, onExit) => { settle(onExit, { code: 0 }); return null; },
       checklist: 'CL',
       out: () => {},
       err: (s) => { err += s; },
@@ -2024,6 +2073,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     });
     expect(err).toMatch(/JSON 不正/);
     expect(mem.store.writes).toEqual([]);
+    process.exitCode = 0;
   });
 
   it('非対応と判断した指摘はプロンプトへ「再指摘しない」節として乗る', () => {
@@ -2053,10 +2103,11 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     let err = '';
     let called = false;
     const mem = memoryState({ branches: { 'feat/x': { round: 2, lastReviewedSha: null, dismissed: [] } } });
+    process.exitCode = 0;
     runReview(stateOpts(), {
       ...mem,
       gitRun: stateGitRun(),
-      spawnFn: () => { called = true; return null; },
+      spawnFn: (cmd, args, stdin, onExit) => { called = true; settle(onExit, { code: 0 }); return null; },
       checklist: 'CL',
       out: () => {},
       err: (s) => { err += s; },
@@ -2065,6 +2116,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     expect(err).toMatch(/往復は 3 回目/);
     expect(called).toBe(true);
     expect(branchStateOf(mem.store.state, 'feat/x').round).toBe(3);
+    process.exitCode = 0;
   });
 
   it('往復 2 回目は既定 base に前回レビュー SHA を使い、その旨を出す', () => {
@@ -2194,13 +2246,6 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
       pid: 7,
       ...rest,
     };
-  };
-  // 実物の spawnReviewer は終了コードを process.exitCode に載せてから onExit を呼ぶ。
-  // テスト用の spawnFn も同じ契約にし、フォールバックが終了コードを上書きするのか、
-  // 元の終了コードが維持されるのかを区別できるようにする。
-  const settle = (onExit, result) => {
-    process.exitCode = result.code == null ? 1 : result.code;
-    onExit({ outputTail: '', error: null, ...result });
   };
   const limitOpts = (extra = {}) => ({
     reviewer: 'codex',
@@ -2415,5 +2460,121 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     expect(calls[0].args).toEqual(['exec', '-s', 'read-only', '-c', 'approval_policy=never', '-']);
     expect(err).toMatch(/approval_policy=never/);
     expect(err).toMatch(/claude-codex-bridge #16/);
+  });
+
+  // 往復を数えるタイミング。起動しただけで数えると、失敗時の SHA が次回の base になり
+  // 「差分なし」で再試行できなくなるので、レビューが成立した結果でのみ数える。
+  describe('往復を数えるタイミング', () => {
+    const recordDeps = (mem, extra = {}) => ({
+      ...mem,
+      gitRun: stateGitRun(),
+      checklist: 'CL',
+      out: () => {},
+      err: () => {},
+      exists: () => false, // bridge 不在 = codex を直接起動する経路
+      tmpdir: '/tmp',
+      pid: 7,
+      ...extra,
+    });
+
+    it('起動に失敗したら (ENOENT) 往復を数えない', () => {
+      const mem = memoryState();
+      process.exitCode = 0;
+      runReview(stateOpts(), recordDeps(mem, {
+        spawnFn: (cmd, args, stdin, onExit) => {
+          settle(onExit, { code: 1, error: { code: 'ENOENT' } });
+          return null;
+        },
+        writeFile: () => { throw new Error('上限ではないので代替プロンプトは書かない'); },
+      }));
+      expect(mem.store.writes).toEqual([]);
+      process.exitCode = 0;
+    });
+
+    it('非ゼロ終了 (フォールバック無し) では往復を数えない', () => {
+      const mem = memoryState();
+      process.exitCode = 0;
+      runReview(stateOpts(), recordDeps(mem, {
+        spawnFn: (cmd, args, stdin, onExit) => {
+          settle(onExit, { code: 1, outputTail: 'error: something broke' });
+          return null;
+        },
+        writeFile: () => { throw new Error('上限ではないので代替プロンプトは書かない'); },
+      }));
+      expect(mem.store.writes).toEqual([]);
+      process.exitCode = 0;
+    });
+
+    it('--no-fallback の上限失敗でも往復を数えない', () => {
+      const mem = memoryState();
+      process.exitCode = 0;
+      runReview(stateOpts({ noFallback: true }), recordDeps(mem, {
+        spawnFn: (cmd, args, stdin, onExit) => {
+          settle(onExit, { code: 1, outputTail: 'usage limit reached' });
+          return null;
+        },
+        writeFile: () => { throw new Error('--no-fallback では代替プロンプトを書かない'); },
+      }));
+      expect(mem.store.writes).toEqual([]);
+      expect(process.exitCode).toBe(1);
+      process.exitCode = 0;
+    });
+
+    it('正常終了 (0) なら往復を数える', () => {
+      const mem = memoryState();
+      process.exitCode = 0;
+      runReview(stateOpts(), recordDeps(mem, {
+        spawnFn: (cmd, args, stdin, onExit) => { settle(onExit, { code: 0 }); return null; },
+      }));
+      expect(mem.store.writes).toHaveLength(1);
+      expect(branchStateOf(mem.store.state, 'feat/x')).toEqual({ round: 1, lastReviewedSha: sha, dismissed: [] });
+      process.exitCode = 0;
+    });
+
+    it('利用上限で代替プロンプトを書き出したら往復を数える (subagent でレビューが続く)', () => {
+      const mem = memoryState();
+      const written = {};
+      process.exitCode = 0;
+      runReview(stateOpts({ fallbackPromptPath: 'fb.md' }), recordDeps(mem, {
+        spawnFn: (cmd, args, stdin, onExit) => {
+          settle(onExit, { code: 1, outputTail: 'You have hit your usage limit.' });
+          return null;
+        },
+        writeFile: (p, body) => { written[p] = body; },
+      }));
+      expect(Object.keys(written)).toEqual(['fb.md']);
+      expect(branchStateOf(mem.store.state, 'feat/x')).toEqual({ round: 1, lastReviewedSha: sha, dismissed: [] });
+      expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+      process.exitCode = 0;
+    });
+
+    it('bridge 未導入 → 直接起動が成功した場合は 1 回だけ数える', () => {
+      const mem = memoryState();
+      const calls = [];
+      process.exitCode = 0;
+      runReview(stateOpts(), bridgeDeps({
+        ...mem,
+        gitRun: stateGitRun(),
+        spawnFn: (cmd, args, stdin, onExit) => {
+          calls.push(cmd);
+          settle(onExit, calls.length === 1 ? { code: CODEX_AGENT_EXIT_MISSING } : { code: 0 });
+          return null;
+        },
+      }));
+      expect(calls).toEqual(['bash', 'codex']);
+      expect(mem.store.writes).toHaveLength(1);
+      expect(branchStateOf(mem.store.state, 'feat/x').round).toBe(1);
+      process.exitCode = 0;
+    });
+
+    it('subagent はプロンプトを出力した時点で往復を数える', () => {
+      const mem = memoryState();
+      runReview(stateOpts({ reviewer: 'subagent' }), recordDeps(mem, {
+        spawnFn: () => { throw new Error('subagent では spawn してはいけない'); },
+        out: () => {},
+      }));
+      expect(mem.store.writes).toHaveLength(1);
+      expect(branchStateOf(mem.store.state, 'feat/x')).toEqual({ round: 1, lastReviewedSha: sha, dismissed: [] });
+    });
   });
 });

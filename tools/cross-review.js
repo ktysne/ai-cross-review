@@ -6,7 +6,7 @@
 // git の差分を直接レビュアー CLI へ渡して実行する。
 //
 // 使い方:
-//   node tools/cross-review.js codex            # 現在のブランチ (main との差分) を Codex がレビュー
+//   node tools/cross-review.js codex            # 現在のブランチ (既定 base との差分) を Codex がレビュー
 //   node tools/cross-review.js claude           # 同上を Claude がレビュー
 //   node tools/cross-review.js subagent         # 外部 CLI を起動せずレビュープロンプトを stdout に出す (リモートコントロール用)
 //   node tools/cross-review.js codex --fix      # Codex がレビューに加え検出事項を直接修正 (作業ツリー編集)
@@ -1697,9 +1697,18 @@ function runReview(opts, deps = {}) {
   if (branchState && branchState.round + 1 >= 3) {
     writeErr(`[cross-review] この枝の往復は ${branchState.round + 1} 回目です。3 往復到達時の扱いはサーキットブレーカーの規則を参照してください。\n`);
   }
-  // レビュアーを実際に起動した (または subagent のプロンプトを出力した) ときだけ往復を数える。
-  // 差分なし、ガード中断、引数エラーではここに到達しないので記録されない。
+  // 往復を数えるのは「レビューが実際に成立した」ときだけに限る。成立とみなすのは次の 3 つ:
+  //   1. subagent 経路でプロンプトを stdout に出力したとき (出力した時点でレビューへ渡せる)。
+  //   2. レビュアー CLI が終了コード 0 で終わったとき (bridge → 直接起動のやり直しがある場合は
+  //      やり直した後の結果で判断する)。
+  //   3. 利用上限フォールバックで代替プロンプトを書き出せたとき (subagent でレビューが続く前提)。
+  // 起動失敗 (ENOENT 等)、非ゼロ終了、--no-fallback の失敗終了では記録しない。記録してしまうと
+  // 次回の既定 base が失敗時の SHA になり「差分なし」で再試行できなくなるため。
+  // 1 実行につき最大 1 回 (bridge のやり直しを 2 往復と数えない)。
+  let roundRecorded = false;
   const recordRound = () => {
+    if (roundRecorded) return;
+    roundRecorded = true;
     if (!stateUsable) return;
     writeStateFn(
       nextState(loadedState.state, { branch, sha: headSha, reviewer: opts.reviewer }),
@@ -1731,32 +1740,36 @@ function runReview(opts, deps = {}) {
     writeOut(invocation.notice);
     return spawnFn(invocation.cmd, invocation.args, prompt, (result) => {
       const exit = result || {};
-      // 上限フォールバックと bridge の切り替えは codex 経路だけの仕組み
-      // (claude CLI 経路は対象外。subagent はここに来ない)。
-      if (resolvedOpts.reviewer !== 'codex') return;
       // bridge が未導入 (codex コマンドや定義が無い)、または bash 自体が無い場合は直接起動へ戻す。
+      // 往復はやり直した後の結果で数えるので、ここでは記録しない。
+      // bridge の切り替えは codex 経路だけの仕組み (claude は via が 'agent' にならない)。
       const bridgeUnavailable = exit.code === CODEX_AGENT_EXIT_MISSING
         || (exit.error && exit.error.code === 'ENOENT');
-      if (invocation.via === 'agent' && bridgeUnavailable) {
+      if (resolvedOpts.reviewer === 'codex' && invocation.via === 'agent' && bridgeUnavailable) {
         writeErr('[cross-review] bridge が未導入のため直接起動へ切り替えます。\n');
         start(reviewerInvocation({ ...resolvedOpts, codexAgent: false }, invDeps));
         return;
       }
+      if (exit.code === 0) {
+        // レビュアーが最後まで走った。ここで初めて 1 往復として数える。
+        recordRound();
+        return;
+      }
+      // 上限フォールバックは codex 経路だけの仕組み (claude CLI 経路は対象外。subagent はここに来ない)。
+      if (resolvedOpts.reviewer !== 'codex') return;
       if (opts.noFallback) return; // --no-fallback は従来どおり失敗終了 (終了コードはそのまま)。
       if (!isUsageLimitExit({ via: invocation.via, code: exit.code, outputTail: exit.outputTail })) return;
-      emitFallbackPrompt(prompt, opts, {
+      const fallbackPath = emitFallbackPrompt(prompt, opts, {
         err: writeErr,
         writeFile: deps.writeFile,
         tmpdir: deps.tmpdir,
         pid: deps.pid,
       });
+      // 代替プロンプトを渡せたときだけ数える (書き出しに失敗したら再試行できるよう記録しない)。
+      if (fallbackPath) recordRound();
     });
   };
-  // bridge 未導入で直接起動へやり直す経路は start の中で再帰するので、記録は start の外で 1 回だけ行う
-  // (1 回のレビュー実行を 2 往復と数えないため)。
-  const child = start(inv);
-  recordRound();
-  return child;
+  return start(inv);
 }
 
 // `state` サブコマンド。現在の枝の記録を JSON で表示し、--reset ならその枝の記録を消す。
@@ -1782,7 +1795,11 @@ function runStateCommand(opts, deps = {}) {
     return null;
   }
   if (opts.reset) {
-    writeStateFn(withoutBranch(loaded.state, branch), stateDeps);
+    // 書けていないのに「消しました」とは言わない (失敗理由は writeState が警告済み)。
+    if (!writeStateFn(withoutBranch(loaded.state, branch), stateDeps)) {
+      process.exitCode = 1;
+      return null;
+    }
     writeErr(`[cross-review] ${branch} の記録を消しました: ${loaded.path}\n`);
     return null;
   }
@@ -1818,7 +1835,11 @@ function runDismissCommand(opts, deps = {}) {
     writeErr(`[cross-review] 同じ要約が既に記録されています (${branch}): ${text}\n`);
     return null;
   }
-  writeStateFn(updated, stateDeps);
+  // 書けていないのに「記録しました」とは言わない (失敗理由は writeState が警告済み)。
+  if (!writeStateFn(updated, stateDeps)) {
+    process.exitCode = 1;
+    return null;
+  }
   writeErr(`[cross-review] 非対応と判断した指摘を記録しました (${branch}): ${text}\n`);
   return null;
 }

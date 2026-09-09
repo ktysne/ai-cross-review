@@ -143,7 +143,7 @@ CLI と API 接続を切り分ける場合は、まず `Get-Command claude` / `c
 1. レビュー用プロンプトを stdout に出す（外部 CLI は起動しない）：
 
    ```bash
-   node tools/cross-review.js subagent                 # main との差分 (レビューのみ)
+   node tools/cross-review.js subagent                 # 既定 base との差分 (レビューのみ)
    node tools/cross-review.js subagent --uncommitted   # 未コミット差分 (tracked + untracked)
    node tools/cross-review.js subagent --fix           # 修正指示付きプロンプト (3 択の外。後述)
    ```
@@ -189,7 +189,7 @@ Codex に一から再レビューさせるのではなく、確定した指摘�
    ```bash
    # 未コミットの作業ツリーを対象に、指摘を渡して Codex に直接修正させる
    node tools/cross-review.js codex --fix --uncommitted --instructions review-notes.md
-   # コミット済みの差分が対象なら --uncommitted を外す（既定 = main との差分）
+   # コミット済みの差分が対象なら --uncommitted を外す（既定 = 既定 base との差分）
    ```
 
 3. `--instructions` の中身は **観点 `.cross-review.md` を置き換えず**、「レビュアーからの申し送り、重点指摘」としてプロンプトに追加されます（観点はこれまでどおり自動で付きます）。  
@@ -240,7 +240,7 @@ blocker の有無で分けるのは、実害のある指摘の判断をユーザ
 - **1 回限りの CLI**：端末から 1 コマンドで回す。
 
 ```bash
-npm run review:codex                     # 現在のブランチ (main との差分) を Codex がレビュー (read-only)
+npm run review:codex                     # 現在のブランチ (既定 base との差分) を Codex がレビュー (read-only)
 npm run review:codex:fix                 # 同上 + 見つかった問題を Codex が作業ツリーへ直接修正 (workspace-write)
 npm run review:claude                    # 現在のブランチを Claude がレビュー (read-only)
 npm run review:codex -- --uncommitted    # 未コミット差分 (tracked + untracked) をレビュー
@@ -346,7 +346,7 @@ claude-codex-bridge を入れている環境では、codex を直接起動する
 - 置き場は**スクリプト位置から解決したリポジトリ直下**（`<スクリプト>/../.cross-review-state.json`）です。cwd に依存しないので、サブディレクトリから起動しても同じ枝の記録を読み書きします。
 - **git 管理下に置きません**（`.gitignore` に追加します）。ローカルの作業状態であり、取り込み先のマニフェスト同期と衝突させないためです。
 - ブランチ名は `git rev-parse --abbrev-ref HEAD`（detached HEAD では `HEAD`）。ブランチ名を取れない場合は読み書きしません。
-- `round` は **レビュアーを実際に起動した（`subagent` はプロンプトを出力した）ときだけ** 1 増えます。差分なし、ガードによる中断、引数エラーでは増えません。
+- `round` は **レビューが成立したときだけ** 1 増えます。成立とみなすのは、`subagent` がプロンプトを stdout に出力したとき、レビュアー CLI が終了コード 0 で終わったとき、利用上限フォールバックで代替プロンプトを書き出したとき（`subagent` でレビューが続く前提）の 3 つです。差分なし、ガードによる中断、引数エラーに加え、**CLI の起動失敗（`ENOENT` 等）や非ゼロ終了でも増えません**（失敗時の `HEAD` を `lastReviewedSha` に残すと、次回の既定 base がそこになり「差分なし」で再試行できなくなるため）。bridge 未導入で直接起動へやり直した場合も、数えるのはやり直した後の結果で 1 回だけです。
 - `lastReviewedSha` はその実行時点の `HEAD` です。`--uncommitted` では**更新しません**（作業ツリー差分は「この SHA 以降の増分」の意味を持たないため）。`round` は増えます。
 - JSON が壊れているときは、**警告して無視し、書き戻しもしません**（既存の記録を上書きで消さないため）。
 - `--no-state` で読み書きを丸ごと無効化できます（CI など、状態を持たせたくない実行向け）。
