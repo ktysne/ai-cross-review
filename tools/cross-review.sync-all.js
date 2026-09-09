@@ -26,6 +26,10 @@
 // - --check モードでは各プロジェクトのマニフェスト検査 (sync の --check-manifest) も併せて回す。一括検査は
 //   「取り込み先が上流に追いつけているか」を見る用途なので、ファイルのドリフトと配布物の取りこぼしを
 //   1 回で拾えるようにする。未登録の件数は集計行に出すが、ドリフトではないので終了コードには含めない。
+// - 各プロジェクトの stderr はこのツールが捕捉するので、runSync の 1 行警告 ([cross-review] で始まる行)
+//   はそのままでは消える。集計行の直後へインデントして出し、どのプロジェクトの警告かを対応付ける。
+//   検査が回らなかった (雛形が無い / 読めない / 構造不正) ときは集計行にも「マニフェスト検査スキップ」を
+//   出し、未登録 0 件の正常な検査と見分けられるようにする。
 // - --global-skill は、相互レビューの汎用ルールを各リポジトリの CLAUDE.md へ写す運用をやめ、ホームの
 //   グローバル SKILL 1 箇所に集約するための配布口。配布元はこの checkout の SKILL で、配布先は
 //   GLOBAL_SKILL_TARGETS に持つ。Codex 側 (~/.codex/skills/) はレビュー時にこの写しを読むため、古いままだと
@@ -361,6 +365,8 @@ const STATUS_LABEL = {
 // 集計結果を人間向けの文字列に整形する (テスト可能な純関数)。
 // rootLabel が null のときは走査していない (--global-skill 単独) ので、走査ルートの見出しを出さない。
 // 件数はプロジェクト行だけを数える (kind: 'global' の行は導入プロジェクトではないため)。
+// item.warnings があれば、そのプロジェクトの行の直後にインデントして並べる (どのプロジェクトの警告かを
+// 対応付けられるようにするため)。
 function formatSummary(rootLabel, items) {
   const lines = [];
   if (rootLabel != null) {
@@ -382,9 +388,25 @@ function formatSummary(rootLabel, items) {
     // 上流の雛形にあって files[] に無い配布物の件数 (--check で検査したときだけ入る)。取り込み先が
     // 足すかどうかを判断する材料なので、ドリフトとは別に出す。
     const missing = it.missingManifest > 0 ? ` (マニフェスト未登録 ${it.missingManifest} 件)` : '';
-    lines.push(`  [${label}]${detail} ${it.project}${note}${missing}`);
+    // マニフェスト検査そのものが回らなかった (雛形が無い / 読めない / 構造不正) ことを明示する。
+    // 「未登録 0 件」と「検査できていない」を集計行だけで見分けられるようにするため。理由は直後の
+    // 警告行に出る。
+    const skipped = it.manifestCheckSkipped ? ' (マニフェスト検査スキップ)' : '';
+    lines.push(`  [${label}]${detail} ${it.project}${note}${missing}${skipped}`);
+    for (const w of Array.isArray(it.warnings) ? it.warnings : []) lines.push(`    ${w}`);
   }
   return lines.join('\n') + '\n';
+}
+
+// runSync が stderr へ出した 1 行警告 ([cross-review] で始まる行) を取り出す純粋関数。
+// 一括同期では各プロジェクトの stderr を捕捉してしまうため、そのままでは雛形が無い / 読めない / 構造が
+// 不正といった警告が握り潰され、正常な検査と区別できなくなる。集計へ添えるためにここで拾う。
+// 未読の移行ノートの全文ブロック (先頭行が「[cross-review] 未読の移行ノート ...」) は、件数が集計行の
+// 「(移行ノート N 件)」に出るうえ本文が長いので対象にしない。
+function collectSyncWarnings(err) {
+  return String(err || '')
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith('[cross-review] ') && !line.startsWith('[cross-review] 未読の移行ノート'));
 }
 
 // 1 件分のエラーメッセージを取り出す (runSync は stderr に出して null を返す。例外時は message)。
@@ -470,6 +492,12 @@ function runAll(opts, deps = {}) {
     // ドリフトではないので、集計に出すだけで exit コードには含めない。
     const missing = res.result && Array.isArray(res.result.missingManifestEntries) ? res.result.missingManifestEntries.length : 0;
     if (missing > 0) item.missingManifest = missing;
+    // マニフェスト検査が回らなかったとき (雛形が無い / 読めない / 構造不正) は、未登録 0 件と混同しない
+    // よう集計行に印を付ける。
+    if (res.result && res.result.manifestCheckWarning) item.manifestCheckSkipped = true;
+    // runSync の 1 行警告は捕捉した stderr に埋もれるので、集計へ引き上げる (全モード共通)。
+    const warnings = collectSyncWarnings(res.err);
+    if (warnings.length) item.warnings = warnings;
     if (status === 'error') { item.message = errorMessageOf(res); anyError = true; }
     if (status === 'drift') anyDrift = true;
     items.push(item);
@@ -510,6 +538,7 @@ module.exports = {
   formatGlobalPath,
   runGlobalSkill,
   formatSummary,
+  collectSyncWarnings,
   errorMessageOf,
   runAll,
   SYNC_MANIFEST_FILENAME,

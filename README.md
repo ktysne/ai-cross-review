@@ -232,7 +232,7 @@ docs/generated/*.md
    node tools/cross-review.sync.js --check    # ドリフト検査のみ（書き込まない。差分があれば exit 1 → CI 向け）
    node tools/cross-review.sync.js --dry-run  # 何が変わるかだけ表示（書き込まない）
    node tools/cross-review.sync.js --ref v1.2.3   # 取り込む版をマニフェストより優先
-   node tools/cross-review.sync.js --check-manifest  # 上流の雛形にあって files[] に無い配布物を列挙（書き換えない）
+   node tools/cross-review.sync.js --check-manifest  # 上流の雛形にあって files[] に無い配布物を列挙（--check を含意。書き込まない）
    ```
 
 取り込み元の取得は **git のみ**で行います（`upstream.ref` を一時ディレクトリへ shallow fetch）。  
@@ -266,7 +266,7 @@ node tools/cross-review.sync-all.js --global-skill            # 相互レビュ�
 - 各プロジェクトの同期は、そのプロジェクトに同梱された版ではなく、**この checkout の `cross-review.sync.js`（最新ロジック）を再利用**して回します。導入先の sync スクリプトが古くても最新の挙動で反映できます。取り込むファイルや上流 ref は各プロジェクトの `cross-review.sync.json` を尊重します（`--ref` で一時的に上書き可）。
 - **1 プロジェクトの失敗（マニフェスト不正、上流取得失敗など）で全体は止まりません**。各プロジェクトを独立に回し、最後に「更新 / 変更なし / ドリフト / エラー」の集計を出します。終了コードは「いずれかが失敗」または「`--check` でいずれかにドリフト」のとき 1（CI 向け）。
 - 走査の最大深さは `--depth <n>`（既定 4）で調整します。`node_modules` / `.git` / 隠しディレクトリは走査しません。
-- `--check` では各プロジェクトのマニフェスト検査（`sync --check-manifest`）も回し、未登録があれば集計行に「（マニフェスト未登録 N 件）」が付きます（ドリフトではないので終了コードには含めません）。
+- `--check` では各プロジェクトのマニフェスト検査（`sync --check-manifest`）も回し、未登録があれば集計行に「（マニフェスト未登録 N 件）」が付きます（ドリフトではないので終了コードには含めません）。検査が回らなかったとき（上流に雛形が無い / 読めない / 構造が不正）は「（マニフェスト検査スキップ）」が付き、理由が集計行の直後に出ます。
 - `--global-skill` は相互レビュー SKILL を `~/.claude/skills/cross-review/` へ配ります（`~/.codex/skills/` は既にあるときだけ）。汎用ルールの写しを各リポジトリに持たせないための配布口です。詳細は [docs/cross-review.md](docs/cross-review.md) の「グローバル SKILL の配布」節を参照してください。
 - このリポジトリの `package.json` には `npm run sync:all` / `npm run sync:all:check` / `npm run sync:global` を用意しています（前 2 つは `--root` を付けて使います）。
 

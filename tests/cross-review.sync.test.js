@@ -36,9 +36,12 @@ describe('sync parseArgs', () => {
     expect(parseArgs(['--dry-run'])).toMatchObject({ mode: 'sync', dryRun: true });
   });
 
-  it('--check-manifest はモードを変えず、--check と併用できる', () => {
-    expect(parseArgs(['--check-manifest'])).toMatchObject({ mode: 'sync', checkManifest: true, error: null });
+  // --check-manifest は列挙するだけの検査なので、単独指定でも書き込みモードにしない
+  // (文書の「書き換えない」という案内と挙動を一致させる)。
+  it('--check-manifest は単独でも --check を含意し、--check と併用もできる', () => {
+    expect(parseArgs(['--check-manifest'])).toMatchObject({ mode: 'check', checkManifest: true, error: null });
     expect(parseArgs(['--check', '--check-manifest'])).toMatchObject({ mode: 'check', checkManifest: true, error: null });
+    expect(parseArgs(['--check-manifest', '--dry-run'])).toMatchObject({ mode: 'check', checkManifest: true, dryRun: true });
     expect(parseArgs([]).checkManifest).toBe(false);
   });
 
@@ -772,6 +775,42 @@ describe('collectMissingManifestEntries', () => {
     expect(r.entries).toEqual([]);
     expect(r.warning).toMatch(/雛形/);
   });
+
+  // 突き合わせる相手が 1 件も無い雛形を「未登録なし」と誤報しないことを固定する
+  // (検査したのに何も見ていない状態と、検査に成功した状態を区別する)。
+  it('雛形に files が無ければ構造不正として警告し、検査をスキップする', () => {
+    const fsx = makeFs({ '/up/tools/cross-review.sync.example.json': JSON.stringify({ upstream: { repo: 'x', ref: 'main' } }) });
+    const r = collectMissingManifestEntries('/up', localManifest, { readFile: fsx.readFile, exists: fsx.exists });
+    expect(r.entries).toEqual([]);
+    expect(r.warning).toMatch(/構造が不正/);
+  });
+
+  it('雛形の files が配列でなければ構造不正として警告する', () => {
+    const fsx = makeFs({ '/up/tools/cross-review.sync.example.json': JSON.stringify({ files: { from: 'tools/a.js' } }) });
+    const r = collectMissingManifestEntries('/up', localManifest, { readFile: fsx.readFile, exists: fsx.exists });
+    expect(r.entries).toEqual([]);
+    expect(r.warning).toMatch(/構造が不正/);
+  });
+
+  it('雛形の files に from を持つエントリが 1 つも無ければ構造不正として警告する', () => {
+    const fsx = makeFs({
+      '/up/tools/cross-review.sync.example.json': JSON.stringify({ files: [{ to: 'tools/a.js' }, null, { from: 42 }] }),
+    });
+    const r = collectMissingManifestEntries('/up', localManifest, { readFile: fsx.readFile, exists: fsx.exists });
+    expect(r.entries).toEqual([]);
+    expect(r.warning).toMatch(/構造が不正/);
+  });
+
+  it('from を持つエントリが 1 つでもあれば検査する (不正な要素は無視する)', () => {
+    const fsx = makeFs({
+      '/up/tools/cross-review.sync.example.json': JSON.stringify({
+        files: [{ to: 'tools/a.js' }, { from: 'docs/cross-review.md', to: 'docs/cross-review.md' }],
+      }),
+    });
+    const r = collectMissingManifestEntries('/up', localManifest, { readFile: fsx.readFile, exists: fsx.exists });
+    expect(r.warning).toBeNull();
+    expect(r.entries).toEqual([{ from: 'docs/cross-review.md', to: 'docs/cross-review.md' }]);
+  });
 });
 
 // --check-manifest は「上流の配布物を取りこぼしていないか」だけを報告し、マニフェストを書き換えず
@@ -851,6 +890,83 @@ describe('runSync の --check-manifest', () => {
     expect(res.missingManifestEntries).toEqual([]);
     expect(h.err.join('')).toMatch(/雛形/);
     expect(h.out.join('')).not.toMatch(/マニフェスト未登録/);
+    expect(process.exitCode).toBe(0);
+  });
+
+  // 検査をスキップした理由は戻り値にも載せる。一括同期 (sync-all) が「未登録 0 件」と
+  // 「そもそも検査できていない」を区別するために使う。
+  it('スキップ理由を manifestCheckWarning として返し、検査できたときは null', () => {
+    const skipped = runSync({ mode: 'check', dryRun: false, checkManifest: true }, checkDeps().deps);
+    expect(skipped.manifestCheckWarning).toMatch(/雛形/);
+    const h = checkDeps({ '/up/tools/cross-review.sync.example.json': EXAMPLE });
+    expect(runSync({ mode: 'check', dryRun: false, checkManifest: true }, h.deps).manifestCheckWarning).toBeNull();
+    expect(runSync({ mode: 'check', dryRun: false, checkManifest: false }, h.deps).manifestCheckWarning).toBeNull();
+  });
+});
+
+// --check-manifest 単独指定は --check を含意するので、ドリフトがあっても取り込み先ファイルと
+// マニフェスト (lastSyncedCommit) を書き換えない。parseArgs と runSync の配線ごと固定する。
+describe('runSync の --check-manifest 単独指定 (非書き込み)', () => {
+  const manifestObj = {
+    upstream: { repo: 'https://example.com/x.git', ref: 'main' },
+    lastSyncedCommit: 'oldcommit',
+    lastSyncedRef: 'main',
+    files: [{ from: 'tools/cross-review.js', to: 'tools/cross-review.js' }],
+  };
+
+  function driftingDeps() {
+    const fsx = makeFs({
+      '/proj/tools/cross-review.sync.json': JSON.stringify(manifestObj, null, 2),
+      '/up/tools/cross-review.js': 'NEW',
+      '/proj/tools/cross-review.js': 'OLD',
+      '/up/tools/cross-review.sync.example.json': JSON.stringify({
+        files: [
+          { from: 'tools/cross-review.js', to: 'tools/cross-review.js' },
+          { from: 'tools/cross-review.sync-all.js', to: 'tools/cross-review.sync-all.js' },
+        ],
+      }),
+    });
+    const out = [];
+    const err = [];
+    return {
+      fsx,
+      out,
+      err,
+      deps: {
+        scriptDir: '/proj/tools',
+        readFile: fsx.readFile,
+        writeFile: fsx.writeFile,
+        exists: fsx.exists,
+        out: (s) => out.push(s),
+        err: (s) => err.push(s),
+        prepareUpstream: () => ({ dir: '/up', commit: 'newcommit', cleanup: () => {} }),
+      },
+    };
+  }
+
+  beforeEach(() => { process.exitCode = 0; });
+  afterAll(() => { process.exitCode = 0; });
+
+  it('ドリフトがあっても書き込まず、未登録を列挙し、ドリフトで exit 1 になる', () => {
+    const h = driftingDeps();
+    const res = runSync(parseArgs(['--check-manifest']), h.deps);
+    expect(h.fsx.writes).toEqual([]);
+    expect(h.fsx.store.get(path.resolve('/proj/tools/cross-review.js'))).toBe('OLD');
+    expect(JSON.parse(h.fsx.store.get(path.resolve('/proj/tools/cross-review.sync.json'))).lastSyncedCommit).toBe('oldcommit');
+    expect(res.wrote).toEqual([]);
+    expect(res.drift).toBe(true);
+    expect(res.missingManifestEntries).toEqual([{ from: 'tools/cross-review.sync-all.js', to: 'tools/cross-review.sync-all.js' }]);
+    expect(h.out.join('')).toMatch(/マニフェスト未登録の配布物 \(1 件\)/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('ドリフトが無ければ書き込まず exit 0 (未登録があっても exit 1 にしない)', () => {
+    const h = driftingDeps();
+    h.fsx.store.set(path.resolve('/proj/tools/cross-review.js'), 'NEW');
+    const res = runSync(parseArgs(['--check-manifest']), h.deps);
+    expect(h.fsx.writes).toEqual([]);
+    expect(res.drift).toBe(false);
+    expect(res.missingManifestEntries).toHaveLength(1);
     expect(process.exitCode).toBe(0);
   });
 });

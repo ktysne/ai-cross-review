@@ -15,6 +15,7 @@ const {
   isSyncManifestContent,
   classifyResult,
   errorMessageOf,
+  collectSyncWarnings,
   formatSummary,
   planGlobalSkill,
   syncOne,
@@ -218,6 +219,39 @@ describe('errorMessageOf', () => {
   });
 });
 
+// 捕捉した stderr から 1 行警告だけを拾う。移行ノートの全文ブロックは件数が集計行に出るので除く。
+describe('collectSyncWarnings', () => {
+  it('[cross-review] で始まる 1 行警告だけを拾う', () => {
+    const err = [
+      '[cross-review] 上流に配布物の雛形がありません',
+      '上流の取得に失敗しました',
+      '[cross-review] 移行ノートを読めません: 2026-09.md (ENOENT)',
+      '',
+    ].join('\n');
+    expect(collectSyncWarnings(err)).toEqual([
+      '[cross-review] 上流に配布物の雛形がありません',
+      '[cross-review] 移行ノートを読めません: 2026-09.md (ENOENT)',
+    ]);
+  });
+
+  it('未読の移行ノートの全文ブロックは拾わない', () => {
+    const err = [
+      '[cross-review] 未読の移行ノート (1 件)',
+      '取り込み先で必要な作業が書かれています。同期のあとに対応してください。',
+      '--- 2026-09.md ---',
+      '本文',
+      '[cross-review] 未読の移行ノートが 1 件あります (同期時に表示)',
+      '[cross-review] マニフェスト検査に失敗しました',
+    ].join('\n');
+    expect(collectSyncWarnings(err)).toEqual(['[cross-review] マニフェスト検査に失敗しました']);
+  });
+
+  it('空 / undefined でも落ちない', () => {
+    expect(collectSyncWarnings('')).toEqual([]);
+    expect(collectSyncWarnings(undefined)).toEqual([]);
+  });
+});
+
 describe('formatSummary', () => {
   it('件数とステータス行を含む', () => {
     const s = formatSummary('/Develop', [
@@ -247,6 +281,23 @@ describe('formatSummary', () => {
     ]);
     expect(s).toMatch(/\[一致\] \/Develop\/a \(マニフェスト未登録 2 件\)/);
     expect(s).toMatch(/\[一致\] \/Develop\/b\n/);
+  });
+
+  it('マニフェスト検査が回らなかったプロジェクトには検査スキップを添える', () => {
+    const s = formatSummary('/Develop', [
+      { project: '/Develop/a', status: 'clean', changed: 0, manifestCheckSkipped: true },
+      { project: '/Develop/b', status: 'clean', changed: 0 },
+    ]);
+    expect(s).toMatch(/\[一致\] \/Develop\/a \(マニフェスト検査スキップ\)/);
+    expect(s).toMatch(/\[一致\] \/Develop\/b\n/);
+  });
+
+  it('警告はそのプロジェクトの行の直後にインデントして並ぶ', () => {
+    const s = formatSummary('/Develop', [
+      { project: '/Develop/a', status: 'clean', changed: 0, warnings: ['[cross-review] 雛形がありません', '[cross-review] 移行ノートを読めません'] },
+      { project: '/Develop/b', status: 'clean', changed: 0 },
+    ]);
+    expect(s).toMatch(/\[一致\] \/Develop\/a\n {4}\[cross-review\] 雛形がありません\n {4}\[cross-review\] 移行ノートを読めません\n {2}\[一致\] \/Develop\/b/);
   });
 
   it('rootLabel が null なら走査の見出しを出さず、件数は global の行を数えない', () => {
@@ -619,6 +670,69 @@ describe('runAll のマニフェスト検査', () => {
     expect(r.exitCode).toBe(0);
     expect(r.items[0]).toMatchObject({ status: 'clean', missingManifest: 2 });
     expect(sink.out.join('')).toMatch(/\(マニフェスト未登録 2 件\)/);
+  });
+
+  // 各プロジェクトの stderr は syncOne が捕捉するので、警告は集計へ引き上げないと消える。
+  it('runSync の警告を集計行の直後に出し、検査スキップを集計行に付ける', () => {
+    const sink = { out: [], err: [] };
+    const r = runAll({ root: '/r', depth: 4, mode: 'check' }, {
+      findManifests: () => ['/r/a/tools/cross-review.sync.json'],
+      readManifest: () => CONFORMING_MANIFEST,
+      syncOne: () => ({
+        result: {
+          results: [{ status: 'unchanged' }],
+          wrote: [],
+          drift: false,
+          missingManifestEntries: [],
+          manifestCheckWarning: '上流に配布物の雛形が無いため、マニフェスト検査をスキップします',
+        },
+        code: 0,
+        err: '[cross-review] 上流に配布物の雛形が無いため、マニフェスト検査をスキップします\n',
+      }),
+      out: (s) => sink.out.push(s),
+      err: (s) => sink.err.push(s),
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.items[0]).toMatchObject({ status: 'clean', manifestCheckSkipped: true });
+    expect(r.items[0].warnings).toHaveLength(1);
+    expect(sink.out.join('')).toMatch(/\(マニフェスト検査スキップ\)\n {4}\[cross-review\] 上流に配布物の雛形が無いため/);
+  });
+
+  it('警告が無いプロジェクトには警告行も検査スキップも付かない', () => {
+    const sink = { out: [], err: [] };
+    const r = runAll({ root: '/r', depth: 4, mode: 'check' }, {
+      findManifests: () => ['/r/a/tools/cross-review.sync.json'],
+      readManifest: () => CONFORMING_MANIFEST,
+      syncOne: () => ({
+        result: { results: [{ status: 'unchanged' }], wrote: [], drift: false, missingManifestEntries: [], manifestCheckWarning: null },
+        code: 0,
+        err: '',
+      }),
+      out: (s) => sink.out.push(s),
+      err: (s) => sink.err.push(s),
+    });
+    expect(r.items[0].warnings).toBeUndefined();
+    expect(r.items[0].manifestCheckSkipped).toBeUndefined();
+    expect(sink.out.join('')).not.toMatch(/マニフェスト検査スキップ/);
+  });
+
+  // 同期モードでも警告は消さない (全モード共通)。
+  it('同期モードでも runSync の警告を集計へ引き上げる', () => {
+    const sink = { out: [], err: [] };
+    runAll({ root: '/r', depth: 4, mode: 'sync' }, {
+      findManifests: () => ['/r/a/tools/cross-review.sync.json'],
+      readManifest: () => CONFORMING_MANIFEST,
+      syncOne: () => ({
+        result: { results: [{ status: 'update' }], wrote: ['x'], drift: true, migrations: ['2026-09.md'] },
+        code: 0,
+        err: '[cross-review] 移行ノートを読めません: 2026-09.md (ENOENT)\n[cross-review] 未読の移行ノート (1 件)\n本文\n',
+      }),
+      out: (s) => sink.out.push(s),
+      err: (s) => sink.err.push(s),
+    });
+    const out = sink.out.join('');
+    expect(out).toMatch(/ {4}\[cross-review\] 移行ノートを読めません/);
+    expect(out).not.toMatch(/本文/);
   });
 
   it('syncOne は --check のときだけ runSync に checkManifest を渡す', () => {

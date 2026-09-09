@@ -9,7 +9,7 @@
 //   node tools/cross-review.sync.js                 # マニフェストに従い上流から取り込む (コピー)
 //   node tools/cross-review.sync.js --check         # ドリフト検査のみ (書き込まない。差分があれば exit 1)
 //   node tools/cross-review.sync.js --dry-run       # 書き込まず、何が変わるかだけ表示
-//   node tools/cross-review.sync.js --check-manifest # 上流の雛形にあって files[] に無い配布物を列挙
+//   node tools/cross-review.sync.js --check-manifest # 上流の雛形にあって files[] に無い配布物を列挙 (--check を含意。書き込まない)
 //   node tools/cross-review.sync.js --ref <ref>     # 取り込む上流の ref をマニフェストより優先
 //   node tools/cross-review.sync.js --manifest <p>  # マニフェストの場所を指定 (既定: スクリプト隣の cross-review.sync.json)
 //   node tools/cross-review.sync.js --root <p>      # 取り込み先プロジェクトのルートを指定 (既定: tools/ の 1 つ上)
@@ -29,6 +29,9 @@
 //   取り込み先のマニフェストの files[] に無いエントリを列挙する。上流が配り始めたファイルの取りこぼしを
 //   知らせるだけで、マニフェストは書き換えない (何を取り込むかは取り込み先の判断であるため)。
 //   同じ理由で、未登録があってもドリフトではないので exit 1 にしない。
+//   単独指定でも書き込みを起こさないよう、parseArgs で --check を含意させる (列挙するだけの検査という
+//   案内どおりに振る舞わせるため)。ドリフトがあれば --check と同じく exit 1 になる。
+//   雛形が無い / 読めない / 構造が不正なときは警告して検査だけスキップし、同期そのものは止めない。
 // - 上流の移行ノート (docs/migrations/*.md) のうち、まだ見せていないものを同期時に stderr へ表示する。
 //   同期では直せない取り込み先側の作業 (gitignore、package.json の scripts、CLAUDE.md の節) を
 //   人が取りこぼさないようにするため。未読の判定はマニフェストの shownMigrations (表示済みファイル名)
@@ -58,7 +61,7 @@ const USAGE = [
   '',
   'options:',
   '  --check           ドリフト検査のみ。書き込まず、上流 (ref) との差分があれば exit 1',
-  '  --check-manifest  上流の雛形にあって files[] に無い配布物を列挙する (書き換えない。exit 1 にしない)',
+  '  --check-manifest  上流の雛形にあって files[] に無い配布物を列挙する (--check を含意。書き込まない)',
   '  --dry-run         書き込まず、同期で何が変わるかだけ表示する',
   '  --ref <ref>       取り込む上流の ref をマニフェストより優先 (ブランチ / タグ / コミット)',
   '  --manifest <path> マニフェストの場所を指定 (既定: スクリプト隣の cross-review.sync.json)',
@@ -82,11 +85,14 @@ const USAGE = [
   '',
   '--check-manifest は上流の tools/cross-review.sync.example.json (配布物一式の正本) と files[] を突き合わせ、',
   '未登録のエントリを列挙する。足すかどうかは取り込み先の判断なので、マニフェストは書き換えない。',
+  '列挙するだけの検査なので --check を含意し、単独指定でも書き込みは起きない (ドリフトがあれば exit 1。',
+  '未登録があっても exit 1 にはしない)。',
   '',
   '例:',
   '  node tools/cross-review.sync.js            # 上流から取り込む',
   '  node tools/cross-review.sync.js --check    # ドリフト検査 (CI 向け)',
-  '  node tools/cross-review.sync.js --check --check-manifest  # ドリフト検査 + 配布物の取りこぼし確認',
+  '  node tools/cross-review.sync.js --check-manifest          # 配布物の取りこぼし確認 (--check を含意。書き込まない)',
+  '  node tools/cross-review.sync.js --check --check-manifest  # ドリフト検査 + 配布物の取りこぼし確認 (上と同じ)',
   '  npm run sync                               # = node tools/cross-review.sync.js (scripts に登録した場合)',
 ].join('\n');
 
@@ -101,7 +107,7 @@ function parseArgs(argv) {
     } else if (a === '--check') {
       out.mode = 'check';
     } else if (a === '--check-manifest') {
-      // モードではなく付加的な検査。--check とも既定の同期とも併用できる。
+      // モードではなく付加的な検査。--check と併用できる (単独指定の扱いはループ後で決める)。
       out.checkManifest = true;
     } else if (a === '--dry-run') {
       out.dryRun = true;
@@ -135,6 +141,10 @@ function parseArgs(argv) {
       out.error = `不明な引数: ${a}`;
     }
   }
+  // --check-manifest は「上流の配布物を取りこぼしていないか」を列挙するだけの検査なので、単独指定でも
+  // 書き込み (ファイル同期、lastSyncedCommit の書き戻し) を起こさない。--check を含意させて非書き込みに
+  // 揃える (ドリフトがあれば --check と同じく exit 1。未登録は exit 1 にしない)。
+  if (out.checkManifest) out.mode = 'check';
   return out;
 }
 
@@ -425,9 +435,18 @@ function findMissingManifestEntries(exampleManifest, localManifest) {
     .map((e) => ({ from: e.from, to: typeof e.to === 'string' ? e.to : e.from }));
 }
 
+// 雛形マニフェストが配布物の正本として使える形かを判定する。
+// files が配列で、from を文字列で持つエントリが 1 つ以上あることを要求する。これを満たさない雛形から
+// 未登録エントリを求めると、突き合わせる相手が 1 件も無いまま「未登録なし」と誤報するため
+// (検査したのに何も見ていない状態を、検査に成功したと区別できなくする)。
+function isUsableExampleManifest(example) {
+  if (!example || typeof example !== 'object' || !Array.isArray(example.files)) return false;
+  return example.files.some((e) => e && typeof e.from === 'string');
+}
+
 // 上流の雛形マニフェストを読み、未登録エントリを求める。
-// 戻り値: { entries, warning }。上流に雛形が無い / 読めない / JSON として不正なときは entries を空にし、
-// warning に理由を入れて検査をスキップする (雛形を持たない古い ref でも同期そのものは通す)。
+// 戻り値: { entries, warning }。上流に雛形が無い / 読めない / JSON として不正 / 構造が不正なときは
+// entries を空にし、warning に理由を入れて検査をスキップする (雛形を持たない古い ref でも同期そのものは通す)。
 function collectMissingManifestEntries(upstreamDir, manifest, deps = {}) {
   const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
   const exists = deps.exists || ((p) => fs.existsSync(p));
@@ -440,6 +459,9 @@ function collectMissingManifestEntries(upstreamDir, manifest, deps = {}) {
     example = JSON.parse(readFile(examplePath));
   } catch (err) {
     return { entries: [], warning: `上流の配布物の雛形を読めません: ${UPSTREAM_EXAMPLE_MANIFEST} (${(err && err.message) || 'read error'})` };
+  }
+  if (!isUsableExampleManifest(example)) {
+    return { entries: [], warning: `上流の配布物の雛形の構造が不正です (${UPSTREAM_EXAMPLE_MANIFEST} の files[] に from を持つエントリがありません)。マニフェスト検査をスキップします` };
   }
   return { entries: findMissingManifestEntries(example, manifest), warning: null };
 }
@@ -524,7 +546,11 @@ function runSync(opts, deps = {}) {
 
     // マニフェスト検査 (--check-manifest)。上流が配り始めた配布物の取りこぼしを知らせるだけで、
     // マニフェストは書き換えず、終了コードにも影響させない (足すかどうかは取り込み先の判断であるため)。
+    // 検査をスキップした理由 (雛形の不在、読めない、構造不正) は manifestCheckWarning として戻り値にも
+    // 載せる。stderr の警告は一括同期 (sync-all) では流れて見落とすので、呼び出し側が「未登録 0 件」と
+    // 「そもそも検査できていない」を区別できるようにするため。
     let missingManifestEntries = [];
+    let manifestCheckWarning = null;
     let manifestChecked = false;
     if (opts.checkManifest) {
       let missing = { entries: [], warning: null };
@@ -534,6 +560,7 @@ function runSync(opts, deps = {}) {
         missing = { entries: [], warning: `マニフェスト検査に失敗しました: ${(err && err.message) || 'read error'}` };
       }
       if (missing.warning) writeErr(`[cross-review] ${missing.warning}\n`);
+      manifestCheckWarning = missing.warning || null;
       manifestChecked = !missing.warning;
       missingManifestEntries = missing.entries;
     }
@@ -563,7 +590,7 @@ function runSync(opts, deps = {}) {
       } else {
         writeOut('ドリフトはありません (上流と一致)。\n');
       }
-      return { ref, commit: upstream.commit, results, drift, wrote, migrations, missingManifestEntries };
+      return { ref, commit: upstream.commit, results, drift, wrote, migrations, missingManifestEntries, manifestCheckWarning };
     }
 
     // 未読の移行ノートを全文表示する。dry-run でも表示はするが、記録 (shownMigrations) は残さない
@@ -572,7 +599,7 @@ function runSync(opts, deps = {}) {
 
     if (opts.dryRun) {
       writeOut(drift ? `dry-run: ${changed.length} 件を更新します (書き込みはしていません)。\n` : 'dry-run: 変更はありません。\n');
-      return { ref, commit: upstream.commit, results, drift, wrote, migrations, missingManifestEntries };
+      return { ref, commit: upstream.commit, results, drift, wrote, migrations, missingManifestEntries, manifestCheckWarning };
     }
 
     // 同期 (コピー): 差分のあるファイルだけ書き込む。
@@ -594,7 +621,7 @@ function runSync(opts, deps = {}) {
     }
 
     writeOut(wrote.length ? `同期しました (${wrote.length} 件を更新)。\n` : '同期しました (変更なし)。\n');
-    return { ref, commit: upstream.commit, results, drift, wrote, migrations, missingManifestEntries };
+    return { ref, commit: upstream.commit, results, drift, wrote, migrations, missingManifestEntries, manifestCheckWarning };
   } finally {
     if (upstream && typeof upstream.cleanup === 'function') {
       try { upstream.cleanup(); } catch { /* 一時ディレクトリ削除の失敗は無視する */ }
