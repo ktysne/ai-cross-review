@@ -492,6 +492,7 @@ node tools/cross-review.js <reviewer> --base <そのSHA> --instructions <指摘�
   - 既定（同期）：差分のあるファイルだけ上書きし、取り込み元コミットが変わったときだけマニフェストの `lastSyncedCommit` を更新する。
   - `--check`：書き込まず、上流（ref）との差分（ドリフト）だけを報告する。差分があれば **exit 1**（CI のドリフト検知向け）。
   - `--dry-run`：書き込まず、同期で何が変わるかだけ表示する。
+- **マニフェスト検査**：`--check-manifest` は、上流の雛形 `tools/cross-review.sync.example.json`（配布物一式の正本）にあって、取り込み先のマニフェストの `files[]` に無いエントリを列挙します（`from` で突き合わせ）。上流が配り始めたファイルの取りこぼしを知らせるだけで、**マニフェストは書き換えません**（何を取り込むかは取り込み先の判断であるため）。同じ理由で、未登録があってもドリフトではないので **exit 1 にしません**。列挙するだけの検査なので **`--check` を含意**し、単独指定でも書き込みは起きません（`sync --check-manifest` と `sync --check --check-manifest` は同じ挙動。ドリフトがあれば `--check` と同じく exit 1）。上流に雛形が無い、読めない、または**構造が不正**（`files[]` が配列でない、`from` を持つエントリが 1 つも無い）ときは警告して検査だけスキップします（突き合わせる相手が無いまま「未登録なし」と誤報しないため）。
 - **そのほかのオプション**：`--ref <ref>`（マニフェストの ref を上書き）/ `--manifest <path>`（マニフェストの場所。既定はスクリプト隣の `cross-review.sync.json`）/ `--root <path>`（取り込み先ルート。既定は `tools/` の 1 つ上 = プロジェクトルート。cwd に依存せず解決）。
 - **安全策**：`from` / `to` が取り込み元 / 取り込み先ルートの外を指す場合はエラーにします（マニフェスト由来のパスでルート外へ読み書きする事故を防ぐ）。
 
@@ -552,7 +553,8 @@ since: 035a746efba75fb4f2cbbff7f0d3576fef6575ab
 ```
 
 **取り込み先の更新手順**：`node tools/cross-review.sync.js` で同期する → 表示された移行ノートの作業を行う → lint とテストを回す、の順です。  
-ノートの作業は同期スクリプトが代行しないので、表示されたら必ず人が対応してください。
+ノートの作業は同期スクリプトが代行しないので、表示されたら必ず人が対応してください。  
+上流が新しい配布物を増やしていないかは `node tools/cross-review.sync.js --check-manifest` で確認できます（未登録のエントリを列挙するだけで書き込みはしないので、必要なものだけ `files[]` に足してください）。
 
 **未読の判定（`shownMigrations`）**：マニフェストの `shownMigrations` に、表示済みノートのファイル名を配列で記録します。  
 記録に無いノートが未読です。記録は既存の値を保ったまま未読分を足すので、上流から消えたノートも再表示されません。  
@@ -582,6 +584,9 @@ since: 035a746efba75fb4f2cbbff7f0d3576fef6575ab
 - **破損は skip せず error（exit 1）**：ファイルが **読めない（IO/権限エラー）/ JSON 構文エラー（破損）** の場合は、正式導入先の設定崩れなので対象外で握り潰さず **error** にし、終了コードを **1** にします（CI の `sync-all --check` で検出できるようにするため）。1 件の error でも他プロジェクトの同期は止めず、最後に集計します。
 - **走査**：`--depth <n>`（既定 4）で最大深さを調整。`node_modules` / `.git` / 隠しディレクトリはたどりません。
 - **移行ノート**：未読のノートがあったプロジェクトは、集計行の末尾に「（移行ノート N 件）」が付きます。本文は各プロジェクトの同期時に stderr へ出ますが、一括同期では流れて見落としやすいためです。
+- **マニフェスト検査**：`--check` では各プロジェクトで `sync --check-manifest` も回し、未登録があったプロジェクトの集計行に「（マニフェスト未登録 N 件）」を付けます。一括検査は「取り込み先が上流に追いつけているか」を見る用途なので、ファイルのドリフトと配布物の取りこぼしを 1 回で拾います。未登録はドリフトではないので終了コードには含めません。検査が回らなかった（雛形が無い / 読めない / 構造が不正）プロジェクトには「（マニフェスト検査スキップ）」を付け、未登録 0 件の正常な検査と見分けられるようにします。
+- **警告の引き上げ**：各プロジェクトの stderr はこのツールが捕捉するため、そのままでは `sync` の 1 行警告（雛形が無い、移行ノートを読めない等）が消えます。`[cross-review]` で始まる警告行は、そのプロジェクトの集計行の直後にインデントして出します（全モード共通）。未読の移行ノートの全文は長いので集計には出さず、件数だけを集計行に付けます。
+- **グローバル SKILL の配布**：`--global-skill` は、この checkout の `.claude/skills/cross-review/SKILL.md` をホームの共通配置へ配ります（後述）。
 
 ```bash
 node tools/cross-review.sync-all.js --root /Develop --list    # 検出したプロジェクトを列挙するだけ
@@ -589,6 +594,35 @@ node tools/cross-review.sync-all.js --root /Develop --check   # 各プロジェ�
 node tools/cross-review.sync-all.js --root /Develop --dry-run # 各プロジェクトで何が変わるかだけ表示
 node tools/cross-review.sync-all.js --root /Develop           # 各プロジェクトを一括同期 (上書き更新)
 node tools/cross-review.sync-all.js --root /Develop --ref v1.2.3  # 取り込む ref を全プロジェクト共通で上書き
+node tools/cross-review.sync-all.js --global-skill             # グローバル SKILL だけを配る (走査しない)
+```
+
+### グローバル SKILL の配布（`--global-skill`）
+
+相互レビューの汎用ルール（3 択、サーキットブレーカー、PR 運用）を各リポジトリの `CLAUDE.md` へ写して回ると、改訂のたびに全プロジェクトを書き換えることになります。  
+`--global-skill` は、この checkout の `.claude/skills/cross-review/SKILL.md` を**ホームの共通配置 1 箇所**へ配り、各リポジトリにはそのプロジェクト固有の事情だけを残せるようにします（残す内容は次節のテンプレート）。
+
+配布先は次の 2 つです。
+
+| 配布先 | 条件 |
+|---|---|
+| `~/.claude/skills/cross-review/SKILL.md` | 常に配る（ディレクトリが無ければ作る） |
+| `~/.codex/skills/cross-review/SKILL.md` | `~/.codex/skills/` が既にあるときだけ配る |
+
+Codex はレビュー時にこの写しを読むので、古いままだと旧ルールで動きます。  
+一方で Codex を入れていない環境に `~/.codex/` を作るのは筋が悪いので、**親ディレクトリが既にあるときだけ**配ります（無いときは「対象外」として stderr に理由を出します）。
+
+- `--check` と併用すると書き込まず、古ければ **ドリフト扱いで exit 1** にします（グローバル SKILL が古いのは取り込み先のドリフトと同じ扱い）。
+- `--dry-run` は書き込まず、何が変わるかだけ表示します。
+- `--root` を付けずに `--global-skill` だけを指定した場合は、**プロジェクト走査をせずグローバル配布だけ**を行います。
+- `--list` と併用すると、配布先のパス（と対象外の理由）を列挙するだけで終わります。
+- 集計には `global:` の行が加わり、配布先ごとの状態（新規 / 更新 / 一致 / 対象外）が並びます。
+
+```bash
+node tools/cross-review.sync-all.js --global-skill --list     # 配布先を列挙するだけ
+node tools/cross-review.sync-all.js --global-skill --dry-run  # 何が変わるかだけ表示（書き込まない）
+node tools/cross-review.sync-all.js --global-skill            # 配る
+npm run sync:global                                           # = 上と同じ（このリポジトリの scripts）
 ```
 
 > 引数解析、プロジェクト走査、結果分類、集計、一括同期の配線は `tests/cross-review.sync-all.test.js`（vitest）が担保します（取り込み先では任意。一括同期ツールを入れ、かつ vitest を使うときだけ同梱）。
@@ -598,11 +632,42 @@ node tools/cross-review.sync.js            # 上流から取り込む（差分�
 node tools/cross-review.sync.js --check    # ドリフト検査のみ（書き込まない。差分があれば exit 1）
 node tools/cross-review.sync.js --dry-run  # 何が変わるかだけ表示（書き込まない）
 node tools/cross-review.sync.js --ref v1.2.3   # 取り込む版をマニフェストより優先
+node tools/cross-review.sync.js --check-manifest  # 配布物の取りこぼし確認（--check を含意。書き込まない）
 ```
 
 > 取り込み元の取得は git のネットワークアクセスを使います。  
 > サンドボックス内では fetch に失敗することがあるため、必要に応じてネットワークを許可して実行してください。  
 > 引数解析、マニフェスト検証、置換、同期プラン算出、同期/検査の配線は `tests/cross-review.sync.test.js`（vitest）が担保します（取り込み先では任意。vitest を使うときだけ同梱）。
+
+## 取り込み先の CLAUDE.md / AGENTS.md に書くこと（テンプレート）
+
+グローバル SKILL（`~/.claude/skills/cross-review/`）を配った環境では、3 択、サーキットブレーカー、PR 運用といった**汎用ルールの写しを各リポジトリに持たせません**。  
+写しがあると、上流でルールを改訂するたびに全プロジェクトの `CLAUDE.md` を書き換えることになり、書き換え漏れたリポジトリが古いルールで動きます。  
+各リポジトリに残すのは、SKILL に書けない**そのプロジェクト固有の事情**（正本の在り処、検証コマンド、同期スクリプト名）だけです。
+
+```markdown
+## AI 相互レビュー（Claude ↔ Codex）
+
+相互レビューの手順の正本は [docs/cross-review.md](docs/cross-review.md)（vendored）と、
+グローバル SKILL `~/.claude/skills/cross-review/SKILL.md` です。
+このリポジトリ固有のレビュー観点は `.cross-review.md` にあります。
+
+### 検証コマンド
+- lint: `npm run lint`
+- test: `npm test`
+- build: `npm run build`
+
+### 基盤の更新
+`npm run sync`（検査は `npm run sync:check`）で上流から取り込みます。
+更新手順は「同期 → 表示された移行ノートの作業 → 上の検証コマンド」の順です。
+
+### レビューの起点
+既定のレビュアーは実装者と別のベンダーです。実装を一区切りしたら 3 択を `AskUserQuestion` で提示します（詳細は SKILL）。
+```
+
+クラウド実行などグローバル SKILL を置けない環境の取り込み先では、これまでどおり `.claude/skills/cross-review/SKILL.md` を `files[]` に入れて vendored のまま同期を続けて構いません（グローバルと vendored のどちらか一方が最新であればよい）。
+
+> **提案（ユーザ側の設定）**：グローバル `CLAUDE.md` の相互レビュー節も、同じ理由で「SKILL への参照」と「Codex（GPT-5.6 Sol）の性質と取り扱い」の注記だけに縮められます（ユーザ自身の設定ファイルなので、この文書では提案に留めます）。
 
 ## 観点チェックリスト（.cross-review.md）
 

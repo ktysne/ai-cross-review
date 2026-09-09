@@ -2,7 +2,7 @@
 // 実ディレクトリ走査・実 runSync は外部依存なので、findManifests は listDir を注入し、runAll は
 // findManifests / syncOne を注入して、書き込みや実 I/O 無しで分類と exit コードまで固定する。
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -15,9 +15,13 @@ const {
   isSyncManifestContent,
   classifyResult,
   errorMessageOf,
+  collectSyncWarnings,
   formatSummary,
+  planGlobalSkill,
+  syncOne,
   runAll,
   DEFAULT_DEPTH,
+  GLOBAL_SKILL_TARGETS,
 } = require('../tools/cross-review.sync-all.js');
 
 // 同期対象とみなす準拠マニフェスト (upstream / files を持つ) の最小内容。
@@ -45,6 +49,11 @@ describe('sync-all parseArgs', () => {
     expect(parseArgs(['--check'])).toMatchObject({ mode: 'check' });
     expect(parseArgs(['--dry-run'])).toMatchObject({ dryRun: true });
     expect(parseArgs(['--list'])).toMatchObject({ list: true });
+  });
+
+  it('--global-skill を解釈する (単独指定なら root は未指定のまま)', () => {
+    expect(parseArgs(['--global-skill'])).toMatchObject({ globalSkill: true, root: null, error: null });
+    expect(parseArgs([]).globalSkill).toBe(false);
   });
 
   it('--ref を解釈する', () => {
@@ -210,6 +219,39 @@ describe('errorMessageOf', () => {
   });
 });
 
+// 捕捉した stderr から 1 行警告だけを拾う。移行ノートの全文ブロックは件数が集計行に出るので除く。
+describe('collectSyncWarnings', () => {
+  it('[cross-review] で始まる 1 行警告だけを拾う', () => {
+    const err = [
+      '[cross-review] 上流に配布物の雛形がありません',
+      '上流の取得に失敗しました',
+      '[cross-review] 移行ノートを読めません: 2026-09.md (ENOENT)',
+      '',
+    ].join('\n');
+    expect(collectSyncWarnings(err)).toEqual([
+      '[cross-review] 上流に配布物の雛形がありません',
+      '[cross-review] 移行ノートを読めません: 2026-09.md (ENOENT)',
+    ]);
+  });
+
+  it('未読の移行ノートの全文ブロックは拾わない', () => {
+    const err = [
+      '[cross-review] 未読の移行ノート (1 件)',
+      '取り込み先で必要な作業が書かれています。同期のあとに対応してください。',
+      '--- 2026-09.md ---',
+      '本文',
+      '[cross-review] 未読の移行ノートが 1 件あります (同期時に表示)',
+      '[cross-review] マニフェスト検査に失敗しました',
+    ].join('\n');
+    expect(collectSyncWarnings(err)).toEqual(['[cross-review] マニフェスト検査に失敗しました']);
+  });
+
+  it('空 / undefined でも落ちない', () => {
+    expect(collectSyncWarnings('')).toEqual([]);
+    expect(collectSyncWarnings(undefined)).toEqual([]);
+  });
+});
+
 describe('formatSummary', () => {
   it('件数とステータス行を含む', () => {
     const s = formatSummary('/Develop', [
@@ -230,6 +272,46 @@ describe('formatSummary', () => {
     ]);
     expect(s).toMatch(/\[更新\] \(1 件\) \/Develop\/a \(移行ノート 2 件\)/);
     expect(s).toMatch(/\[更新\] \(1 件\) \/Develop\/b\n/);
+  });
+
+  it('マニフェスト未登録があれば件数を添える', () => {
+    const s = formatSummary('/Develop', [
+      { project: '/Develop/a', status: 'clean', changed: 0, missingManifest: 2 },
+      { project: '/Develop/b', status: 'clean', changed: 0 },
+    ]);
+    expect(s).toMatch(/\[一致\] \/Develop\/a \(マニフェスト未登録 2 件\)/);
+    expect(s).toMatch(/\[一致\] \/Develop\/b\n/);
+  });
+
+  it('マニフェスト検査が回らなかったプロジェクトには検査スキップを添える', () => {
+    const s = formatSummary('/Develop', [
+      { project: '/Develop/a', status: 'clean', changed: 0, manifestCheckSkipped: true },
+      { project: '/Develop/b', status: 'clean', changed: 0 },
+    ]);
+    expect(s).toMatch(/\[一致\] \/Develop\/a \(マニフェスト検査スキップ\)/);
+    expect(s).toMatch(/\[一致\] \/Develop\/b\n/);
+  });
+
+  it('警告はそのプロジェクトの行の直後にインデントして並ぶ', () => {
+    const s = formatSummary('/Develop', [
+      { project: '/Develop/a', status: 'clean', changed: 0, warnings: ['[cross-review] 雛形がありません', '[cross-review] 移行ノートを読めません'] },
+      { project: '/Develop/b', status: 'clean', changed: 0 },
+    ]);
+    expect(s).toMatch(/\[一致\] \/Develop\/a\n {4}\[cross-review\] 雛形がありません\n {4}\[cross-review\] 移行ノートを読めません\n {2}\[一致\] \/Develop\/b/);
+  });
+
+  it('rootLabel が null なら走査の見出しを出さず、件数は global の行を数えない', () => {
+    const s = formatSummary(null, [{ kind: 'global', project: 'global: ~/.claude/...', status: 'updated', changed: 1 }]);
+    expect(s).not.toMatch(/走査ルート/);
+    expect(s).toMatch(/\[更新\] \(1 件\) global:/);
+  });
+
+  it('プロジェクト行と global 行が並ぶとき、件数はプロジェクトだけを数える', () => {
+    const s = formatSummary('/Develop', [
+      { project: '/Develop/a', status: 'updated', changed: 1 },
+      { kind: 'global', project: 'global: ~/.claude/...', status: 'unchanged', changed: 0 },
+    ]);
+    expect(s).toMatch(/検出した導入プロジェクト: 1 件/);
   });
 });
 
@@ -361,5 +443,305 @@ describe('runAll', () => {
     const r = runAll({ root: '/r', depth: 4, mode: 'sync', dryRun: false }, mkDeps(manifests, syncResults, sink, readManifest));
     expect(r.exitCode).toBe(1);
     expect(r.items.map((i) => i.status)).toEqual(['updated', 'error']);
+  });
+});
+
+// 仮想 FS (絶対パス -> 内容) でグローバル SKILL の配布を検証する。ディレクトリは空文字を値に持つ
+// エントリで表す。キーは path.resolve で正規化する (Windows で '/home/u' が 'D:\home\u' になるため)。
+function makeHomeFs(initial = {}) {
+  const store = new Map(Object.entries(initial).map(([k, v]) => [path.resolve(k), v]));
+  const writes = [];
+  const mkdirs = [];
+  return {
+    store,
+    writes,
+    mkdirs,
+    readFile: (p) => {
+      const key = path.resolve(p);
+      if (!store.has(key)) throw new Error(`ENOENT: ${key}`);
+      return store.get(key);
+    },
+    exists: (p) => store.has(path.resolve(p)),
+    writeFile: (p, c) => { const key = path.resolve(p); store.set(key, c); writes.push({ path: key, content: c }); },
+    mkdir: (d) => { mkdirs.push(path.resolve(d)); store.set(path.resolve(d), ''); },
+  };
+}
+
+describe('planGlobalSkill', () => {
+  const HOME = '/home/u';
+  // planGlobalSkill が返す path は path.join(home, ...to) なので、期待値も同じ組み立て方で作る
+  // (path.resolve するとドライブレターが付き、Windows で一致しなくなる)。
+  const CLAUDE = path.join(HOME, '.claude', 'skills', 'cross-review', 'SKILL.md');
+  const CODEX = path.join(HOME, '.codex', 'skills', 'cross-review', 'SKILL.md');
+
+  it('未配置は create、内容が古ければ update、一致すれば unchanged', () => {
+    const fsx = makeHomeFs({
+      '/home/u/.codex/skills': '',
+      '/home/u/.codex/skills/cross-review/SKILL.md': '古い SKILL',
+    });
+    const plans = planGlobalSkill({ home: HOME, targets: GLOBAL_SKILL_TARGETS, exists: fsx.exists, readFile: fsx.readFile, skillText: '新しい SKILL' });
+    expect(plans).toEqual([
+      { path: CLAUDE, status: 'create', reason: expect.any(String) },
+      { path: CODEX, status: 'update', reason: expect.any(String) },
+    ]);
+
+    fsx.store.set(path.resolve(CLAUDE), '新しい SKILL');
+    fsx.store.set(path.resolve(CODEX), '新しい SKILL');
+    const same = planGlobalSkill({ home: HOME, targets: GLOBAL_SKILL_TARGETS, exists: fsx.exists, readFile: fsx.readFile, skillText: '新しい SKILL' });
+    expect(same.map((p) => p.status)).toEqual(['unchanged', 'unchanged']);
+  });
+
+  it('.codex/skills が無ければ Codex 側は skip (Claude 側は配る)', () => {
+    const fsx = makeHomeFs({});
+    const plans = planGlobalSkill({ home: HOME, targets: GLOBAL_SKILL_TARGETS, exists: fsx.exists, readFile: fsx.readFile, skillText: 'S' });
+    expect(plans.map((p) => p.status)).toEqual(['create', 'skip']);
+    expect(plans[1].reason).toMatch(/配布しない/);
+  });
+
+  it('配置済みだが読めない配布先は update (古い写しを残さない)', () => {
+    const fsx = makeHomeFs({ '/home/u/.claude/skills/cross-review/SKILL.md': 'x' });
+    const plans = planGlobalSkill({
+      home: HOME,
+      targets: [GLOBAL_SKILL_TARGETS[0]],
+      exists: fsx.exists,
+      readFile: () => { throw new Error('EACCES'); },
+      skillText: 'S',
+    });
+    expect(plans[0]).toMatchObject({ status: 'update' });
+    expect(plans[0].reason).toMatch(/読めない/);
+  });
+});
+
+describe('runAll の --global-skill', () => {
+  // scriptDir=/repo/tools → 配布元は /repo/.claude/skills/cross-review/SKILL.md
+  const SKILL = '# SKILL 本文\n';
+  function globalDeps(homeFiles = {}, sink = { out: [], err: [] }) {
+    const fsx = makeHomeFs({
+      '/repo/.claude/skills/cross-review/SKILL.md': SKILL,
+      ...homeFiles,
+    });
+    return {
+      fsx,
+      sink,
+      deps: {
+        scriptDir: '/repo/tools',
+        home: '/home/u',
+        exists: fsx.exists,
+        readFile: fsx.readFile,
+        writeFile: fsx.writeFile,
+        mkdir: fsx.mkdir,
+        findManifests: () => { throw new Error('走査してはいけない'); },
+        out: (s) => sink.out.push(s),
+        err: (s) => sink.err.push(s),
+      },
+    };
+  }
+
+  beforeEach(() => { process.exitCode = 0; });
+  afterAll(() => { process.exitCode = 0; });
+
+  it('--global-skill 単独 (--root 無し) は走査せずグローバル配布だけを行う', () => {
+    const h = globalDeps({ '/home/u/.codex/skills': '' });
+    const r = runAll({ root: null, depth: 4, mode: 'sync', dryRun: false, globalSkill: true }, h.deps);
+    expect(r.exitCode).toBe(0);
+    expect(r.items).toHaveLength(1);
+    expect(r.items[0]).toMatchObject({ kind: 'global', status: 'updated', changed: 2 });
+    // 2 つの配布先へ SKILL 本文をそのまま書き、親ディレクトリを作る。
+    expect(h.fsx.writes.map((w) => w.content)).toEqual([SKILL, SKILL]);
+    expect(h.fsx.mkdirs).toHaveLength(2);
+    // 走査していないので「走査ルート」の見出しは出さない。
+    expect(h.sink.out.join('')).not.toMatch(/走査ルート/);
+    expect(h.sink.out.join('')).toMatch(/\[更新\] \(2 件\) global:/);
+  });
+
+  it('.codex/skills が無ければ Codex 側へは配らない (ディレクトリを作らない)', () => {
+    const h = globalDeps();
+    const r = runAll({ root: null, depth: 4, mode: 'sync', dryRun: false, globalSkill: true }, h.deps);
+    expect(r.items[0]).toMatchObject({ status: 'updated', changed: 1 });
+    expect(h.fsx.writes).toHaveLength(1);
+    expect(h.fsx.writes[0].path).toBe(path.resolve('/home/u/.claude/skills/cross-review/SKILL.md'));
+    expect(h.sink.err.join('')).toMatch(/配布しません/);
+  });
+
+  it('--check は書き込まず、古ければ drift として exit 1', () => {
+    const h = globalDeps({ '/home/u/.claude/skills/cross-review/SKILL.md': '古い' });
+    const r = runAll({ root: null, depth: 4, mode: 'check', globalSkill: true }, h.deps);
+    expect(r.exitCode).toBe(1);
+    expect(r.items[0]).toMatchObject({ status: 'drift' });
+    expect(h.fsx.writes).toEqual([]);
+  });
+
+  it('--check で最新と一致していれば clean・exit 0', () => {
+    const h = globalDeps({ '/home/u/.claude/skills/cross-review/SKILL.md': SKILL });
+    const r = runAll({ root: null, depth: 4, mode: 'check', globalSkill: true }, h.deps);
+    expect(r.exitCode).toBe(0);
+    expect(r.items[0]).toMatchObject({ status: 'clean' });
+    expect(h.fsx.writes).toEqual([]);
+  });
+
+  it('--dry-run は書き込まず would-update だけを出す', () => {
+    const h = globalDeps();
+    const r = runAll({ root: null, depth: 4, mode: 'sync', dryRun: true, globalSkill: true }, h.deps);
+    expect(r.exitCode).toBe(0);
+    expect(r.items[0]).toMatchObject({ status: 'would-update', changed: 1 });
+    expect(h.fsx.writes).toEqual([]);
+  });
+
+  it('配布元の SKILL が無ければ error・exit 1', () => {
+    const sink = { out: [], err: [] };
+    const fsx = makeHomeFs({});
+    const r = runAll({ root: null, depth: 4, mode: 'sync', dryRun: false, globalSkill: true }, {
+      scriptDir: '/repo/tools',
+      home: '/home/u',
+      exists: fsx.exists,
+      readFile: fsx.readFile,
+      writeFile: fsx.writeFile,
+      mkdir: fsx.mkdir,
+      out: (s) => sink.out.push(s),
+      err: (s) => sink.err.push(s),
+    });
+    expect(r.exitCode).toBe(1);
+    expect(r.items[0]).toMatchObject({ kind: 'global', status: 'error' });
+    expect(r.items[0].message).toMatch(/配布元の SKILL がありません/);
+    expect(sink.out.join('')).toMatch(/\[エラー\]/);
+  });
+
+  it('--list との併用は配布先を列挙するだけ (書き込まない)', () => {
+    const h = globalDeps();
+    const r = runAll({ root: null, depth: 4, mode: 'sync', list: true, globalSkill: true }, h.deps);
+    expect(r.exitCode).toBe(0);
+    expect(h.sink.out.join('')).toMatch(/グローバル SKILL の配布先:/);
+    expect(h.sink.out.join('')).toMatch(/\.claude/);
+    expect(h.sink.out.join('')).toMatch(/対象外/); // .codex/skills が無い
+    expect(h.fsx.writes).toEqual([]);
+  });
+
+  it('--root と併用するとプロジェクト走査に global の行が加わる', () => {
+    const sink = { out: [], err: [] };
+    const fsx = makeHomeFs({ '/repo/.claude/skills/cross-review/SKILL.md': SKILL });
+    const manifests = ['/r/a/tools/cross-review.sync.json'];
+    const r = runAll({ root: '/r', depth: 4, mode: 'sync', dryRun: false, globalSkill: true }, {
+      scriptDir: '/repo/tools',
+      home: '/home/u',
+      exists: fsx.exists,
+      readFile: fsx.readFile,
+      writeFile: fsx.writeFile,
+      mkdir: fsx.mkdir,
+      findManifests: () => manifests,
+      readManifest: () => CONFORMING_MANIFEST,
+      syncOne: () => ({ result: { results: [{ status: 'update' }], wrote: ['x'], drift: false }, code: 0 }),
+      out: (s) => sink.out.push(s),
+      err: (s) => sink.err.push(s),
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.items.map((i) => i.status)).toEqual(['updated', 'updated']);
+    // 集計の件数は導入プロジェクトだけを数える (global の行は含めない)。
+    expect(sink.out.join('')).toMatch(/検出した導入プロジェクト: 1 件/);
+    expect(sink.out.join('')).toMatch(/global:/);
+  });
+});
+
+describe('runAll のマニフェスト検査', () => {
+  beforeEach(() => { process.exitCode = 0; });
+  afterAll(() => { process.exitCode = 0; });
+
+  it('--check では sync に checkManifest を渡し、未登録件数を集計に出す (exit 1 にはしない)', () => {
+    const sink = { out: [], err: [] };
+    const seen = [];
+    const r = runAll({ root: '/r', depth: 4, mode: 'check' }, {
+      findManifests: () => ['/r/a/tools/cross-review.sync.json'],
+      readManifest: () => CONFORMING_MANIFEST,
+      syncOne: (mp, o) => {
+        seen.push(o);
+        return {
+          result: {
+            results: [{ status: 'unchanged' }],
+            wrote: [],
+            drift: false,
+            missingManifestEntries: [{ from: 'tools/x.js', to: 'tools/x.js' }, { from: 'docs/y.md', to: 'docs/y.md' }],
+          },
+          code: 0,
+        };
+      },
+      out: (s) => sink.out.push(s),
+      err: (s) => sink.err.push(s),
+    });
+    expect(seen[0].mode).toBe('check');
+    expect(r.exitCode).toBe(0);
+    expect(r.items[0]).toMatchObject({ status: 'clean', missingManifest: 2 });
+    expect(sink.out.join('')).toMatch(/\(マニフェスト未登録 2 件\)/);
+  });
+
+  // 各プロジェクトの stderr は syncOne が捕捉するので、警告は集計へ引き上げないと消える。
+  it('runSync の警告を集計行の直後に出し、検査スキップを集計行に付ける', () => {
+    const sink = { out: [], err: [] };
+    const r = runAll({ root: '/r', depth: 4, mode: 'check' }, {
+      findManifests: () => ['/r/a/tools/cross-review.sync.json'],
+      readManifest: () => CONFORMING_MANIFEST,
+      syncOne: () => ({
+        result: {
+          results: [{ status: 'unchanged' }],
+          wrote: [],
+          drift: false,
+          missingManifestEntries: [],
+          manifestCheckWarning: '上流に配布物の雛形が無いため、マニフェスト検査をスキップします',
+        },
+        code: 0,
+        err: '[cross-review] 上流に配布物の雛形が無いため、マニフェスト検査をスキップします\n',
+      }),
+      out: (s) => sink.out.push(s),
+      err: (s) => sink.err.push(s),
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.items[0]).toMatchObject({ status: 'clean', manifestCheckSkipped: true });
+    expect(r.items[0].warnings).toHaveLength(1);
+    expect(sink.out.join('')).toMatch(/\(マニフェスト検査スキップ\)\n {4}\[cross-review\] 上流に配布物の雛形が無いため/);
+  });
+
+  it('警告が無いプロジェクトには警告行も検査スキップも付かない', () => {
+    const sink = { out: [], err: [] };
+    const r = runAll({ root: '/r', depth: 4, mode: 'check' }, {
+      findManifests: () => ['/r/a/tools/cross-review.sync.json'],
+      readManifest: () => CONFORMING_MANIFEST,
+      syncOne: () => ({
+        result: { results: [{ status: 'unchanged' }], wrote: [], drift: false, missingManifestEntries: [], manifestCheckWarning: null },
+        code: 0,
+        err: '',
+      }),
+      out: (s) => sink.out.push(s),
+      err: (s) => sink.err.push(s),
+    });
+    expect(r.items[0].warnings).toBeUndefined();
+    expect(r.items[0].manifestCheckSkipped).toBeUndefined();
+    expect(sink.out.join('')).not.toMatch(/マニフェスト検査スキップ/);
+  });
+
+  // 同期モードでも警告は消さない (全モード共通)。
+  it('同期モードでも runSync の警告を集計へ引き上げる', () => {
+    const sink = { out: [], err: [] };
+    runAll({ root: '/r', depth: 4, mode: 'sync' }, {
+      findManifests: () => ['/r/a/tools/cross-review.sync.json'],
+      readManifest: () => CONFORMING_MANIFEST,
+      syncOne: () => ({
+        result: { results: [{ status: 'update' }], wrote: ['x'], drift: true, migrations: ['2026-09.md'] },
+        code: 0,
+        err: '[cross-review] 移行ノートを読めません: 2026-09.md (ENOENT)\n[cross-review] 未読の移行ノート (1 件)\n本文\n',
+      }),
+      out: (s) => sink.out.push(s),
+      err: (s) => sink.err.push(s),
+    });
+    const out = sink.out.join('');
+    expect(out).toMatch(/ {4}\[cross-review\] 移行ノートを読めません/);
+    expect(out).not.toMatch(/本文/);
+  });
+
+  it('syncOne は --check のときだけ runSync に checkManifest を渡す', () => {
+    const seen = [];
+    const stub = (o) => { seen.push(o); return { results: [], wrote: [], drift: false, migrations: [] }; };
+    const mp = '/r/a/tools/cross-review.sync.json';
+    syncOne(mp, { mode: 'check', dryRun: false, ref: null }, { runSync: stub });
+    syncOne(mp, { mode: 'sync', dryRun: false, ref: null }, { runSync: stub });
+    expect(seen[0].checkManifest).toBe(true);
+    expect(seen[1].checkManifest).toBe(false);
   });
 });
