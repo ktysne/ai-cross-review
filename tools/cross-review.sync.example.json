@@ -4,6 +4,7 @@
     "ref": "main"
   },
   "lastSyncedCommit": null,
+  "shownMigrations": [],
   "files": [
     { "from": "tools/cross-review.js", "to": "tools/cross-review.js" },
     { "from": "tools/cross-review.sync.js", "to": "tools/cross-review.sync.js" },

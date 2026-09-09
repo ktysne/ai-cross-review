@@ -248,7 +248,10 @@ function formatSummary(rootLabel, items) {
     } else if (it.status === 'error' || it.status === 'skipped') {
       detail = it.message ? ` (${it.message})` : '';
     }
-    lines.push(`  [${label}]${detail} ${it.project}`);
+    // 未読の移行ノート (取り込み先で人がやる作業) があった件数。同期の本文は各プロジェクトの stderr に
+    // 出るが、一括同期では流れて見落としやすいので集計にも残す。
+    const note = it.migrations > 0 ? ` (移行ノート ${it.migrations} 件)` : '';
+    lines.push(`  [${label}]${detail} ${it.project}${note}`);
   }
   return lines.join('\n') + '\n';
 }
@@ -310,6 +313,9 @@ function runAll(opts, deps = {}) {
     const res = doSync(mp, opts);
     const { status, changed } = classifyResult(opts, res);
     const item = { project, status, changed };
+    // runSync が表示した未読移行ノートの件数 (無い / 失敗時は 0)。
+    const migrations = res.result && Array.isArray(res.result.migrations) ? res.result.migrations.length : 0;
+    if (migrations > 0) item.migrations = migrations;
     if (status === 'error') { item.message = errorMessageOf(res); anyError = true; }
     if (status === 'drift') anyDrift = true;
     items.push(item);

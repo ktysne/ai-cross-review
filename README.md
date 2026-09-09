@@ -161,7 +161,7 @@ docs/generated/*.md
 | `CLAUDE.md` / `AGENTS.md`（あれば） | そのリポジトリの運用メモ。手順の詳細はコピーした `docs/cross-review.md` へリンクする |
 | そのプロジェクト用の doc（任意） | 手順書に書かない、プロジェクト固有のメモ（検証コマンド、CI、例 など） |
 | `tools/package.json` | `tools/*.js` を CommonJS にする設定（`"type": "commonjs"`）。そのリポジトリのツール依存もここに足す |
-| `tools/cross-review.sync.json` | そのプロジェクトの同期マニフェスト（`tools/cross-review.sync.example.json` を雛形に作る）。取り込むファイルの `from`/`to`、取り込み元 `repo`/`ref` を書く。`lastSyncedCommit` は同期時に自動で更新される（どの版から取り込んだかの記録） |
+| `tools/cross-review.sync.json` | そのプロジェクトの同期マニフェスト（`tools/cross-review.sync.example.json` を雛形に作る）。取り込むファイルの `from`/`to`、取り込み元 `repo`/`ref` を書く。`lastSyncedCommit`（どの版から取り込んだかの記録）と `shownMigrations`（表示済みの移行ノート）は同期時に自動で更新される |
 
 ### 手順
 1. 上の「そのままコピーするファイル」を全部コピー先へコピーする（`tools/*.js` は CommonJS なので、コピー先のルート `package.json` が `"type": "module"` のときは `tools/package.json` に `"type": "commonjs"` を置く）。  
@@ -206,6 +206,7 @@ docs/generated/*.md
 
 取り込み元の取得は **git のみ**で行います（`upstream.ref` を一時ディレクトリへ shallow fetch）。  
 取り込んだ実コミットは `lastSyncedCommit` に記録され、どの版から取り込んだかが残ります。  
+同期では直せない取り込み先側の作業（`.gitignore`、`package.json` の `scripts`、`CLAUDE.md` の節）があるときは、上流の**移行ノート**（`docs/migrations/`）のうち未読のものが stderr に表示されるので、同期のあとに対応してください（表示済みのノートは `shownMigrations` に記録され、二度は出ません）。  
 詳細、マニフェストの形は [docs/cross-review.md](docs/cross-review.md) の「同期スクリプト」節を参照してください。
 
 > **メモ（末尾空白）**：`docs/cross-review.md` などは Markdown のハード改行（行末スペース 2 つ）を使います。

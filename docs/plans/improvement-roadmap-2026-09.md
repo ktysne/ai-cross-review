@@ -59,11 +59,12 @@ bridge #15 はこのフェーズと並行して bridge 側で進める。
 
 ### フェーズ 1.5：移行ノートの仕組み（#32 の一部）
 
-`docs/migrations/` の置き場と書式（先頭に `since: <上流 SHA>`、本文に取り込み先の app-owned 作業の一覧）を定め、`cross-review.sync.js` が同期後に `lastSyncedCommit` より新しいノートを stderr に表示する部分だけを先に入れる。
+`docs/migrations/` の置き場と書式（先頭に `since: <上流 SHA>`、本文に取り込み先の app-owned 作業の一覧）を定め、`cross-review.sync.js` が同期後に未読のノートを stderr に表示する部分だけを先に入れる。
+未読の判定はマニフェストの `shownMigrations`（表示済みファイル名の配列）に無いノートで行う（上流は shallow fetch のため `since` の SHA と `lastSyncedCommit` の祖先関係を判定できず、`since` は情報用に留める）。
 以降のフェーズで app-owned の作業が生じる PR（#25 と #26 の gitignore、新サブコマンドの scripts、#23 の起動経路の変更）は、同じ PR に移行ノートを含める。
 
 区分は standard。
-ノートの選別は純粋関数（ノート一覧と `lastSyncedCommit` から表示対象を返す）に分け、テストに書く。
+ノートの選別は純粋関数（ノート一覧とマニフェストから表示対象と新しい `shownMigrations` を返す）に分け、テストに書く。
 
 ### フェーズ 2：Codex 起動の統一と上限フォールバック（#23、#22）
 
@@ -111,7 +112,7 @@ session-score-player は独自 sync を使うため、移行ノートは上流�
 | フェーズ | 検証 |
 |---|---|
 | 1 | SKILL と docs の整合を目視。`npm test`（プロンプト既定文のテスト更新） |
-| 1.5 | `npm test`。`lastSyncedCommit` を古い SHA にしたマニフェストで `sync --dry-run` を実行し、ノートが表示されることを確認 |
+| 1.5 | `npm test`。`shownMigrations` を空にしたマニフェスト（`lastSyncedCommit` は非 null）で `sync --dry-run` を実行し、ノートが表示されることを確認 |
 | 2 | `npm test`、`npm run lint`。bridge 導入環境で `npm run review:codex` を実行し、stderr の `codex-agent:` 行でモデルと認証ホームを確認。スクリプトを一時的に外して直接起動へ戻ることを確認 |
 | 3 | `npm test`。スタック PR のブランチで `--base` 無しに実行し、表示された base を確認。256KB 強の差分で縮退が働くことを確認 |
 | 4 | `npm test`。実際の PR で `comment` の出力を `gh pr comment --body-file` に渡して投稿し、見出し構成を確認 |
