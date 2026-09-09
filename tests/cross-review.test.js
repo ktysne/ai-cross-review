@@ -11,6 +11,14 @@ const {
   parseArgs,
   codexExecArgs,
   reviewerInvocation,
+  resolveCodexAgentScript,
+  codexAgentNameFor,
+  frontMatterValue,
+  codexAgentSandboxOf,
+  checkCodexAgentSandbox,
+  scriptPinsApprovalNever,
+  isUsageLimitExit,
+  resolveFallbackPromptPath,
   collectReviewDiff,
   resolveBaseRef,
   resolveMaxDiffKb,
@@ -25,6 +33,12 @@ const {
   resolveReviewerCommandForSpawn,
   CHECKLIST_FILENAME,
   IGNORE_FILENAME,
+  CODEX_AGENT_REVIEW_NAME,
+  CODEX_AGENT_FIX_NAME,
+  CODEX_AGENT_EXIT_MISSING,
+  CODEX_SANDBOX_READ_ONLY,
+  CODEX_SANDBOX_WORKSPACE_WRITE,
+  USAGE_LIMIT_EXIT_CODE,
   DEFAULT_EXCLUDE_PATTERNS,
   GENERIC_CHECKLIST,
   REVIEW_ONLY_INSTRUCTION,
@@ -151,6 +165,50 @@ describe('cross-review parseArgs', () => {
     expect(parseArgs(['codex']).instructionsPath).toBeNull();
   });
 
+  it('--no-codex-agent / --no-fallback を取り込む (既定は bridge 有効・フォールバック有効)', () => {
+    const def = parseArgs(['codex']);
+    expect(def.codexAgent).toBeNull();
+    expect(def.noFallback).toBe(false);
+    expect(def.fallbackPromptPath).toBeNull();
+    const off = parseArgs(['codex', '--no-codex-agent', '--no-fallback']);
+    expect(off.codexAgent).toBe(false);
+    expect(off.noFallback).toBe(true);
+  });
+
+  it('--codex-agent <name> / --codex-agent=name で定義名を取り込む', () => {
+    expect(parseArgs(['codex', '--codex-agent', 'my-agent']).codexAgent).toBe('my-agent');
+    expect(parseArgs(['codex', '--codex-agent=my-agent']).codexAgent).toBe('my-agent');
+  });
+
+  it('--codex-agent に値が無ければエラー (--codex-agent= 空値も含む)', () => {
+    expect(parseArgs(['codex', '--codex-agent']).error).toMatch(/--codex-agent/);
+    expect(parseArgs(['codex', '--codex-agent', '--fix']).error).toMatch(/--codex-agent/);
+    expect(parseArgs(['codex', '--codex-agent=']).error).toMatch(/--codex-agent/);
+  });
+
+  // bridge 経由のサンドボックスは定義側で決まるので、--fix と定義名の食い違いは起動前に弾く。
+  it('--codex-agent codex-review と --fix の併用はエラー (read-only 定義では修正できない)', () => {
+    const opts = parseArgs(['codex', '--fix', '--codex-agent', CODEX_AGENT_REVIEW_NAME]);
+    expect(opts.error).toMatch(/codex-review/);
+  });
+
+  it('--codex-agent codex-subagent を --fix 無しで使うとエラー (書込権限が過剰)', () => {
+    const opts = parseArgs(['codex', '--codex-agent', CODEX_AGENT_FIX_NAME]);
+    expect(opts.error).toMatch(/codex-subagent/);
+  });
+
+  it('既知の 2 定義以外の名前は --fix の有無で弾かない', () => {
+    expect(parseArgs(['codex', '--codex-agent', 'my-agent']).error).toBeNull();
+    expect(parseArgs(['codex', '--fix', '--codex-agent', 'my-agent']).error).toBeNull();
+  });
+
+  it('--fallback-prompt <path> / --fallback-prompt=path を取り込む', () => {
+    expect(parseArgs(['codex', '--fallback-prompt', 'out.md']).fallbackPromptPath).toBe('out.md');
+    expect(parseArgs(['codex', '--fallback-prompt=out.md']).fallbackPromptPath).toBe('out.md');
+    expect(parseArgs(['codex', '--fallback-prompt']).error).toMatch(/--fallback-prompt/);
+    expect(parseArgs(['codex', '--fallback-prompt=']).error).toMatch(/--fallback-prompt/);
+  });
+
   it('未知のレビュアーはエラー', () => {
     expect(parseArgs(['gemini']).error).toMatch(/codex/);
     expect(parseArgs([]).error).toMatch(/codex/);
@@ -185,17 +243,23 @@ describe('cross-review codexExecArgs', () => {
 });
 
 describe('cross-review reviewerInvocation', () => {
+  // codex 経路は codex-agent.sh (bridge) の有無で分岐するので、直接起動を見るテストでは
+  // 実行環境に左右されないよう exists:false を注入して bridge 不在を固定する。
+  const noBridge = { exists: () => false, env: {}, homedir: '/home/u' };
+
   it('codex レビューのみは codex を read-only で起動する', () => {
-    const inv = reviewerInvocation({ reviewer: 'codex', fix: false });
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, noBridge);
     expect(inv.cmd).toBe('codex');
     expect(inv.args).toEqual(['exec', '-s', 'read-only', '-c', 'approval_policy=never', '-']);
+    expect(inv.via).toBe('direct');
   });
 
   it('codex --fix は workspace-write で起動し、編集する旨を通知する', () => {
-    const inv = reviewerInvocation({ reviewer: 'codex', fix: true });
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: true }, noBridge);
     expect(inv.cmd).toBe('codex');
     expect(inv.args).toEqual(['exec', '-s', 'workspace-write', '-c', 'approval_policy=never', '-']);
     expect(inv.notice).toMatch(/修正/);
+    expect(inv.via).toBe('direct');
   });
 
   it('claude は claude -p で起動する', () => {
@@ -215,6 +279,365 @@ describe('cross-review reviewerInvocation', () => {
     const inv = reviewerInvocation({ reviewer: 'subagent', fix: true });
     expect(inv.emit).toBe(true);
     expect(inv.notice).toMatch(/修正/);
+  });
+});
+
+describe('cross-review resolveCodexAgentScript (bridge の解決順)', () => {
+  const defaultPath = path.join('/home/u', '.claude', 'tools', 'codex-agent.sh');
+
+  it('環境変数 CROSS_REVIEW_CODEX_AGENT のパスを最優先する', () => {
+    const script = resolveCodexAgentScript({
+      env: { CROSS_REVIEW_CODEX_AGENT: '/opt/bridge/codex-agent.sh' },
+      homedir: '/home/u',
+      exists: () => true,
+      warn: () => {},
+    });
+    expect(script).toBe('/opt/bridge/codex-agent.sh');
+  });
+
+  it('環境変数が無ければ ~/.claude/tools/codex-agent.sh を使う', () => {
+    const script = resolveCodexAgentScript({
+      env: {},
+      homedir: '/home/u',
+      exists: (p) => p === defaultPath,
+      warn: () => {},
+    });
+    expect(script).toBe(defaultPath);
+  });
+
+  it('どこにも無ければ null (呼び出し側は直接起動へ)', () => {
+    const script = resolveCodexAgentScript({
+      env: {},
+      homedir: '/home/u',
+      exists: () => false,
+      warn: () => {},
+    });
+    expect(script).toBeNull();
+  });
+
+  it('環境変数の指定先が無ければ警告して既定パスへフォールバックする', () => {
+    let warned = '';
+    const script = resolveCodexAgentScript({
+      env: { CROSS_REVIEW_CODEX_AGENT: '/nope/codex-agent.sh' },
+      homedir: '/home/u',
+      exists: (p) => p === defaultPath,
+      warn: (m) => { warned += m; },
+    });
+    expect(script).toBe(defaultPath);
+    expect(warned).toMatch(/CROSS_REVIEW_CODEX_AGENT/);
+  });
+});
+
+describe('cross-review reviewerInvocation (bridge 経由の codex 起動)', () => {
+  const scriptPath = path.join('/home/u', '.claude', 'tools', 'codex-agent.sh');
+  // bridge 経由はスクリプトが approval_policy=never を明示している場合に限るので、
+  // 既定の擬似スクリプトには明示済みの本文を入れる。
+  const scriptText = 'codex exec --sandbox "$codex_sandbox" -c approval_policy=never -\n';
+  const defPath = (name) => path.join('/home/u', '.claude', 'gpt-agents', `${name}.md`);
+  const defText = (sandbox) => `---\ncodex_home: ~/.codex\ncodex_model: gpt-5.6-sol\ncodex_sandbox: ${sandbox}\n---\n\n役割\n`;
+  // 擬似ファイル系を注入する。ここに無いパスは「存在しない」扱いにする。
+  const bridge = (extra = {}) => {
+    const files = { [scriptPath]: scriptText, ...(extra.files || {}) };
+    const rest = { ...extra };
+    delete rest.files;
+    return {
+      env: {},
+      homedir: '/home/u',
+      cwd: '/repo',
+      warn: () => {},
+      exists: (p) => Object.prototype.hasOwnProperty.call(files, p),
+      readFile: (p) => {
+        if (!Object.prototype.hasOwnProperty.call(files, p)) throw new Error(`ENOENT: ${p}`);
+        return files[p];
+      },
+      ...rest,
+    };
+  };
+
+  it('スクリプトがあれば bash 経由で起動し、レビューのみは read-only 定義を選ぶ', () => {
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, bridge());
+    expect(inv.cmd).toBe('bash');
+    expect(inv.args).toEqual([scriptPath, 'codex-review', '-C', '/repo']);
+    expect(inv.via).toBe('agent');
+    expect(inv.notice).toContain('codex-agent.sh 経由 (定義: codex-review)');
+  });
+
+  it('--fix は workspace-write 定義 (codex-subagent) を選ぶ', () => {
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: true }, bridge());
+    expect(inv.args).toEqual([scriptPath, 'codex-subagent', '-C', '/repo']);
+    expect(inv.notice).toContain('定義: codex-subagent');
+  });
+
+  // サンドボックス安全性の不変条件: bridge 経由では定義名がサンドボックスを決めるため、
+  // レビューのみで workspace-write の定義を、--fix で read-only の定義を選ばない。
+  it('レビューのみは workspace-write の定義を選ばない', () => {
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, bridge());
+    expect(inv.args).not.toContain(CODEX_AGENT_FIX_NAME);
+    expect(inv.args).toContain(CODEX_AGENT_REVIEW_NAME);
+  });
+
+  it('--fix は read-only の定義を選ばない', () => {
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: true }, bridge());
+    expect(inv.args).not.toContain(CODEX_AGENT_REVIEW_NAME);
+    expect(inv.args).toContain(CODEX_AGENT_FIX_NAME);
+  });
+
+  it('--codex-agent <name> で定義名を明示できる', () => {
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: false, codexAgent: 'my-reviewer' }, bridge());
+    expect(inv.args).toEqual([scriptPath, 'my-reviewer', '-C', '/repo']);
+  });
+
+  it('--no-codex-agent (codexAgent:false) はスクリプトがあっても直接起動する', () => {
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: false, codexAgent: false }, bridge());
+    expect(inv.cmd).toBe('codex');
+    expect(inv.via).toBe('direct');
+    expect(inv.args).toEqual(['exec', '-s', 'read-only', '-c', 'approval_policy=never', '-']);
+  });
+
+  it('スクリプトが無ければ従来どおり codex を直接起動する', () => {
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: true }, bridge({ exists: () => false }));
+    expect(inv.cmd).toBe('codex');
+    expect(inv.via).toBe('direct');
+    expect(inv.args).toContain('workspace-write');
+  });
+
+  // 承認は never 固定という不変条件。bridge は codex への追加引数を受け付けないので、
+  // スクリプトが明示していなければ bridge を使わない。
+  it('スクリプトが approval_policy=never を明示していなければ直接起動へ戻す', () => {
+    let warned = '';
+    const inv = reviewerInvocation(
+      { reviewer: 'codex', fix: false },
+      bridge({ files: { [scriptPath]: 'codex exec --sandbox "$codex_sandbox" -\n' }, warn: (m) => { warned += m; } }),
+    );
+    expect(inv.cmd).toBe('codex');
+    expect(inv.via).toBe('direct');
+    expect(inv.args).toEqual(['exec', '-s', 'read-only', '-c', 'approval_policy=never', '-']);
+    expect(warned).toMatch(/approval_policy=never/);
+  });
+
+  it('--codex-agent で明示していても approval_policy=never が無ければ直接起動へ戻す', () => {
+    const inv = reviewerInvocation(
+      { reviewer: 'codex', fix: false, codexAgent: 'my-reviewer' },
+      bridge({ files: { [scriptPath]: 'codex exec -\n' } }),
+    );
+    expect(inv.via).toBe('direct');
+  });
+
+  it('スクリプトを読めない場合も直接起動へ戻す', () => {
+    let warned = '';
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, bridge({
+      exists: () => true,
+      readFile: () => { throw new Error('EACCES'); },
+      warn: (m) => { warned += m; },
+    }));
+    expect(inv.via).toBe('direct');
+    expect(warned).toMatch(/読めない/);
+  });
+
+  // サンドボックス安全性の不変条件。定義ファイルの中身は利用者が変えられるので、
+  // 定義名が既定でも明示でも起動前に codex_sandbox を突き合わせる。
+  it('レビューのみで workspace-write の定義ならエラーを返す (起動しない)', () => {
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, bridge({
+      files: { [defPath(CODEX_AGENT_REVIEW_NAME)]: defText('workspace-write') },
+    }));
+    expect(inv.error).toMatch(/codex_sandbox/);
+    expect(inv.cmd).toBeUndefined();
+  });
+
+  it('--fix で read-only の定義ならエラーを返す (起動しない)', () => {
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: true }, bridge({
+      files: { [defPath(CODEX_AGENT_FIX_NAME)]: defText('read-only') },
+    }));
+    expect(inv.error).toMatch(/codex_sandbox/);
+  });
+
+  it('--codex-agent で指定した未知の定義にも codex_sandbox の検査が効く', () => {
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: false, codexAgent: 'my-writer' }, bridge({
+      files: { [defPath('my-writer')]: defText('workspace-write') },
+    }));
+    expect(inv.error).toMatch(/my-writer/);
+  });
+
+  it('定義が --fix の有無と一致していれば bridge 経由で起動する', () => {
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, bridge({
+      files: { [defPath(CODEX_AGENT_REVIEW_NAME)]: defText('read-only') },
+    }));
+    expect(inv.error).toBeUndefined();
+    expect(inv.args).toEqual([scriptPath, CODEX_AGENT_REVIEW_NAME, '-C', '/repo']);
+  });
+
+  it('定義ファイルが見つからなければ検査せず bridge に委ねる', () => {
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, bridge());
+    expect(inv.error).toBeUndefined();
+    expect(inv.via).toBe('agent');
+  });
+
+  it('定義が存在するのに読めなければエラーを返し、ホーム側の検証にも起動にも進まない', () => {
+    const projectDef = path.join('/repo', '.claude', 'gpt-agents', `${CODEX_AGENT_REVIEW_NAME}.md`);
+    const deps = bridge({
+      files: {
+        [projectDef]: defText('read-only'),
+        [defPath(CODEX_AGENT_REVIEW_NAME)]: defText('read-only'),
+      },
+    });
+    const readFile = deps.readFile;
+    deps.readFile = (p) => {
+      if (p === projectDef) throw new Error('EACCES');
+      return readFile(p);
+    };
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, deps);
+    expect(inv.error).toMatch(/読めない/);
+    expect(inv.error).toMatch(/EACCES/);
+    expect(inv.cmd).toBeUndefined();
+  });
+
+  it('定義はプロジェクト側 (cwd) をユーザ側 (home) より優先する', () => {
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, bridge({
+      files: {
+        [path.join('/repo', '.claude', 'gpt-agents', `${CODEX_AGENT_REVIEW_NAME}.md`)]: defText('workspace-write'),
+        [defPath(CODEX_AGENT_REVIEW_NAME)]: defText('read-only'),
+      },
+    }));
+    expect(inv.error).toMatch(/codex_sandbox/);
+  });
+});
+
+describe('cross-review checkCodexAgentSandbox', () => {
+  it('レビューのみ (--fix 無し) は read-only だけを許す', () => {
+    expect(checkCodexAgentSandbox({ fix: false, sandbox: CODEX_SANDBOX_READ_ONLY }).ok).toBe(true);
+    const ng = checkCodexAgentSandbox({ fix: false, sandbox: CODEX_SANDBOX_WORKSPACE_WRITE });
+    expect(ng.ok).toBe(false);
+    expect(ng.expected).toBe(CODEX_SANDBOX_READ_ONLY);
+    expect(ng.actual).toBe(CODEX_SANDBOX_WORKSPACE_WRITE);
+  });
+
+  it('--fix は workspace-write だけを許す', () => {
+    expect(checkCodexAgentSandbox({ fix: true, sandbox: CODEX_SANDBOX_WORKSPACE_WRITE }).ok).toBe(true);
+    const ng = checkCodexAgentSandbox({ fix: true, sandbox: CODEX_SANDBOX_READ_ONLY });
+    expect(ng.ok).toBe(false);
+    expect(ng.expected).toBe(CODEX_SANDBOX_WORKSPACE_WRITE);
+  });
+});
+
+// フロントマターの解釈は codex-agent.sh の fm_get と揃える (ずれると検査が実態と食い違う)。
+describe('cross-review codexAgentSandboxOf / frontMatterValue', () => {
+  const withFm = (body) => `---\n${body}\n---\n\n役割\n`;
+
+  it('行末の YAML コメントを落とす', () => {
+    expect(codexAgentSandboxOf(withFm('codex_sandbox: workspace-write  # 書き込み可'))).toBe('workspace-write');
+  });
+
+  it('値を囲む引用符を外す', () => {
+    expect(codexAgentSandboxOf(withFm('codex_sandbox: "read-only"'))).toBe('read-only');
+  });
+
+  it('値の内部の # は残す (コメントは「空白 + #」以降だけ)', () => {
+    expect(frontMatterValue(withFm('codex_model: gpt#5'), 'codex_model')).toBe('gpt#5');
+  });
+
+  it('キーが無ければ既定の read-only', () => {
+    expect(codexAgentSandboxOf(withFm('codex_model: gpt-5.6-sol'))).toBe('read-only');
+    expect(frontMatterValue(withFm('codex_model: gpt-5.6-sol'), 'codex_sandbox')).toBeNull();
+  });
+
+  it('フロントマターが無ければ既定の read-only', () => {
+    expect(codexAgentSandboxOf('codex_sandbox: workspace-write\n')).toBe('read-only');
+    expect(frontMatterValue('codex_sandbox: workspace-write\n', 'codex_sandbox')).toBeNull();
+  });
+
+  it('終端の --- より後ろの行は読まない', () => {
+    expect(codexAgentSandboxOf(withFm('codex_model: gpt-5.6-sol') + 'codex_sandbox: workspace-write\n')).toBe('read-only');
+  });
+});
+
+describe('cross-review scriptPinsApprovalNever', () => {
+  it('approval_policy=never を含めば true', () => {
+    expect(scriptPinsApprovalNever('codex exec -c approval_policy=never -\n')).toBe(true);
+  });
+
+  it('含まなければ false (空・未定義も false)', () => {
+    expect(scriptPinsApprovalNever('codex exec -\n')).toBe(false);
+    expect(scriptPinsApprovalNever('')).toBe(false);
+    expect(scriptPinsApprovalNever(undefined)).toBe(false);
+  });
+
+  it('コメント行にだけ書かれていても false (起動引数に乗らない)', () => {
+    expect(scriptPinsApprovalNever('# TODO: -c approval_policy=never\ncodex exec -\n')).toBe(false);
+    expect(scriptPinsApprovalNever('  # -c approval_policy=never を後で足す\ncodex exec -\n')).toBe(false);
+  });
+
+  it('-c の引数として書かれていなければ false、引用符付きや行継続の -c 引数は true', () => {
+    expect(scriptPinsApprovalNever('echo approval_policy=never\ncodex exec -\n')).toBe(false);
+    expect(scriptPinsApprovalNever('codex exec -c "approval_policy=never" -\n')).toBe(true);
+    expect(scriptPinsApprovalNever("codex exec \\\n  -c 'approval_policy=never' \\\n  -\n")).toBe(true);
+  });
+
+  it('codex exec 以外のコマンドの引数や、行末コメントに書かれていても false', () => {
+    expect(scriptPinsApprovalNever('echo -c approval_policy=never\ncodex exec -\n')).toBe(false);
+    expect(scriptPinsApprovalNever('codex exec - # TODO: -c approval_policy=never\n')).toBe(false);
+    expect(scriptPinsApprovalNever('codex exec \\\n  - # -c approval_policy=never\n')).toBe(false);
+  });
+
+  it('実物の codex-agent.sh と同じ形 (環境変数の前置、継続行、変数展開の引数) は true', () => {
+    const real = [
+      'CODEX_HOME="$codex_home" codex exec \\',
+      '  --skip-git-repo-check \\',
+      '  --sandbox "$codex_sandbox" \\',
+      '  -m "$codex_model" \\',
+      '  -c "model_reasoning_effort=\\"$codex_effort\\"" \\',
+      '  -c approval_policy=never \\',
+      '  -C "$workdir" \\',
+      '  - <<<"$prompt" >"$out_file" 2>"$err_file"',
+      '',
+    ].join('\n');
+    expect(scriptPinsApprovalNever(real)).toBe(true);
+  });
+});
+
+describe('cross-review codexAgentNameFor', () => {
+  it('明示指定が無ければ --fix の有無で定義名を選ぶ', () => {
+    expect(codexAgentNameFor({ fix: false })).toBe(CODEX_AGENT_REVIEW_NAME);
+    expect(codexAgentNameFor({ fix: true })).toBe(CODEX_AGENT_FIX_NAME);
+  });
+
+  it('明示指定があればそれを使う', () => {
+    expect(codexAgentNameFor({ fix: false, codexAgent: 'other' })).toBe('other');
+  });
+});
+
+describe('cross-review isUsageLimitExit', () => {
+  it('bridge 経由は終了コード 75 だけを上限と判定する', () => {
+    expect(isUsageLimitExit({ via: 'agent', code: 75, outputTail: '' })).toBe(true);
+    expect(isUsageLimitExit({ via: 'agent', code: 1, outputTail: 'usage limit reached' })).toBe(false);
+    expect(isUsageLimitExit({ via: 'agent', code: 0, outputTail: '' })).toBe(false);
+  });
+
+  it('直接起動は非ゼロ終了かつ出力に上限の語があるときだけ上限と判定する', () => {
+    expect(isUsageLimitExit({ via: 'direct', code: 1, outputTail: 'You have hit your usage limit.' })).toBe(true);
+    expect(isUsageLimitExit({ via: 'direct', code: 1, outputTail: 'Rate Limit exceeded' })).toBe(true);
+    expect(isUsageLimitExit({ via: 'direct', code: 1, outputTail: 'HTTP 429 Too Many Requests' })).toBe(true);
+    expect(isUsageLimitExit({ via: 'direct', code: 1, outputTail: 'syntax error' })).toBe(false);
+  });
+
+  it('正常終了とシグナル終了は上限として扱わない', () => {
+    expect(isUsageLimitExit({ via: 'direct', code: 0, outputTail: 'usage limit' })).toBe(false);
+    expect(isUsageLimitExit({ via: 'direct', code: null, outputTail: 'usage limit' })).toBe(false);
+  });
+
+  it('429 は単語境界で照合する (桁の一致で誤検出しない)', () => {
+    expect(isUsageLimitExit({ via: 'direct', code: 1, outputTail: 'id=14290 failed' })).toBe(false);
+  });
+});
+
+describe('cross-review resolveFallbackPromptPath', () => {
+  it('--fallback-prompt を最優先する', () => {
+    expect(resolveFallbackPromptPath({ fallbackPromptPath: 'notes.md' }, { tmpdir: '/tmp', pid: 1 }))
+      .toBe('notes.md');
+  });
+
+  it('未指定なら一時ディレクトリに pid 付きの名前を作る', () => {
+    expect(resolveFallbackPromptPath({}, { tmpdir: '/tmp', pid: 42 }))
+      .toBe(path.join('/tmp', 'cross-review-fallback-42.md'));
   });
 });
 
@@ -801,7 +1224,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     const gitRun = (args) => (args[0] === 'diff' ? 'diff --git a/x b/x\n+changed\n' : '');
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', fix: false },
-      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER' },
+      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', exists: () => false },
     );
     expect(captured.cmd).toBe('codex');
     expect(captured.args).toContain('read-only');
@@ -820,7 +1243,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     };
     runReview(
       { reviewer: 'codex', mode: 'uncommitted', fix: true },
-      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER' },
+      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', exists: () => false },
     );
     expect(captured.cmd).toBe('codex');
     expect(captured.args).toContain('workspace-write');
@@ -834,7 +1257,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     const gitRun = (args) => (args[0] === 'diff' ? 'CLAUDE_DIFF\n' : '');
     runReview(
       { reviewer: 'claude', mode: 'base', baseRef: 'main', fix: false },
-      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER' },
+      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', exists: () => false },
     );
     expect(captured.cmd).toBe('claude');
     expect(captured.args).toEqual(['-p']);
@@ -847,7 +1270,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     const gitRun = (args) => (args[0] === 'diff' && args[1] === 'HEAD' ? 'DIFF_BODY\n' : '');
     runReview(
       { reviewer: 'codex', mode: 'uncommitted', fix: true, instructionsPath: 'notes.md' },
-      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', instructions: 'レビュアーの指摘: X を直す' },
+      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', instructions: 'レビュアーの指摘: X を直す', exists: () => false },
     );
     expect(captured.args).toContain('workspace-write');
     expect(captured.stdin).toContain('CHECKLIST_MARKER');           // 観点は残る
@@ -864,7 +1287,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     let err = '';
     const ret = runReview(
       { reviewer: 'subagent', mode: 'base', baseRef: 'main', fix: false },
-      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', out: (s) => { out += s; }, err: (s) => { err += s; } },
+      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', out: (s) => { out += s; }, exists: () => false, err: (s) => { err += s; } },
     );
     expect(called).toBe(false);                  // 外部プロセスは起動しない
     expect(ret).toBeNull();
@@ -881,7 +1304,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     let out = '';
     runReview(
       { reviewer: 'subagent', mode: 'uncommitted', fix: true },
-      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', out: (s) => { out += s; }, err: () => {} },
+      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', out: (s) => { out += s; }, exists: () => false, err: () => {} },
     );
     expect(out).toContain('FIX_DIFF');
     expect(out).toContain(FIX_INSTRUCTION);
@@ -894,7 +1317,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     const gitRun = () => '';
     const ret = runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', fix: false },
-      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER' },
+      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', exists: () => false },
     );
     expect(called).toBe(false);
     expect(ret).toBeNull();
@@ -910,7 +1333,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     process.exitCode = 0;
     const ret = runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 1 },
-      { gitRun, spawnFn, checklist: 'CL', out: () => {}, err: (s) => { err += s; } },
+      { gitRun, spawnFn, checklist: 'CL', out: () => {}, exists: () => false, err: (s) => { err += s; } },
     );
     expect(called).toBe(false);
     expect(ret).toBeNull();
@@ -928,7 +1351,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     process.exitCode = 0;
     runReview(
       { reviewer: 'subagent', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 1 },
-      { gitRun, spawnFn: () => { throw new Error('spawn してはいけない'); }, checklist: 'CL', out: (s) => { out += s; }, err: () => {} },
+      { gitRun, spawnFn: () => { throw new Error('spawn してはいけない'); }, checklist: 'CL', out: (s) => { out += s; }, exists: () => false, err: () => {} },
     );
     expect(out).toBe('');
     expect(process.exitCode).toBe(1);
@@ -942,7 +1365,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     let err = '';
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: null },
-      { gitRun, spawnFn, checklist: 'CL', out: () => {}, err: (s) => { err += s; }, env: { CROSS_REVIEW_MAX_DIFF_KB: '256' } },
+      { gitRun, spawnFn, checklist: 'CL', out: () => {}, exists: () => false, err: (s) => { err += s; }, env: { CROSS_REVIEW_MAX_DIFF_KB: '256' } },
     );
     expect(captured.cmd).toBe('codex');
     expect(captured.stdin).toContain('SMALL_DIFF');
@@ -960,7 +1383,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     };
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 0 },
-      { gitRun, spawnFn, checklist: 'CL', out: () => {}, err: () => {} },
+      { gitRun, spawnFn, checklist: 'CL', out: () => {}, exists: () => false, err: () => {} },
     );
     expect(captured.stdin).toContain('origin/main...HEAD');
   });
@@ -976,7 +1399,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     let err = '';
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 0, maxFileDiffKb: 1, noExclude: true },
-      { gitRun, spawnFn, checklist: 'CL', out: () => {}, err: (s) => { err += s; } },
+      { gitRun, spawnFn, checklist: 'CL', out: () => {}, exists: () => false, err: (s) => { err += s; } },
     );
     expect(captured.stdin).toContain('本文を省略');         // stat 要約に置換された
     expect(captured.stdin).not.toContain('+x');             // 本文は載らない
@@ -996,7 +1419,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     process.exitCode = 0;
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 2, maxFileDiffKb: 1, noExclude: true },
-      { gitRun, spawnFn: (...a) => { called = true; return spawnFn(...a); }, checklist: 'CL', out: () => {}, err: () => {} },
+      { gitRun, spawnFn: (...a) => { called = true; return spawnFn(...a); }, checklist: 'CL', out: () => {}, exists: () => false, err: () => {} },
     );
     expect(called).toBe(true);          // 置換で縮みガードを通過し spawn される
     expect(process.exitCode).toBe(0);
@@ -1015,7 +1438,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     };
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 0, maxFileDiffKb: 0 },
-      { gitRun, spawnFn, checklist: 'CL', ignorePatterns: ['package-lock.json'], out: () => {}, err: () => {} },
+      { gitRun, spawnFn, checklist: 'CL', ignorePatterns: ['package-lock.json'], out: () => {}, exists: () => false, err: () => {} },
     );
     expect(captured.stdin).toContain('レビュー対象外（除外済み）');
     expect(captured.stdin).toContain('- package-lock.json');
@@ -1027,7 +1450,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     const gitRun = (args) => { calls.push(args); return args[0] === 'diff' ? 'DIFF\n' : ''; };
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: true, fix: false, maxDiffKb: 0, maxFileDiffKb: 0, noExclude: true },
-      { gitRun, spawnFn, checklist: 'CL', ignorePatterns: ['package-lock.json'], out: () => {}, err: () => {} },
+      { gitRun, spawnFn, checklist: 'CL', ignorePatterns: ['package-lock.json'], out: () => {}, exists: () => false, err: () => {} },
     );
     const diffCall = calls.find((c) => c[0] === 'diff' && !c.includes('--name-only'));
     expect(diffCall).toEqual(['diff', 'main...HEAD']); // 除外指定が入らない (baseExplicit で origin/main 解決をスキップ)
@@ -1038,10 +1461,261 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     let err = '';
     const ret = runReview(
       { reviewer: 'subagent', mode: 'base', baseRef: 'main', fix: false },
-      { gitRun: () => '', spawnFn: () => { throw new Error('起動しないはず'); }, checklist: 'CL', out: (s) => { out += s; }, err: (s) => { err += s; } },
+      { gitRun: () => '', spawnFn: () => { throw new Error('起動しないはず'); }, checklist: 'CL', out: (s) => { out += s; }, exists: () => false, err: (s) => { err += s; } },
     );
     expect(ret).toBeNull();
     expect(out).toBe('');                    // stdout は空 (空通知をプロンプトと誤認させない)
     expect(err).toContain('差分がありません'); // 通知は stderr 側
+  });
+
+  // 利用上限のフォールバックと bridge 未導入時の再起動は spawnFn の onExit を差し替えて検証する。
+  // 共通の配線: bridge を「有る」ことにし、差分・観点・書き出し先をすべて注入する。
+  const bridgeScriptPath = path.join('/home/u', '.claude', 'tools', 'codex-agent.sh');
+  // bridge 経由はスクリプトが approval_policy=never を明示している場合に限るので、既定では明示済みにする。
+  const bridgeScriptText = 'codex exec --sandbox "$codex_sandbox" -c approval_policy=never -\n';
+  const agentDefText = (sandbox) => `---\ncodex_home: ~/.codex\ncodex_model: gpt-5.6-sol\ncodex_sandbox: ${sandbox}\n---\n\n役割\n`;
+  const bridgeDeps = (extra = {}) => {
+    const files = { [bridgeScriptPath]: bridgeScriptText, ...(extra.files || {}) };
+    const rest = { ...extra };
+    delete rest.files;
+    return {
+      gitRun: (args) => (args[0] === 'diff' ? 'LIMIT_DIFF\n' : ''),
+      checklist: 'CL',
+      out: () => {},
+      err: () => {},
+      // 擬似ファイル系のみ「存在する」扱いにする (定義ファイルの既定は不在 = 検査をスキップ)。
+      exists: (p) => Object.prototype.hasOwnProperty.call(files, p),
+      readFile: (p) => {
+        if (!Object.prototype.hasOwnProperty.call(files, p)) throw new Error(`ENOENT: ${p}`);
+        return files[p];
+      },
+      env: {},
+      homedir: '/home/u',
+      cwd: '/repo',
+      tmpdir: '/tmp',
+      pid: 7,
+      ...rest,
+    };
+  };
+  // 実物の spawnReviewer は終了コードを process.exitCode に載せてから onExit を呼ぶ。
+  // テスト用の spawnFn も同じ契約にし、フォールバックが終了コードを上書きするのか、
+  // 元の終了コードが維持されるのかを区別できるようにする。
+  const settle = (onExit, result) => {
+    process.exitCode = result.code == null ? 1 : result.code;
+    onExit({ outputTail: '', error: null, ...result });
+  };
+  const limitOpts = (extra = {}) => ({
+    reviewer: 'codex',
+    mode: 'base',
+    baseRef: 'main',
+    baseExplicit: true,
+    fix: false,
+    maxDiffKb: 0,
+    maxFileDiffKb: 0,
+    noExclude: true,
+    ...extra,
+  });
+  const fallbackPath = path.join('/tmp', 'cross-review-fallback-7.md');
+
+  it('bridge 経由の利用上限 (終了コード 75) は代替プロンプトを書き出し exitCode 75 で終える', () => {
+    const calls = [];
+    const written = {};
+    let err = '';
+    const spawnFn = (cmd, args, stdin, onExit) => {
+      calls.push({ cmd, args, stdin });
+      settle(onExit, { code: USAGE_LIMIT_EXIT_CODE });
+      return null;
+    };
+    process.exitCode = 0;
+    runReview(limitOpts(), bridgeDeps({
+      spawnFn,
+      err: (s) => { err += s; },
+      writeFile: (p, body) => { written[p] = body; },
+    }));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].cmd).toBe('bash');
+    expect(calls[0].args).toContain(CODEX_AGENT_REVIEW_NAME);
+    expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+    expect(written[fallbackPath]).toContain('LIMIT_DIFF'); // subagent と同じプロンプト本文
+    expect(written[fallbackPath]).toContain('CL');
+    expect(err).toMatch(/利用上限/);
+    expect(err).toContain(fallbackPath);
+    process.exitCode = 0;
+  });
+
+  it('直接起動は非ゼロ終了 + 出力の上限メッセージでフォールバックする', () => {
+    const written = {};
+    const spawnFn = (cmd, args, stdin, onExit) => {
+      settle(onExit, { code: 1, outputTail: 'error: You have hit your usage limit.' });
+      return null;
+    };
+    process.exitCode = 0;
+    runReview(limitOpts(), bridgeDeps({
+      spawnFn,
+      exists: () => false, // bridge 不在 → codex を直接起動する経路
+      writeFile: (p, body) => { written[p] = body; },
+    }));
+    expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+    expect(written[fallbackPath]).toContain('LIMIT_DIFF');
+    process.exitCode = 0;
+  });
+
+  it('--no-fallback なら代替プロンプトを書かず、レビュアーの終了コードを維持する', () => {
+    let wrote = false;
+    const spawnFn = (cmd, args, stdin, onExit) => {
+      settle(onExit, { code: USAGE_LIMIT_EXIT_CODE });
+      return null;
+    };
+    process.exitCode = 0;
+    runReview(limitOpts({ noFallback: true }), bridgeDeps({
+      spawnFn,
+      writeFile: () => { wrote = true; },
+    }));
+    expect(wrote).toBe(false);
+    expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE); // 上限のまま失敗終了する
+    process.exitCode = 0;
+  });
+
+  it('--no-fallback は上限以外の失敗でも終了コードを維持する', () => {
+    let wrote = false;
+    const spawnFn = (cmd, args, stdin, onExit) => {
+      settle(onExit, { code: 1, outputTail: 'error: something broke' });
+      return null;
+    };
+    process.exitCode = 0;
+    runReview(limitOpts({ noFallback: true }), bridgeDeps({
+      spawnFn,
+      exists: () => false, // 直接起動の経路 (出力から上限を判定する側)
+      writeFile: () => { wrote = true; },
+    }));
+    expect(wrote).toBe(false);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('--fallback-prompt の指定先へ書き出す', () => {
+    const written = {};
+    const spawnFn = (cmd, args, stdin, onExit) => {
+      settle(onExit, { code: USAGE_LIMIT_EXIT_CODE });
+      return null;
+    };
+    process.exitCode = 0;
+    runReview(limitOpts({ fallbackPromptPath: 'my-fallback.md' }), bridgeDeps({
+      spawnFn,
+      writeFile: (p, body) => { written[p] = body; },
+    }));
+    expect(Object.keys(written)).toEqual(['my-fallback.md']);
+    expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+    process.exitCode = 0;
+  });
+
+  it('bridge 未導入 (終了コード 3) なら同じプロンプトで直接起動へ切り替える', () => {
+    const calls = [];
+    let err = '';
+    const spawnFn = (cmd, args, stdin, onExit) => {
+      calls.push({ cmd, args, stdin });
+      // 1 回目 (bridge) は未導入、2 回目 (直接起動) は正常終了。
+      settle(onExit, calls.length === 1 ? { code: CODEX_AGENT_EXIT_MISSING } : { code: 0 });
+      return null;
+    };
+    process.exitCode = 0;
+    runReview(limitOpts(), bridgeDeps({
+      spawnFn,
+      err: (s) => { err += s; },
+      writeFile: () => { throw new Error('未導入では代替プロンプトを書かない'); },
+    }));
+    expect(calls).toHaveLength(2);
+    expect(calls[0].cmd).toBe('bash');
+    expect(calls[1].cmd).toBe('codex');
+    expect(calls[1].args).toEqual(['exec', '-s', 'read-only', '-c', 'approval_policy=never', '-']);
+    expect(calls[1].stdin).toBe(calls[0].stdin); // プロンプトは組み立て直さない
+    expect(err).toMatch(/直接起動へ切り替え/);
+    expect(process.exitCode).toBe(0); // 直接起動が成功したので正常終了
+  });
+
+  it('bash が無い (ENOENT) 場合も直接起動へ切り替える', () => {
+    const calls = [];
+    const spawnFn = (cmd, args, stdin, onExit) => {
+      calls.push({ cmd });
+      settle(onExit, calls.length === 1
+        ? { code: 1, error: { code: 'ENOENT' } }
+        : { code: 0 });
+      return null;
+    };
+    process.exitCode = 0;
+    runReview(limitOpts(), bridgeDeps({ spawnFn }));
+    expect(calls.map((c) => c.cmd)).toEqual(['bash', 'codex']);
+  });
+
+  it('claude 経路は上限フォールバックの対象外 (従来どおり失敗終了)', () => {
+    let wrote = false;
+    const calls = [];
+    const spawnFn = (cmd, args, stdin, onExit) => {
+      calls.push(cmd);
+      settle(onExit, { code: 1, outputTail: 'usage limit reached' });
+      return null;
+    };
+    process.exitCode = 0;
+    runReview(limitOpts({ reviewer: 'claude' }), bridgeDeps({
+      spawnFn,
+      writeFile: () => { wrote = true; },
+    }));
+    expect(calls).toEqual(['claude']); // フォールバックも直接起動への切り替えも起きない
+    expect(wrote).toBe(false);
+    expect(process.exitCode).toBe(1); // レビュアーの終了コードがそのまま残る
+    process.exitCode = 0;
+  });
+
+  // 定義ファイルの codex_sandbox 検査 (レビューのみで書き込み可能な定義を使わせない)。
+  it('レビューのみで workspace-write の定義なら spawn せず exitCode 2 で止める', () => {
+    let called = false;
+    let err = '';
+    process.exitCode = 0;
+    runReview(limitOpts(), bridgeDeps({
+      files: { [path.join('/home/u', '.claude', 'gpt-agents', `${CODEX_AGENT_REVIEW_NAME}.md`)]: agentDefText('workspace-write') },
+      spawnFn: () => { called = true; return null; },
+      err: (s) => { err += s; },
+    }));
+    expect(called).toBe(false);
+    expect(process.exitCode).toBe(2);
+    expect(err).toMatch(/codex_sandbox/);
+    process.exitCode = 0;
+  });
+
+  it('定義ファイルが無ければ検査せず bridge 経由で起動する', () => {
+    const calls = [];
+    process.exitCode = 0;
+    runReview(limitOpts(), bridgeDeps({
+      spawnFn: (cmd, args, stdin, onExit) => {
+        calls.push({ cmd, args });
+        settle(onExit, { code: 0 });
+        return null;
+      },
+    }));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].cmd).toBe('bash');
+    expect(calls[0].args).toContain(CODEX_AGENT_REVIEW_NAME);
+    expect(process.exitCode).toBe(0);
+  });
+
+  // 承認 never 固定の検査 (bridge が明示していなければ直接起動へ戻す)。
+  it('スクリプトが approval_policy=never を明示していなければ直接起動で走らせ、警告を出す', () => {
+    const calls = [];
+    let err = '';
+    process.exitCode = 0;
+    runReview(limitOpts(), bridgeDeps({
+      files: { [bridgeScriptPath]: 'codex exec --sandbox "$codex_sandbox" -\n' },
+      spawnFn: (cmd, args, stdin, onExit) => {
+        calls.push({ cmd, args });
+        settle(onExit, { code: 0 });
+        return null;
+      },
+      err: (s) => { err += s; },
+    }));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].cmd).toBe('codex');
+    expect(calls[0].args).toEqual(['exec', '-s', 'read-only', '-c', 'approval_policy=never', '-']);
+    expect(err).toMatch(/approval_policy=never/);
+    expect(err).toMatch(/claude-codex-bridge #16/);
   });
 });
