@@ -216,6 +216,15 @@ describe('formatSummary', () => {
     expect(s).toMatch(/\[変更なし\] \/Develop\/b/);
     expect(s).toMatch(/\[エラー\] \(gh が見つかりません\) \/Develop\/c/);
   });
+
+  it('未読の移行ノートがあれば件数を添える (無いプロジェクトには出さない)', () => {
+    const s = formatSummary('/Develop', [
+      { project: '/Develop/a', status: 'updated', changed: 1, migrations: 2 },
+      { project: '/Develop/b', status: 'updated', changed: 1 },
+    ]);
+    expect(s).toMatch(/\[更新\] \(1 件\) \/Develop\/a \(移行ノート 2 件\)/);
+    expect(s).toMatch(/\[更新\] \(1 件\) \/Develop\/b\n/);
+  });
 });
 
 describe('runAll', () => {

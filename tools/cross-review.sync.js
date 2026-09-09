@@ -24,6 +24,11 @@
 //   replace で機械置換する (上流側を書き換えない)。
 // - --check は書き込まず、上流 (ref) と取り込み先の差分 (ドリフト) だけを報告する。
 //   差分があれば exit 1 にして CI で検知できるようにする (取り込み先の docs:check 相当のドリフト検知)。
+// - 上流の移行ノート (docs/migrations/*.md) のうち、まだ見せていないものを同期時に stderr へ表示する。
+//   同期では直せない取り込み先側の作業 (gitignore、package.json の scripts、CLAUDE.md の節) を
+//   人が取りこぼさないようにするため。未読の判定はマニフェストの shownMigrations (表示済みファイル名)
+//   で行う。上流は shallow fetch (depth 1) なので、ノートの since (SHA) と lastSyncedCommit の
+//   祖先関係は判定できない。since は情報用に留め、選別には使わない。
 // - 副作用 (git 実行、一時ディレクトリ、ファイル I/O) は deps で差し替え可能にし、純粋なロジック
 //   (引数解析、マニフェスト検証、置換、同期プラン算出) を単体テストで固定する。cross-review.js と同様。
 
@@ -35,6 +40,8 @@ const os = require('os');
 const path = require('path');
 
 const DEFAULT_MANIFEST_FILENAME = 'cross-review.sync.json';
+// 上流の移行ノートの置き場 (上流ルートからの相対)。マニフェストの migrationsDir で上書きできる。
+const DEFAULT_MIGRATIONS_DIR = 'docs/migrations';
 
 const USAGE = [
   'ai-cross-review 同期スクリプト (上流の「そのままコピーするファイル」を取り込む)',
@@ -53,12 +60,16 @@ const USAGE = [
   '  {',
   '    "upstream": { "repo": "https://github.com/ktysne/ai-cross-review.git", "ref": "main" },',
   '    "lastSyncedCommit": null,',
+  '    "shownMigrations": [],',
   '    "files": [',
   '      { "from": "tools/cross-review.js", "to": "tools/cross-review.js" },',
   '      { "from": "tests/cross-review.test.js", "to": "tests/tools/cross-review.test.js",',
   '        "replace": [ { "from": "../tools/cross-review.js", "to": "../../tools/cross-review.js" } ] }',
   '    ]',
   '  }',
+  '',
+  'shownMigrations には、上流の移行ノート (docs/migrations/*.md) のうち表示済みのファイル名が記録される。',
+  '記録に無いノートは同期時に stderr へ全文表示される (取り込み先で必要な手作業の案内)。',
   '',
   '例:',
   '  node tools/cross-review.sync.js            # 上流から取り込む',
@@ -162,6 +173,16 @@ function validateManifest(manifest, refOverride) {
   if (!Array.isArray(manifest.files) || manifest.files.length === 0) {
     throw new Error('マニフェストの files に取り込むファイルを 1 つ以上指定してください');
   }
+  if (manifest.shownMigrations != null) {
+    if (!Array.isArray(manifest.shownMigrations)
+        || manifest.shownMigrations.some((n) => typeof n !== 'string')) {
+      throw new Error('shownMigrations は表示済み移行ノートのファイル名 (文字列) の配列である必要があります');
+    }
+  }
+  if (manifest.migrationsDir != null
+      && (typeof manifest.migrationsDir !== 'string' || manifest.migrationsDir === '')) {
+    throw new Error('migrationsDir は上流の移行ノート置き場 (上流相対パス) を文字列で指定してください');
+  }
   manifest.files.forEach((entry, idx) => {
     if (!entry || typeof entry !== 'object') {
       throw new Error(`files[${idx}] はオブジェクトである必要があります`);
@@ -263,10 +284,122 @@ function computeSyncPlan(manifest, upstreamDir, destRoot, deps = {}) {
   });
 }
 
+// 移行ノート先頭の YAML 風フロントマター (--- で囲んだ since: <上流 SHA> の 1 行) を読む。
+// since は「このノートが対象とする上流の版」を人が追うための情報で、未読判定には使わない
+// (shallow fetch では SHA の祖先関係を判定できないため)。
+// 想定した形でなければ { ok: false, reason } を返し、呼び出し側がそのノートをスキップする。
+function parseMigrationFrontMatter(raw) {
+  const text = typeof raw === 'string' ? raw.replace(/^\uFEFF/, '') : '';
+  const lines = text.split(/\r?\n/);
+  if (lines[0] !== '---') return { ok: false, reason: '先頭が --- で始まっていません' };
+  const end = lines.indexOf('---', 1);
+  if (end === -1) return { ok: false, reason: 'フロントマターが --- で閉じていません' };
+  let since = null;
+  for (let i = 1; i < end; i++) {
+    const line = lines[i].trim();
+    if (line === '') continue;
+    const m = /^since:\s*(\S+)$/.exec(line);
+    if (!m) return { ok: false, reason: `解釈できない行: ${lines[i]}` };
+    since = m[1];
+  }
+  if (!since) return { ok: false, reason: 'since がありません' };
+  return { ok: true, since };
+}
+
+// 上流の移行ノート置き場にある *.md を列挙する。
+function defaultListMigrations(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.endsWith('.md'))
+    .map((e) => e.name)
+    .sort();
+}
+
+// 上流の移行ノートを読み集める。
+// 戻り値: { present, notes, warnings }。present は置き場そのものの有無 (無ければ機能ごと何もしない。
+// 移行ノートを持たない古い ref との後方互換)。1 件のノートの不備 (読めない / フロントマター不正) は
+// warnings に積んでそのノートだけスキップし、同期全体は止めない。
+function collectMigrationNotes(upstreamDir, migrationsDir, deps = {}) {
+  const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
+  const exists = deps.exists || ((p) => fs.existsSync(p));
+  const listMigrations = deps.listMigrations || defaultListMigrations;
+  const upstreamRoot = path.resolve(upstreamDir);
+  const dirAbs = path.resolve(upstreamRoot, migrationsDir);
+  assertWithinRoot(upstreamRoot, dirAbs, `migrationsDir (${migrationsDir})`);
+  if (!exists(dirAbs)) return { present: false, notes: [], warnings: [] };
+  const notes = [];
+  const warnings = [];
+  let names;
+  try {
+    names = listMigrations(dirAbs);
+  } catch (err) {
+    return { present: false, notes: [], warnings: [`移行ノートの一覧を取得できません: ${migrationsDir} (${(err && err.message) || 'read error'})`] };
+  }
+  for (const name of names) {
+    let body;
+    try {
+      body = readFile(path.join(dirAbs, name));
+    } catch (err) {
+      warnings.push(`移行ノートを読めません: ${name} (${(err && err.message) || 'read error'})`);
+      continue;
+    }
+    const fm = parseMigrationFrontMatter(body);
+    if (!fm.ok) {
+      warnings.push(`移行ノートのフロントマターを解釈できません: ${name} (${fm.reason})`);
+      continue;
+    }
+    notes.push({ name, body, since: fm.since });
+  }
+  return { present: true, notes, warnings };
+}
+
+// 表示する移行ノートと、マニフェストへ書き戻す表示済み一覧を決める純粋関数。
+// notes は { name, body } の配列 (名前順)。
+// 初期化規則:
+// - 初回同期 (lastSyncedCommit が null) で記録が空のとき: 表示せず全件を記録する。
+//   新規導入先はテンプレートを最新から取るので、過去の移行作業は不要なため。雛形
+//   (cross-review.sync.example.json) が shownMigrations: [] を持つので、「キーが無い」だけでなく
+//   「空配列」も初回として扱う (まだ一度も同期していない以上、空の記録は未表示の証拠にならない)。
+// - 既に同期実績があり (lastSyncedCommit が非 null) shownMigrations が無いとき: 全件を未読として表示する。
+//   この機能より前から使っている取り込み先が、溜まっている移行作業を一度で受け取れるようにするため。
+// - それ以外: shownMigrations に無いノートを未読として表示する。
+// 記録は既存の値を保ったまま未読分を追加する (上流から消えたノートの記録も残し、再表示を防ぐ)。
+function selectMigrationNotes({ manifest, notes }) {
+  const list = Array.isArray(notes) ? notes : [];
+  const shown = manifest && Array.isArray(manifest.shownMigrations) ? manifest.shownMigrations : null;
+  const firstSync = !manifest || manifest.lastSyncedCommit == null;
+  const names = list.map((n) => n.name);
+  if (firstSync && (shown == null || shown.length === 0)) return { toShow: [], nextShown: names };
+  if (shown == null) return { toShow: list.slice(), nextShown: names };
+  const seen = new Set(shown);
+  const toShow = list.filter((n) => !seen.has(n.name));
+  return { toShow, nextShown: shown.concat(toShow.map((n) => n.name)) };
+}
+
+// 表示済み一覧をマニフェストへ書き戻す必要があるかを判定する。
+// 記録が無く未読も無い (移行ノートを 1 件も持たない上流) ときは、空配列を足すだけの差分を作らない。
+function shownMigrationsChanged(prev, next) {
+  if (!Array.isArray(prev)) return next.length > 0;
+  if (prev.length !== next.length) return true;
+  return prev.some((name, i) => name !== next[i]);
+}
+
+// 未読の移行ノートを人が読む形に整える (stderr 向け)。ノートは短い前提で全文を出す。
+function formatMigrationNotes(notes) {
+  const lines = [`[cross-review] 未読の移行ノート (${notes.length} 件)`];
+  lines.push('取り込み先で必要な作業が書かれています。同期のあとに対応してください。');
+  for (const n of notes) {
+    lines.push('');
+    lines.push(`--- ${n.name} ---`);
+    lines.push(String(n.body).replace(/\s+$/, ''));
+  }
+  return lines.join('\n') + '\n';
+}
+
 const STATUS_LABEL = { create: '新規', update: '更新', unchanged: '一致' };
 
 // 同期 / 検査を実行する本体。副作用は deps で差し替え可能。
-// 戻り値: { ref, commit, results, drift, wrote } (テストから検証する)。process.exitCode も設定する。
+// 戻り値: { ref, commit, results, drift, wrote, migrations } (テストから検証する)。
+// migrations は今回表示した未読移行ノートのファイル名。process.exitCode も設定する。
 function runSync(opts, deps = {}) {
   const writeOut = deps.out || ((s) => process.stdout.write(s));
   const writeErr = deps.err || ((s) => process.stderr.write(s));
@@ -317,6 +450,20 @@ function runSync(opts, deps = {}) {
     const results = plan.map((p) => ({ from: p.from, to: p.to, status: p.status }));
     const wrote = [];
 
+    // 移行ノートの選別。置き場の読み取りに失敗しても同期は続ける (ノートは案内であって同期の前提ではない)。
+    const migrationsDir = manifest.migrationsDir || DEFAULT_MIGRATIONS_DIR;
+    let collected = { present: false, notes: [], warnings: [] };
+    try {
+      collected = collectMigrationNotes(upstream.dir, migrationsDir, { readFile, exists, listMigrations: deps.listMigrations });
+    } catch (err) {
+      writeErr(`[cross-review] 移行ノートを確認できませんでした: ${(err && err.message) || 'read error'}\n`);
+    }
+    for (const w of collected.warnings) writeErr(`[cross-review] ${w}\n`);
+    // 置き場が無い上流 (移行ノートより前の ref) では機能ごと何もしない。マニフェストの記録も触らない。
+    const selection = collected.present ? selectMigrationNotes({ manifest, notes: collected.notes }) : null;
+    const unread = selection ? selection.toShow : [];
+    const migrations = unread.map((n) => n.name);
+
     writeOut(`上流: ${manifest.upstream.repo} @ ${ref} (${upstream.commit})\n`);
     for (const p of plan) {
       writeOut(`  [${STATUS_LABEL[p.status]}] ${p.to}\n`);
@@ -326,18 +473,27 @@ function runSync(opts, deps = {}) {
     // ドリフトがあれば exit 1 になる。dry-run は同期モードでの「書き込まないプレビュー」専用。
     if (opts.mode === 'check') {
       // 検査のみ: 書き込まず、ドリフトがあれば exit 1。
+      // 移行ノートは件数だけ知らせる (全文は同期時に出す)。取り込み先の手作業の有無はドリフトではないので、
+      // 未読が残っていても exit 1 にはしない。
+      if (unread.length) {
+        writeErr(`[cross-review] 未読の移行ノートが ${unread.length} 件あります (同期時に表示)\n`);
+      }
       if (drift) {
         writeOut(`ドリフトを検出しました (${changed.length} 件)。同期するには --check を外して実行してください。\n`);
         process.exitCode = 1;
       } else {
         writeOut('ドリフトはありません (上流と一致)。\n');
       }
-      return { ref, commit: upstream.commit, results, drift, wrote };
+      return { ref, commit: upstream.commit, results, drift, wrote, migrations };
     }
+
+    // 未読の移行ノートを全文表示する。dry-run でも表示はするが、記録 (shownMigrations) は残さない
+    // ため、同じノートが次の同期でもう一度出る (書き込まないプレビューという dry-run の意味を保つ)。
+    if (unread.length) writeErr(formatMigrationNotes(unread));
 
     if (opts.dryRun) {
       writeOut(drift ? `dry-run: ${changed.length} 件を更新します (書き込みはしていません)。\n` : 'dry-run: 変更はありません。\n');
-      return { ref, commit: upstream.commit, results, drift, wrote };
+      return { ref, commit: upstream.commit, results, drift, wrote, migrations };
     }
 
     // 同期 (コピー): 差分のあるファイルだけ書き込む。
@@ -345,17 +501,21 @@ function runSync(opts, deps = {}) {
       writeFile(p.destAbs, p.expected);
       wrote.push(p.to);
     }
-    // 取り込み元コミットを記録し、どの版から取り込んだかを履歴に残す。記録値 (commit / ref) が
-    // 変わるときだけ書き戻す。同一コミットの再同期では、ユーザが手で整形したマニフェストを毎回
-    // 上書きしない (不要な差分、整形崩れを防ぐ)。上流が進めば取り込みファイルが一致でも記録は更新する。
-    if (manifest.lastSyncedCommit !== upstream.commit || manifest.lastSyncedRef !== ref) {
+    // 取り込み元コミットと表示済み移行ノートを記録し、どの版から取り込んだかを履歴に残す。記録値
+    // (commit / ref / shownMigrations) が変わるときだけ書き戻す。同一コミットの再同期では、ユーザが
+    // 手で整形したマニフェストを毎回上書きしない (不要な差分、整形崩れを防ぐ)。上流が進めば取り込み
+    // ファイルが一致でも記録は更新する。
+    const migrationsRecordChanged = selection
+      && shownMigrationsChanged(manifest.shownMigrations, selection.nextShown);
+    if (manifest.lastSyncedCommit !== upstream.commit || manifest.lastSyncedRef !== ref || migrationsRecordChanged) {
       manifest.lastSyncedCommit = upstream.commit;
       manifest.lastSyncedRef = ref;
+      if (selection) manifest.shownMigrations = selection.nextShown;
       writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     }
 
     writeOut(wrote.length ? `同期しました (${wrote.length} 件を更新)。\n` : '同期しました (変更なし)。\n');
-    return { ref, commit: upstream.commit, results, drift, wrote };
+    return { ref, commit: upstream.commit, results, drift, wrote, migrations };
   } finally {
     if (upstream && typeof upstream.cleanup === 'function') {
       try { upstream.cleanup(); } catch { /* 一時ディレクトリ削除の失敗は無視する */ }
@@ -384,9 +544,15 @@ module.exports = {
   applyReplacements,
   assertWithinRoot,
   computeSyncPlan,
+  parseMigrationFrontMatter,
+  collectMigrationNotes,
+  selectMigrationNotes,
+  shownMigrationsChanged,
+  formatMigrationNotes,
   runSync,
   defaultPrepareUpstream,
   DEFAULT_MANIFEST_FILENAME,
+  DEFAULT_MIGRATIONS_DIR,
   USAGE,
 };
 

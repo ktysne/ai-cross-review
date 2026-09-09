@@ -14,6 +14,10 @@ const {
   applyReplacements,
   assertWithinRoot,
   computeSyncPlan,
+  parseMigrationFrontMatter,
+  collectMigrationNotes,
+  selectMigrationNotes,
+  formatMigrationNotes,
   runSync,
 } = require('../tools/cross-review.sync.js');
 
@@ -463,5 +467,234 @@ describe('sync runSync', () => {
     runSync({ mode: 'sync' }, h.deps);
     expect(process.exitCode).toBe(1);
     expect(h.err.join('')).toMatch(/上流の取得に失敗/);
+  });
+});
+
+describe('parseMigrationFrontMatter', () => {
+  it('since を読む', () => {
+    expect(parseMigrationFrontMatter('---\nsince: abc123\n---\n本文\n')).toEqual({ ok: true, since: 'abc123' });
+  });
+
+  it('CRLF でも読める', () => {
+    expect(parseMigrationFrontMatter('---\r\nsince: abc123\r\n---\r\n本文\r\n').since).toBe('abc123');
+  });
+
+  it('フロントマターが無い / 閉じない / since が無い / 未知の行 は ok:false', () => {
+    expect(parseMigrationFrontMatter('# 見出しだけ\n').ok).toBe(false);
+    expect(parseMigrationFrontMatter('---\nsince: abc\n本文\n').ok).toBe(false);
+    expect(parseMigrationFrontMatter('---\n---\n本文\n').ok).toBe(false);
+    expect(parseMigrationFrontMatter('---\nsince: abc\ntitle: x\n---\n').ok).toBe(false);
+  });
+});
+
+describe('selectMigrationNotes', () => {
+  const notes = [{ name: 'a.md', body: 'A' }, { name: 'b.md', body: 'B' }];
+
+  it('初回同期 (lastSyncedCommit が null) で記録が無ければ、表示せず全件を記録する', () => {
+    const res = selectMigrationNotes({ manifest: { lastSyncedCommit: null }, notes });
+    expect(res.toShow).toEqual([]);
+    expect(res.nextShown).toEqual(['a.md', 'b.md']);
+  });
+
+  it('初回同期で記録が空配列でも、表示せず全件を記録する (雛形の shownMigrations: [] をそのまま使う導入先)', () => {
+    const res = selectMigrationNotes({ manifest: { lastSyncedCommit: null, shownMigrations: [] }, notes });
+    expect(res.toShow).toEqual([]);
+    expect(res.nextShown).toEqual(['a.md', 'b.md']);
+  });
+
+  it('同期実績があり記録が無ければ、全件を未読として表示する', () => {
+    const res = selectMigrationNotes({ manifest: { lastSyncedCommit: 'abc' }, notes });
+    expect(res.toShow.map((n) => n.name)).toEqual(['a.md', 'b.md']);
+    expect(res.nextShown).toEqual(['a.md', 'b.md']);
+  });
+
+  it('記録があれば、記録に無いノートだけ表示する', () => {
+    const res = selectMigrationNotes({ manifest: { lastSyncedCommit: 'abc', shownMigrations: ['a.md'] }, notes });
+    expect(res.toShow.map((n) => n.name)).toEqual(['b.md']);
+    expect(res.nextShown).toEqual(['a.md', 'b.md']);
+  });
+
+  it('全件が記録済みなら表示せず、記録も変わらない', () => {
+    const res = selectMigrationNotes({ manifest: { lastSyncedCommit: 'abc', shownMigrations: ['a.md', 'b.md'] }, notes });
+    expect(res.toShow).toEqual([]);
+    expect(res.nextShown).toEqual(['a.md', 'b.md']);
+  });
+
+  it('上流から消えたノートの記録は残す (再表示を防ぐ)', () => {
+    const res = selectMigrationNotes({ manifest: { lastSyncedCommit: 'abc', shownMigrations: ['old.md'] }, notes });
+    expect(res.nextShown).toEqual(['old.md', 'a.md', 'b.md']);
+  });
+});
+
+describe('collectMigrationNotes', () => {
+  it('置き場が無ければ present:false (機能ごと何もしない)', () => {
+    const fsx = makeFs({});
+    const res = collectMigrationNotes('/up', 'docs/migrations', { ...fsx, listMigrations: () => [] });
+    expect(res).toEqual({ present: false, notes: [], warnings: [] });
+  });
+
+  it('フロントマターが不正なノートは警告してスキップし、他は読む', () => {
+    const fsx = makeFs({
+      '/up/docs/migrations': '',
+      '/up/docs/migrations/ok.md': '---\nsince: abc\n---\n本文\n',
+      '/up/docs/migrations/bad.md': '# フロントマター無し\n',
+    });
+    const res = collectMigrationNotes('/up', 'docs/migrations', {
+      ...fsx,
+      listMigrations: () => ['bad.md', 'ok.md'],
+    });
+    expect(res.present).toBe(true);
+    expect(res.notes.map((n) => n.name)).toEqual(['ok.md']);
+    expect(res.warnings.join('')).toMatch(/bad\.md/);
+  });
+
+  it('置き場が上流ルートの外を指すならエラー', () => {
+    const fsx = makeFs({});
+    expect(() => collectMigrationNotes('/up', '../escape', fsx)).toThrow(/外/);
+  });
+});
+
+describe('formatMigrationNotes', () => {
+  it('件数の見出しとファイル名、本文を含む', () => {
+    const s = formatMigrationNotes([{ name: 'a.md', body: '---\nsince: abc\n---\n本文\n' }]);
+    expect(s).toMatch(/未読の移行ノート \(1 件\)/);
+    expect(s).toMatch(/--- a\.md ---/);
+    expect(s).toMatch(/本文/);
+  });
+});
+
+// 移行ノートの表示と記録がモード (同期 / --dry-run / --check) ごとに変わることを、
+// 仮想 FS と listMigrations の差し替えで固定する。
+describe('runSync の移行ノート', () => {
+  const NOTE = '---\nsince: aaa111\n---\n# 例のノート\n\n## 取り込み先で必要な作業\n- gitignore に一行足す\n';
+
+  // lastSyncedCommit / shownMigrations を差し替えたマニフェストで deps 一式を組む。
+  function migrationDeps(manifestPatch = {}, upstreamFiles = {}) {
+    const manifestObj = {
+      upstream: { repo: 'https://example.com/x.git', ref: 'main' },
+      lastSyncedCommit: 'oldcommit',
+      lastSyncedRef: 'main',
+      files: [{ from: 'tools/cross-review.js', to: 'tools/cross-review.js' }],
+      ...manifestPatch,
+    };
+    const fsx = makeFs({
+      '/proj/tools/cross-review.sync.json': JSON.stringify(manifestObj, null, 2),
+      '/up/tools/cross-review.js': 'E',
+      '/proj/tools/cross-review.js': 'E',
+      '/up/docs/migrations': '',
+      '/up/docs/migrations/2026-09-example.md': NOTE,
+      ...upstreamFiles,
+    });
+    const out = [];
+    const err = [];
+    return {
+      fsx,
+      out,
+      err,
+      deps: {
+        scriptDir: '/proj/tools',
+        readFile: fsx.readFile,
+        writeFile: fsx.writeFile,
+        exists: fsx.exists,
+        listMigrations: () => ['2026-09-example.md'],
+        out: (s) => out.push(s),
+        err: (s) => err.push(s),
+        prepareUpstream: () => ({ dir: '/up', commit: 'newcommit', cleanup: () => {} }),
+      },
+    };
+  }
+
+  const readManifest = (fsx) => JSON.parse(fsx.store.get(path.resolve('/proj/tools/cross-review.sync.json')));
+
+  beforeEach(() => { process.exitCode = 0; });
+  afterAll(() => { process.exitCode = 0; });
+
+  it('sync: 未読ノートを stderr へ全文表示し、shownMigrations に記録する', () => {
+    const h = migrationDeps();
+    const res = runSync({ mode: 'sync', dryRun: false }, h.deps);
+    expect(h.err.join('')).toMatch(/未読の移行ノート \(1 件\)/);
+    expect(h.err.join('')).toMatch(/gitignore に一行足す/);
+    expect(res.migrations).toEqual(['2026-09-example.md']);
+    expect(readManifest(h.fsx).shownMigrations).toEqual(['2026-09-example.md']);
+  });
+
+  it('sync: 記録済みのノートは表示せず、マニフェストも書き換えない', () => {
+    const h = migrationDeps({ lastSyncedCommit: 'newcommit', shownMigrations: ['2026-09-example.md'] });
+    const res = runSync({ mode: 'sync', dryRun: false }, h.deps);
+    expect(res.migrations).toEqual([]);
+    expect(h.err.join('')).not.toMatch(/未読の移行ノート/);
+    expect(h.fsx.writes).toEqual([]);
+  });
+
+  it('sync: 初回同期 (lastSyncedCommit が null) は表示せず記録だけする', () => {
+    const h = migrationDeps({ lastSyncedCommit: null, lastSyncedRef: undefined });
+    const res = runSync({ mode: 'sync', dryRun: false }, h.deps);
+    expect(res.migrations).toEqual([]);
+    expect(h.err.join('')).not.toMatch(/未読の移行ノート/);
+    expect(readManifest(h.fsx).shownMigrations).toEqual(['2026-09-example.md']);
+  });
+
+  it('--dry-run: 表示はするが記録しない', () => {
+    const h = migrationDeps();
+    const res = runSync({ mode: 'sync', dryRun: true }, h.deps);
+    expect(h.err.join('')).toMatch(/未読の移行ノート \(1 件\)/);
+    expect(res.migrations).toEqual(['2026-09-example.md']);
+    expect(h.fsx.writes).toEqual([]);
+  });
+
+  it('--check: 件数の 1 行だけ出し、本文は出さず記録もしない。ドリフト判定にも含めない', () => {
+    const h = migrationDeps();
+    const res = runSync({ mode: 'check', dryRun: false }, h.deps);
+    expect(h.err.join('')).toMatch(/未読の移行ノートが 1 件あります/);
+    expect(h.err.join('')).not.toMatch(/gitignore に一行足す/);
+    expect(h.fsx.writes).toEqual([]);
+    expect(res.drift).toBe(false);
+    expect(process.exitCode).toBe(0); // 未読ノートはドリフトではない
+  });
+
+  it('フロントマターが不正なノートは警告してスキップする (同期は続く)', () => {
+    const h = migrationDeps({}, { '/up/docs/migrations/broken.md': '# フロントマター無し\n' });
+    h.deps.listMigrations = () => ['2026-09-example.md', 'broken.md'];
+    const res = runSync({ mode: 'sync', dryRun: false }, h.deps);
+    expect(h.err.join('')).toMatch(/broken\.md/);
+    expect(res.migrations).toEqual(['2026-09-example.md']);
+    expect(readManifest(h.fsx).shownMigrations).toEqual(['2026-09-example.md']);
+  });
+
+  it('上流に置き場が無ければ何もしない (shownMigrations を作らない)', () => {
+    const manifestObj = {
+      upstream: { repo: 'https://example.com/x.git', ref: 'main' },
+      lastSyncedCommit: 'oldcommit',
+      lastSyncedRef: 'main',
+      files: [{ from: 'tools/cross-review.js', to: 'tools/cross-review.js' }],
+    };
+    const fsx = makeFs({
+      '/proj/tools/cross-review.sync.json': JSON.stringify(manifestObj, null, 2),
+      '/up/tools/cross-review.js': 'E',
+      '/proj/tools/cross-review.js': 'E',
+    });
+    const err = [];
+    const res = runSync({ mode: 'sync', dryRun: false }, {
+      scriptDir: '/proj/tools',
+      readFile: fsx.readFile,
+      writeFile: fsx.writeFile,
+      exists: fsx.exists,
+      listMigrations: () => { throw new Error('呼ばれてはいけない'); },
+      out: () => {},
+      err: (s) => err.push(s),
+      prepareUpstream: () => ({ dir: '/up', commit: 'newcommit', cleanup: () => {} }),
+    });
+    expect(res.migrations).toEqual([]);
+    expect(err.join('')).toBe('');
+    expect(readManifest(fsx).shownMigrations).toBeUndefined();
+  });
+
+  it('migrationsDir で上流の置き場を上書きできる', () => {
+    const h = migrationDeps({ migrationsDir: 'notes' }, { '/up/notes': '', '/up/notes/x.md': NOTE });
+    const seen = [];
+    h.deps.listMigrations = (dir) => { seen.push(dir); return ['x.md']; };
+    const res = runSync({ mode: 'sync', dryRun: false }, h.deps);
+    expect(seen).toEqual([path.resolve('/up/notes')]);
+    expect(res.migrations).toEqual(['x.md']);
   });
 });
