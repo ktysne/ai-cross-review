@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { createRequire } from 'node:module';
+import path from 'node:path';
 
 const require = createRequire(import.meta.url);
 const {
@@ -83,7 +84,12 @@ describe('projectRootForManifest', () => {
 
 describe('findManifests', () => {
   // 仮想ファイルツリー: dir 名 → エントリ配列。
-  const tree = {
+  // findManifests は root からの子パスを path.join で組み立てるため、Windows では '/r/a' が
+  // '\r\a' (root を path.resolve していれば 'D:\r\a') になる。キーを生の POSIX 文字列のままにすると
+  // 一致せず全サブツリーがスキップされるので、キー・root・期待値をすべて path.resolve で正規化する
+  // (POSIX では恒等変換なので挙動は変わらない)。
+  const R = (p) => path.resolve(p);
+  const tree = Object.fromEntries(Object.entries({
     '/r': [dir('a'), dir('b'), dir('node_modules'), dir('.hidden')],
     '/r/a': [dir('tools'), file('package.json')],
     '/r/a/tools': [file('cross-review.sync.json'), file('cross-review.js')],
@@ -94,27 +100,27 @@ describe('findManifests', () => {
     '/r/node_modules/dep': [dir('tools')],
     '/r/node_modules/dep/tools': [file('cross-review.sync.json')],
     '/r/.hidden': [file('cross-review.sync.json')],
-  };
+  }).map(([k, v]) => [R(k), v]));
   const listDir = (d) => {
     if (!(d in tree)) throw new Error('ENOENT');
     return tree[d];
   };
 
   it('tools/ とルート直下のマニフェストを検出し、node_modules / 隠しディレクトリは無視する', () => {
-    const found = findManifests('/r', DEFAULT_DEPTH, { listDir });
+    const found = findManifests(R('/r'), DEFAULT_DEPTH, { listDir });
     expect(found).toEqual([
-      '/r/a/tools/cross-review.sync.json',
-      '/r/b/cross-review.sync.json',
-      '/r/b/sub/tools/cross-review.sync.json',
+      R('/r/a/tools/cross-review.sync.json'),
+      R('/r/b/cross-review.sync.json'),
+      R('/r/b/sub/tools/cross-review.sync.json'),
     ]);
   });
 
   it('depth 制限で深い階層を打ち切る', () => {
     // depth 2 で /r/a/tools (depth 2) は届くが /r/b/sub/tools (depth 3) には届かない。
-    const found = findManifests('/r', 2, { listDir });
-    expect(found).toContain('/r/a/tools/cross-review.sync.json');
-    expect(found).toContain('/r/b/cross-review.sync.json');
-    expect(found).not.toContain('/r/b/sub/tools/cross-review.sync.json');
+    const found = findManifests(R('/r'), 2, { listDir });
+    expect(found).toContain(R('/r/a/tools/cross-review.sync.json'));
+    expect(found).toContain(R('/r/b/cross-review.sync.json'));
+    expect(found).not.toContain(R('/r/b/sub/tools/cross-review.sync.json'));
   });
 
   it('読めないディレクトリはスキップして落ちない', () => {
