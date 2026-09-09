@@ -187,8 +187,21 @@ const OUTPUT_CAPTURE_LIMIT = 4 * 1024 * 1024;
 
 // 上限超過で先頭を捨てたときに、保存する本文の先頭へ入れる注記。保存ファイルはそのまま
 // PR コメントへ転載されるので、「全文ではない」ことがファイル単体で分かるようにする。
-const OUTPUT_TRUNCATED_NOTICE = `（レビュー出力が上限 ${OUTPUT_CAPTURE_LIMIT / 1024 / 1024}MiB を超えたため先頭を切り詰めた。`
-  + `保持しているのは末尾 ${OUTPUT_CAPTURE_LIMIT / 1024 / 1024}MiB）`;
+// 上限の単位は文字数 (UTF-16 コード単位) であってバイト数ではない。JavaScript の文字列長で数えるのが
+// 最も安価で、日本語主体の出力でもメモリ上限の目安 (最大でその 3 倍のバイト数) として足りるため。
+const OUTPUT_TRUNCATED_NOTICE = `（レビュー出力が上限 ${groupDigits(OUTPUT_CAPTURE_LIMIT)} 文字を超えたため先頭を切り詰めた。`
+  + `保持しているのは末尾 ${groupDigits(OUTPUT_CAPTURE_LIMIT)} 文字）`;
+
+// 文字列の末尾 limit 文字を返す。先頭が下位サロゲート (サロゲートペアの後半) になったら 1 文字捨て、
+// 絵文字などの補助文字を境界で割らない (割れたまま書き出すと孤立サロゲートが置換文字になる)。
+function tailChars(text, limit) {
+  const s = String(text == null ? '' : text);
+  if (s.length <= limit) return s;
+  let out = s.slice(-limit);
+  const first = out.charCodeAt(0);
+  if (first >= 0xdc00 && first <= 0xdfff) out = out.slice(1);
+  return out;
+}
 
 // 既定で差分本文から除外するファイル群 (ロックファイル、生成物、ソースマップ)。
 // レビュー価値が低くトークンを浪費しがちなので、明示的に除外する。
@@ -1593,7 +1606,7 @@ function buildRoundComment({ round, reviewer, meta, triage, verify, review } = {
   parts.push(
     `<details><summary>${reviewSectionSummary(round, reviewer, meta, reviewBody)}</summary>`,
     '',
-    reviewBody.length > COMMENT_REVIEW_LIMIT ? reviewBody.slice(-COMMENT_REVIEW_LIMIT) : reviewBody,
+    tailChars(reviewBody, COMMENT_REVIEW_LIMIT),
     '',
     '</details>',
   );
@@ -1896,7 +1909,7 @@ function createStreamCollector() {
     if (outputTail.length > OUTPUT_TAIL_LIMIT) outputTail = outputTail.slice(-OUTPUT_TAIL_LIMIT);
     output += text;
     if (output.length > OUTPUT_CAPTURE_LIMIT) {
-      output = output.slice(-OUTPUT_CAPTURE_LIMIT);
+      output = tailChars(output, OUTPUT_CAPTURE_LIMIT);
       truncated = true;
     }
   };
@@ -2615,6 +2628,7 @@ module.exports = {
   COMMENT_SIZE_WARN_LIMIT,
   OUTPUT_CAPTURE_LIMIT,
   OUTPUT_TRUNCATED_NOTICE,
+  tailChars,
   TRIAGE_TEMPLATE,
   DIFF_SHRINK_STEPS,
   NO_FETCH_ENV,

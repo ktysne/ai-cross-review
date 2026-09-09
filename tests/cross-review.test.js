@@ -2733,6 +2733,37 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
   });
 });
 
+describe('cross-review tailChars (末尾の切り出しでサロゲートペアを割らない)', () => {
+  const { tailChars } = require('../tools/cross-review.js');
+
+  it('上限以内ならそのまま返す', () => {
+    expect(tailChars('abc', 3)).toBe('abc');
+    expect(tailChars('abc', 10)).toBe('abc');
+  });
+
+  it('末尾 limit 文字を返し、先頭が下位サロゲートなら 1 文字捨てる', () => {
+    // 😀 は UTF-16 で 2 コード単位。境界がペアの真ん中に来る位置で切る。
+    const text = `x😀abc`;
+    const cut = tailChars(text, 4); // '\uDE00abc' になる位置
+    expect(cut).toBe('abc');
+    expect(cut.charCodeAt(0) >= 0xdc00 && cut.charCodeAt(0) <= 0xdfff).toBe(false);
+    expect(tailChars(text, 5)).toBe('😀abc'); // ペアが丸ごと入る位置ならそのまま
+  });
+
+  it('保持上限で先頭を捨てるときも孤立サロゲートを残さない (createStreamCollector)', () => {
+    const { createStreamCollector, OUTPUT_CAPTURE_LIMIT } = require('../tools/cross-review.js');
+    const c = createStreamCollector();
+    // 😀 (2 コード単位) + 'a' × (LIMIT-1) で上限 +1 になり、末尾 LIMIT はペアの後半から始まる。
+    c.push('stdout', Buffer.from('😀' + 'a'.repeat(OUTPUT_CAPTURE_LIMIT - 1), 'utf8'));
+    const r = c.end();
+    expect(r.truncated).toBe(true);
+    expect(r.output.includes('�')).toBe(false);
+    const first = r.output.charCodeAt(0);
+    expect(first >= 0xdc00 && first <= 0xdfff).toBe(false);
+    expect(r.output).toBe('a'.repeat(OUTPUT_CAPTURE_LIMIT - 1));
+  });
+});
+
 describe('cross-review createStreamCollector (出力のデコードと保持上限)', () => {
   const aBytes = Buffer.from('あ', 'utf8'); // 3 バイト。塊の境界で割れる代表として使う。
 
