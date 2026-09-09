@@ -9,6 +9,6 @@ since: 035a746efba75fb4f2cbbff7f0d3576fef6575ab
 
 ## 取り込み先で必要な作業
 - CLAUDE.md / AGENTS.md の相互レビュー要約を、新しい 3 択（別ベンダー / 同ベンダーの客観サブエージェント / 行わない）とブレーカー節に合わせて書き換える。
-- `.cross-review.md` に「指摘の出し方」4 項目（分類と重大度順、到達しない値への指摘を出さない、blocker と要修正は 10 件まで、反例を一行）を足す。
+- `.cross-review.md` に「指摘の出し方」4 項目（分類と重大度順、到達しない値への指摘を出さない、blocker と要修正は上位 10 件まで詳述し残りは重大度を保って一覧化、反例を一行）を足す。
 
 vendored ファイル（`.claude/skills/cross-review/SKILL.md`、`docs/cross-review.md`、`.cross-review.example.md`、`tools/cross-review.js`）は同期で更新されるので、取り込み先での手作業は不要です。
