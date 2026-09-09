@@ -2,3 +2,5 @@ node_modules/
 tools/node_modules/
 *.log
 .DS_Store
+# 相互レビューの往復回数・直前レビュー SHA・非対応指摘を持つローカル状態 (共有しない)
+.cross-review-state.json

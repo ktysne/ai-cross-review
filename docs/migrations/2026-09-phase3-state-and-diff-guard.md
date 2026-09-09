@@ -1,0 +1,23 @@
+---
+since: cf22c99160b042775a7029d61bfecf20e7bc6199
+---
+# 状態ファイル、既定 base の解決、差分ガードの段階的縮退
+
+`tools/cross-review.js` に 3 点を足しました。
+
+- **状態ファイル `.cross-review-state.json`**（リポジトリ直下、`<スクリプト>/../` で解決）に、ブランチ単位で「往復回数（`round`）」「直前レビュー時の `HEAD`（`lastReviewedSha`）」「非対応と判断した指摘（`dismissed`）」を記録します。`round` はレビュアーを実際に起動した（`subagent` はプロンプトを出力した）ときだけ増え、差分なし、ガードによる中断、引数エラーでは増えません。`--uncommitted` では `lastReviewedSha` を更新しません。JSON が壊れているときは警告して無視し、書き戻しません。`--no-state` で読み書きを無効化できます。
+  - `node tools/cross-review.js state` で現在値を表示、`state --reset` でその枝の記録を消去、`dismiss "<要約>"` で非対応と判断した指摘を登録します。登録した指摘は以降のレビュープロンプトへ「前回までに非対応と判断した指摘（再指摘しない）」の節として添えられます。
+  - 3 往復目の実行では、レビュアー起動前に stderr へ警告が出ます（実行は止めません。サーキットブレーカーの判断は従来どおり運用側が行います）。
+- **既定 base の解決順**を「前回レビュー SHA → PR の base（`gh pr view --json baseRefName`）→ `origin/main` → ローカル `main`」に変えました。決めた base と解決方法は差分サイズと同じ stderr 行に必ず出ます（例：`[cross-review] base: origin/develop (PR の base) / レビュー差分サイズ: 12.3KB`）。`gh` が無い、PR が無いときは従来の `origin/main` 解決に戻るので、挙動は変わりません。fetch に失敗したときは、使うローカル参照の最終コミット日時を添えて警告します。`CROSS_REVIEW_NO_FETCH=1` で fetch と `gh` の呼び出しを省けます。
+  - 妥当性確認で `--base <レビュー時 SHA>` を手で渡す必要が無くなりました。2 回目以降は `--base` を付けずに実行すれば増分差分になります。
+- **差分サイズガードの段階的縮退**。閾値（既定 256KB）を超えたら即中断せず、ファイル単位の要約閾値を 32KB → 16KB → 8KB と下げて要約を掛け直し、収まった段階で続行します（git は再実行しません）。それでも収まらないときだけ中断し、試した閾値をメッセージに出します。`--strict-diff-guard` で従来の即中断に戻せます（`--max-file-diff-kb 0` のときも縮退しません）。
+
+## 取り込み先で必要な作業
+- `.gitignore` に `.cross-review-state.json` を足す。ローカルの作業状態であり、共有すると取り込み先のマニフェスト同期と衝突するため。
+- `CLAUDE.md` / `AGENTS.md` の相互レビュー節を 2 点直す。
+  - 往復回数の数え方：「会話内で数える（CLI は往復状態を持たない）」→ 「CLI がブランチ単位で数え、3 回目の実行で警告する（判断は従来どおり運用側）。現在値は `node tools/cross-review.js state`、数え直しは `state --reset`」。
+  - 妥当性確認：「`--base <レビュー時 SHA>` で増分差分だけ送れる」→ 「2 回目以降は `--base` を付けずに実行すれば前回レビュー SHA が自動で base になる」。
+  - 既定 base の記述（`origin/main` 優先解決）を、新しい解決順に合わせる。
+- `gh` を入れていない環境でも作業は不要（PR の base 解決は黙ってスキップされ、従来の `origin/main` 解決に戻る）。
+
+vendored ファイル（`.claude/skills/cross-review/SKILL.md`、`docs/cross-review.md`、`tools/cross-review.js`）は同期で更新されるので、取り込み先での手作業は不要です。

@@ -13,6 +13,8 @@
 //   node tools/cross-review.js codex --fix --instructions notes.md  # レビュアーの指摘 (notes.md) を渡して Codex に修正させる
 //   node tools/cross-review.js codex --uncommitted    # 未コミットの作業ツリー差分をレビュー
 //   node tools/cross-review.js claude --base develop  # 比較先ブランチを変更
+//   node tools/cross-review.js state            # この枝の往復回数・直前レビュー SHA・非対応指摘を表示
+//   node tools/cross-review.js dismiss "<要約>" # 非対応と判断した指摘を記録し、以降再指摘させない
 //   npm run review:codex                        # = node tools/cross-review.js codex
 //   npm run review:codex:fix                    # = node tools/cross-review.js codex --fix
 //   npm run review:claude -- --uncommitted      # npm 経由で追加引数を渡す (-- が必要)
@@ -55,6 +57,17 @@
 //   (.cross-review.md) を置き換えず、それに加えてプロンプトへ添える別系統。一方のレビュアーが
 //   出した指摘をファイルに書き、`codex --fix --instructions <path>` で他方に直接修正させる用途を
 //   一級でサポートする (この目的で CROSS_REVIEW_CHECKLIST を流用すると観点が消えるため非推奨)。
+// - 往復回数、直前レビュー時の HEAD、非対応と判断した指摘は、リポジトリ直下の
+//   `.cross-review-state.json` にブランチ単位で記録する。これらはブランチごとに決まる値で、
+//   会話の外に置かないと妥当性確認のたびに人が SHA を控え直すことになるため。状態遷移は純粋関数
+//   (nextState / withDismissed / withoutBranch) に閉じ、読み書きだけを I/O 側 (readState /
+//   writeState) に置く。ファイルが壊れているときは警告して無視し、書き戻さない (記録を消さない)。
+// - 既定 base は「前回レビュー SHA → PR の base ブランチ → origin/main → ローカル main」の順で
+//   解決する。前者ほど差分が小さく、かつ人の指定なしで決まる情報だから。決めた base と解決方法は
+//   差分サイズと同じ stderr 行に必ず出し、stale な比較に気づけるようにする。
+// - 差分サイズが閾値を超えたときは即中断せず、ファイル単位の要約閾値を段階的に下げて縮退を試す。
+//   閾値をわずかに超えただけの差分で再実行を強いると、差分収集を二重に行うことになるため。
+//   縮退しても収まらないときだけ中断する (--strict-diff-guard で従来の即中断に戻せる)。
 // - claude の --uncommitted は Codex の --uncommitted (staged+unstaged+untracked) と結果を
 //   揃えるため、tracked 変更 (git diff HEAD) に加えて未追跡ファイルも new file 差分として含める。
 // - 前提: codex / claude レビュアーは「スタンドアロン CLI」が PATH にあること
@@ -78,6 +91,24 @@ const CHECKLIST_FILENAME = '.cross-review.md';
 
 // 除外パターンファイル名。観点 (.cross-review.md) と同じ解決順で探す。
 const IGNORE_FILENAME = '.cross-review-ignore';
+
+// 状態ファイル名。ブランチ単位で「往復回数 / 直前レビュー時の HEAD / 非対応と判断した指摘」を持つ。
+// 観点と違い cwd では探さず、スクリプト位置からリポジトリ直下に固定して解決する
+// (サブディレクトリから起動しても同じ枝の記録を読み書きするため。resolveStatePath 参照)。
+// git 管理下に置かない前提なので、取り込み先でも .gitignore へ追加する。
+const STATE_FILENAME = '.cross-review-state.json';
+
+// 差分サイズガードの段階的縮退で試す「ファイル単位の要約閾値」(KB)。大きい順に下げる。
+// 既定 64KB で全体閾値を超えた差分を、再度 git を叩かずに縮めるための段。
+const DIFF_SHRINK_STEPS = [32, 16, 8];
+
+// fetch を省略する環境変数。オフライン作業で毎回 10 秒待たされるのを避ける。
+// 「ネットワークに触らない」意味なので、fetch だけでなく gh の呼び出しも省く。
+const NO_FETCH_ENV = 'CROSS_REVIEW_NO_FETCH';
+
+// gh から受け取ったブランチ名として許す形。git の引数へ埋める前に検査し、
+// `-` 始まりのような「オプションと解釈されうる値」を弾く。
+const SAFE_REF_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 
 // claude-codex-bridge の Codex 起動スクリプト。ホームディレクトリからの相対パスで探す
 // (環境変数 CROSS_REVIEW_CODEX_AGENT で明示指定も可能)。
@@ -296,10 +327,37 @@ const REVIEWER_NOTES_HEADER = [
   '（仕様判断・設計選択が要る事項は修正せず指摘として残すルールは従来どおり）',
 ].join('\n');
 
+// 状態ファイルの dismissed (前の往復で非対応と判断した指摘) をプロンプトへ添えるときの見出し。
+const DISMISSED_HEADER = [
+  '【前回までに非対応と判断した指摘（再指摘しない）】',
+  '以下は過去の往復で検討したうえで非対応と判断済みです。同じ指摘を繰り返さないでください',
+  '（新しい根拠がある場合に限り、その根拠を明示したうえで指摘してください）。',
+].join('\n');
+
+// dismissed 一覧を申し送り (--instructions) と同じ系統の追加テキストに整える純粋関数。
+// buildReviewPrompt の引数を増やさず、申し送りの後ろに続く節として渡すためのもの。
+// 1 件も無ければ null を返す (呼び出し側は何も足さない)。
+function buildDismissedSection(dismissed) {
+  const items = Array.isArray(dismissed)
+    ? dismissed.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim())
+    : [];
+  if (items.length === 0) return null;
+  return [DISMISSED_HEADER, items.map((s) => `- ${s}`).join('\n')].join('\n');
+}
+
+// 申し送り本文と dismissed の節を 1 本のテキストに結合する純粋関数。
+// どちらか一方だけでもそのまま返し、両方あれば申し送りの後ろに dismissed を置く。
+function joinReviewerNotes(instructions, dismissedSection) {
+  const parts = [instructions, dismissedSection]
+    .map((s) => (s == null ? '' : String(s).trim()))
+    .filter(Boolean);
+  return parts.length > 0 ? parts.join('\n\n') : null;
+}
+
 const USAGE = [
   'Claude ↔ Codex 相互レビュー CLI ブリッジ',
   '',
-  '使い方: node tools/cross-review.js <codex|claude|subagent> [options]',
+  '使い方: node tools/cross-review.js <codex|claude|subagent|state|dismiss> [options]',
   '',
   'レビュアー:',
   '  codex      codex スタンドアロン CLI でレビュー (既定 read-only、--fix で workspace-write)',
@@ -308,14 +366,25 @@ const USAGE = [
   '             codex/claude CLI を spawn できない環境向け。出力を Agent ツールの客観レビュー用',
   '             サブエージェントへ渡してレビューさせる。--fix も可 (FIX 指示付きで出力)。',
   '',
+  'サブコマンド (状態ファイル .cross-review-state.json の操作):',
+  '  state             現在のブランチの往復回数・直前レビュー SHA・非対応指摘を JSON で表示',
+  '  state --reset     現在のブランチの記録を消す',
+  '  dismiss "<要約>"  非対応と判断した指摘を記録する (以降のレビュープロンプトに',
+  '                    「再指摘しない」節として添えられる。同じ要約は重複追加しない)',
+  '',
   'options:',
   '  --fix                 修正まで依頼 (codex: workspace-write で直接編集 / subagent: FIX 指示付きで出力。claude CLI 経路は非対応)',
   '  --uncommitted         未コミットの作業ツリー差分 (tracked + untracked) をレビュー',
-  '  --base <ref>          比較先ブランチを指定 (既定: 未指定なら origin/main を優先解決→無ければ main)',
-  '  --max-diff-kb <n>     レビュー差分サイズの上限 (KB)。超過時はレビュアーを起動せず中断',
+  '  --base <ref>          比較先ブランチ / コミットを指定 (既定: 前回レビュー SHA → PR の base',
+  '                        → origin/main → ローカル main の順に解決)',
+  '  --max-diff-kb <n>     レビュー差分サイズの上限 (KB)。超過時はファイル要約の閾値を段階的に',
+  '                        下げて縮退を試み、それでも収まらなければ起動せず中断',
   '                        (既定 256。0 でガード無効。環境変数 CROSS_REVIEW_MAX_DIFF_KB でも指定可)',
   '  --max-file-diff-kb <n> ファイル単位の差分がこの KB を超えたら本文を stat 要約に置換',
-  '                        (既定 64。0 で無効。環境変数 CROSS_REVIEW_MAX_FILE_DIFF_KB でも指定可)',
+  '                        (既定 64。0 で無効 = 段階的縮退も行わない。',
+  '                        環境変数 CROSS_REVIEW_MAX_FILE_DIFF_KB でも指定可)',
+  '  --strict-diff-guard   差分サイズ超過時に段階的縮退を試さず、従来どおり即中断する',
+  '  --no-state            状態ファイル (.cross-review-state.json) の読み書きを行わない (CI 等)',
   '  --no-exclude          既定除外も含めすべての除外を無効化 (緊急時の逃げ道)',
   '  --instructions <path> レビュアーからの申し送り・重点指摘ファイルをプロンプトへ添付',
   '                        (観点 .cross-review.md は置き換えず追加。--fix と併用で指摘を直接修正させる)',
@@ -338,6 +407,12 @@ const USAGE = [
   '  (環境変数 CROSS_REVIEW_CHECKLIST でパス指定可。スクリプト位置からも解決。無ければ汎用観点)。',
   '差分の除外: ロックファイル・生成物 (package-lock.json / *.min.js / *.map 等) を既定で除外します',
   '  (.cross-review-ignore で追加可。環境変数 CROSS_REVIEW_IGNORE でパス指定可。--no-exclude で無効化)。',
+  '既定 base: 状態ファイルの前回レビュー SHA → gh pr view の base ブランチ (origin/<name>)',
+  '  → origin/main → ローカル main の順に解決し、決めた base と解決方法を差分サイズと同じ行に出します',
+  '  (--base 明示時と --uncommitted 時はこの解決を行いません)。',
+  '  環境変数 CROSS_REVIEW_NO_FETCH=1 で fetch と gh の呼び出しを省きます (オフライン作業向け)。',
+  '状態ファイル: <スクリプト>/../.cross-review-state.json にブランチ単位で往復回数・直前レビュー SHA・',
+  '  非対応と判断した指摘を記録します (git 管理外を想定。--no-state で無効化)。',
   '',
   '例:',
   '  npm run review:codex',
@@ -353,6 +428,10 @@ const USAGE = [
   '      (bridge を使わず codex を直接起動する)',
   '  node tools/cross-review.js codex --no-fallback',
   '      (利用上限でも subagent 代替へ切り替えない)',
+  '  node tools/cross-review.js state',
+  '      (現在のブランチの往復回数・直前レビュー SHA・非対応指摘を表示)',
+  '  node tools/cross-review.js dismiss "運用上到達しない入力への指摘"',
+  '      (非対応と判断した指摘を記録し、以降のレビューで再指摘させない)',
 ].join('\n');
 
 // 非負整数として解釈できれば数値を、できなければ null を返す。
@@ -366,11 +445,19 @@ function parseNonNegativeInt(value) {
   return Number.isSafeInteger(n) ? n : null;
 }
 
-// process.argv.slice(2) を受け取り、レビュアーと差分スコープを解釈する。
+// process.argv.slice(2) を受け取り、サブコマンド (レビュアー / state / dismiss) と
+// 差分スコープを解釈する。
 function parseArgs(argv) {
   const args = argv.slice();
   const out = {
+    // 実行するサブコマンド。'review' はレビュアー (codex / claude / subagent) の実行、
+    // 'state' は状態ファイルの表示と初期化、'dismiss' は非対応と判断した指摘の記録。
+    command: 'review',
     reviewer: null,
+    dismissText: null, // dismiss の要約 (command === 'dismiss' のときだけ使う)
+    reset: false, // state --reset (現在の枝の記録を消す)
+    noState: false, // --no-state で状態ファイルの読み書きを無効化する (CI 等)
+    strictDiffGuard: false, // --strict-diff-guard で差分ガードを従来の即中断に戻す
     mode: 'base',
     baseRef: 'main',
     baseExplicit: false, // --base / --base= が指定されたか (既定 base 解決をスキップする判定に使う)
@@ -399,6 +486,12 @@ function parseArgs(argv) {
       out.fix = true;
     } else if (a === '--no-exclude') {
       out.noExclude = true;
+    } else if (a === '--no-state') {
+      out.noState = true;
+    } else if (a === '--strict-diff-guard') {
+      out.strictDiffGuard = true;
+    } else if (a === '--reset') {
+      out.reset = true;
     } else if (a === '--no-codex-agent') {
       out.codexAgent = false;
     } else if (a === '--no-fallback') {
@@ -505,7 +598,25 @@ function parseArgs(argv) {
       rest.push(a);
     }
   }
-  if (!out.help && !out.error) {
+  if (!out.help && !out.error && (rest[0] === 'state' || rest[0] === 'dismiss')) {
+    // レビュアー以外のサブコマンド。状態ファイルだけを扱うので、レビュアーは決めない。
+    out.command = rest[0];
+    if (out.noState) {
+      out.error = '--no-state は state / dismiss サブコマンドとは併用できません';
+    } else if (out.command === 'dismiss') {
+      if (out.reset) {
+        out.error = '--reset は state サブコマンドでのみ使えます';
+      } else {
+        // 引用符を付け忘れた複数語の要約も 1 件として受ける。
+        const text = rest.slice(1).join(' ').trim();
+        if (!text) {
+          out.error = 'dismiss には非対応と判断した指摘の要約が必要です (例: dismiss "この指摘は運用上到達しない")';
+        } else {
+          out.dismissText = text;
+        }
+      }
+    }
+  } else if (!out.help && !out.error) {
     out.reviewer = rest[0] || null;
     // reviewer: codex / claude は外部スタンドアロン CLI を起動する。subagent は外部 CLI を起動せず、
     // 組み立てたレビュープロンプトを stdout に出すだけ (リモートコントロール環境で codex/claude CLI を
@@ -526,6 +637,8 @@ function parseArgs(argv) {
         out.error = `--codex-agent ${CODEX_AGENT_FIX_NAME} は書き込み可能な定義です (--fix 無しでは使えません)`;
       }
     }
+    // --reset は状態ファイルの初期化用なので、レビュアー実行では受け付けない。
+    if (!out.error && out.reset) out.error = '--reset は state サブコマンドでのみ使えます';
   }
   return out;
 }
@@ -567,6 +680,181 @@ function defaultGitRunner(args, opts) {
     throw new Error(`git ${args.join(' ')} に失敗しました: ${detail}`);
   }
   return res.stdout || '';
+}
+
+// gh CLI を実行して stdout を返す。gh 不在、PR 無し、タイムアウトはいずれも null
+// (呼び出し側は黙って次の解決へ進む)。git と同じく 10 秒でタイムアウトさせる。
+// Windows では gh が .cmd shim のことがあるため、レビュアー CLI と同じ解決を通す。
+function defaultGhRunner(args) {
+  const resolved = resolveReviewerCommandForSpawn('gh');
+  const res = spawnSync(resolved.cmd, args, {
+    encoding: 'utf8',
+    timeout: 10000,
+    maxBuffer: 1024 * 1024,
+    shell: resolved.shell,
+  });
+  if (res.status !== 0) return null;
+  return res.stdout || '';
+}
+
+// 環境変数で fetch (とネットワークを使う gh 呼び出し) を省略する指定かを判定する。
+// 未設定、空文字、`0`、`false` は「省略しない」。
+function isNoFetch(env) {
+  const raw = (env || process.env)[NO_FETCH_ENV];
+  if (raw == null) return false;
+  const s = String(raw).trim().toLowerCase();
+  return s !== '' && s !== '0' && s !== 'false';
+}
+
+// SHA の短縮表記 (通知用)。git の既定と同じ 7 桁。
+function shortSha(sha) {
+  return String(sha == null ? '' : sha).slice(0, 7);
+}
+
+// 状態ファイルのパス。cwd に依存させず、スクリプト位置からリポジトリ直下に固定する。
+function resolveStatePath(deps = {}) {
+  const scriptDir = deps.scriptDir || __dirname;
+  return path.join(scriptDir, '..', STATE_FILENAME);
+}
+
+// 1 ブランチ分の初期状態。
+function emptyBranchState() {
+  return { round: 0, lastReviewedSha: null, dismissed: [] };
+}
+
+// 読み込んだ JSON を既知の形へ正規化する純粋関数。型が違う値は初期値へ落とす
+// (手で編集された状態ファイルでも後段が壊れないようにする)。
+function normalizeState(raw) {
+  const out = { branches: {} };
+  const src = (raw && typeof raw === 'object' && raw.branches && typeof raw.branches === 'object')
+    ? raw.branches
+    : {};
+  for (const [name, value] of Object.entries(src)) {
+    if (!name) continue;
+    const v = (value && typeof value === 'object') ? value : {};
+    const round = (Number.isSafeInteger(v.round) && v.round >= 0) ? v.round : 0;
+    const sha = (typeof v.lastReviewedSha === 'string' && v.lastReviewedSha.trim())
+      ? v.lastReviewedSha.trim()
+      : null;
+    const dismissed = Array.isArray(v.dismissed)
+      ? v.dismissed.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim())
+      : [];
+    out.branches[name] = { round, lastReviewedSha: sha, dismissed };
+  }
+  return out;
+}
+
+// state から 1 ブランチ分を取り出す純粋関数 (記録が無ければ初期状態)。
+function branchStateOf(state, branch) {
+  const normalized = normalizeState(state);
+  if (!branch) return emptyBranchState();
+  return normalized.branches[branch] || emptyBranchState();
+}
+
+// レビュー実行 1 回分の状態遷移を返す純粋関数 (I/O は持たない)。
+//   - round は codex / claude / subagent のどの経路でも 1 増やす (1 往復 = レビュー 1 回)。
+//     引数 reviewer はどの経路が走ったかを示すが、どれも 1 往復として数えるので遷移には影響しない。
+//   - sha が無いときは lastReviewedSha を据え置く。--uncommitted は作業ツリー差分で
+//     「この SHA 以降の増分」の意味を持たないため、往復だけ数えて SHA は更新しない。
+//   - branch が無い (取得できない) ときは何も記録しない。
+function nextState(state, { branch, sha, reviewer } = {}) {
+  const base = normalizeState(state);
+  if (!branch) return base;
+  const prev = branchStateOf(base, branch);
+  const branches = { ...base.branches };
+  branches[branch] = {
+    round: prev.round + 1,
+    lastReviewedSha: sha ? String(sha) : prev.lastReviewedSha,
+    dismissed: prev.dismissed.slice(),
+  };
+  return { branches };
+}
+
+// 非対応と判断した指摘を 1 件足す純粋関数。同じ要約は重複して追加しない。
+function withDismissed(state, branch, text) {
+  const base = normalizeState(state);
+  const value = String(text == null ? '' : text).trim();
+  if (!branch || !value) return base;
+  const prev = branchStateOf(base, branch);
+  if (prev.dismissed.includes(value)) return base;
+  const branches = { ...base.branches };
+  branches[branch] = { ...prev, dismissed: prev.dismissed.concat(value) };
+  return { branches };
+}
+
+// 1 ブランチ分の記録を消す純粋関数 (state --reset)。他の枝の記録は残す。
+function withoutBranch(state, branch) {
+  const base = normalizeState(state);
+  if (!branch) return base;
+  const branches = { ...base.branches };
+  delete branches[branch];
+  return { branches };
+}
+
+// 状態ファイルを読む。戻り値は { path, state, corrupt }。
+// 見つからなければ空の状態 (corrupt:false)。JSON が壊れている / 読めない場合は corrupt:true にし、
+// 呼び出し側は「警告して無視、書き戻さない」を選べるようにする (既存の記録を上書きで消さないため)。
+function readState(deps = {}) {
+  const exists = deps.exists || ((p) => fs.existsSync(p));
+  const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
+  const statePath = resolveStatePath(deps);
+  let present = false;
+  try {
+    present = !!exists(statePath);
+  } catch {
+    present = false; // 存在確認そのものが失敗したら「無い」と同じ扱いにする。
+  }
+  if (!present) return { path: statePath, state: normalizeState(null), corrupt: false };
+  let body;
+  try {
+    body = String(readFile(statePath));
+  } catch {
+    return { path: statePath, state: normalizeState(null), corrupt: true };
+  }
+  try {
+    return { path: statePath, state: normalizeState(JSON.parse(body)), corrupt: false };
+  } catch {
+    return { path: statePath, state: normalizeState(null), corrupt: true };
+  }
+}
+
+// 状態ファイルを書く。書けなくてもレビュー自体は続けたいので、失敗は警告 1 行で false を返す。
+// 書き込みの差し替えは deps.writeStateFile。deps.writeFile (利用上限時の代替プロンプト) とは
+// 別の口にして、片方のテスト注入がもう片方を巻き込まないようにする。
+function writeState(state, deps = {}) {
+  const writeFile = deps.writeStateFile || ((p, body) => fs.writeFileSync(p, body, 'utf8'));
+  const warn = deps.warn || ((m) => process.stderr.write(m));
+  const statePath = resolveStatePath(deps);
+  try {
+    writeFile(statePath, `${JSON.stringify(normalizeState(state), null, 2)}\n`);
+    return true;
+  } catch (err) {
+    warn(`[cross-review] 状態ファイルを書けません: ${statePath} (${(err && err.message) || 'write error'})\n`);
+    return false;
+  }
+}
+
+// 現在のブランチ名。detached HEAD では git が 'HEAD' を返すので、それをそのままキーに使う。
+// 取得できなければ null (呼び出し側は状態の読み書きを行わない)。
+function currentBranchName(gitRun) {
+  const out = gitRun(['rev-parse', '--abbrev-ref', 'HEAD'], { allowFailure: true });
+  if (out == null) return null;
+  const name = String(out).trim();
+  return name || null;
+}
+
+// 現在の HEAD の SHA。SHA として解釈できない出力は記録しない (状態ファイルを汚さない)。
+function currentHeadSha(gitRun) {
+  const out = gitRun(['rev-parse', 'HEAD'], { allowFailure: true });
+  if (out == null) return null;
+  const sha = String(out).trim();
+  return /^[0-9a-f]{7,64}$/i.test(sha) ? sha : null;
+}
+
+// SHA がコミットとして存在するか (rebase や amend で消えた SHA を base に使わないための確認)。
+function commitExists(gitRun, sha) {
+  if (!sha) return false;
+  return gitRun(['cat-file', '-e', `${sha}^{commit}`], { allowFailure: true }) != null;
 }
 
 // 差分本文と「除外したが変更のあったファイル一覧」を組み立てる。
@@ -647,38 +935,108 @@ function collectReviewDiff(opts, gitRun) {
   return { diffText: parts.join('\n'), excludedFiles };
 }
 
-// 既定 base (--base 未指定、コミット済み差分モード) のとき、ローカル main が stale だと
-// merge-base が古くなり HEAD 取り込み済みの main 側コミットまで差分に混入する。これを避けるため、
-// origin/main をベストエフォートで取得し、解決できれば base を origin/main に切り替える。
-// 解決順: fetch (ベストエフォート) → origin/main が verify できれば 'origin/main' → だめなら 'main'。
-//   - opts.mode === 'uncommitted' または opts.baseExplicit のときは何もせず opts.baseRef を返す
-//     (ユーザが明示した base / 未コミット差分には介入しない。fetch もしない)。
-//   - 人向け通知 (fetch 失敗、origin/main 採用) は deps.err (無ければ process.stderr.write) へ。
-// gitRun は (args, opts) => stdout | null の関数 (allowFailure 経路で失敗時 null)。
-function resolveBaseRef(opts, gitRun, deps = {}) {
-  if (opts.mode === 'uncommitted' || opts.baseExplicit) return opts.baseRef;
-  const writeErr = deps.err || ((s) => process.stderr.write(s));
-  // a. origin/main をベストエフォートで取得 (10 秒タイムアウト)。失敗は警告 1 行で続行。
-  // 成否は allowFailure 経路の契約「null = 失敗 / null 以外 (空文字含む) = 成功」で判定する
-  // (--quiet 付き fetch は成功時 stdout が空。gitRun を差し替えるときもこの契約を守ること)。
-  const fetched = gitRun(
-    ['fetch', 'origin', 'main', '--quiet'],
-    { allowFailure: true, timeoutMs: 10000 },
-  );
-  if (fetched == null) {
-    writeErr('[cross-review] origin の取得に失敗しました (オフライン等)。ローカルの参照で続行します。\n');
+// gh から「この枝の PR の base ブランチ」を得て、origin/<name> として解決できれば返す。
+// gh 不在、PR 無し、失敗、解決不能はいずれも null で、呼び出し側は黙って次の解決へ進む
+// (gh を入れていない取り込み先の挙動を変えないため)。
+// noFetch のときはネットワークに触らないので gh も呼ばない。
+function resolvePrBaseRef(gitRun, deps, noFetch) {
+  if (noFetch) return null;
+  const ghRun = deps.ghRun || defaultGhRunner;
+  let name = null;
+  try {
+    const out = ghRun(['pr', 'view', '--json', 'baseRefName', '-q', '.baseRefName']);
+    name = out == null ? null : String(out).trim();
+  } catch {
+    name = null; // gh の起動自体に失敗しても既定解決へ進む。
   }
-  // b. origin/main が verify できれば base に採用。
+  if (!name || !SAFE_REF_NAME.test(name)) return null;
+  // origin/main と同じくベストエフォートで取得してから verify する。
+  gitRun(['fetch', 'origin', name, '--quiet'], { allowFailure: true, timeoutMs: 10000 });
+  const verified = gitRun(
+    ['rev-parse', '--verify', '--quiet', `origin/${name}`],
+    { allowFailure: true },
+  );
+  return verified != null ? `origin/${name}` : null;
+}
+
+// 既定 base (--base 未指定、コミット済み差分モード) を解決し、「何をどう決めたか」まで返す。
+// 戻り値: { ref, source, label, display }
+//   - source: 'uncommitted' | 'explicit' | 'state' | 'pr' | 'origin-main' | 'local-main'
+//   - label / display: 差分サイズと同じ stderr 行に出す人向けの表記。
+// 既定時の解決順は次の 3 段で、いずれも失敗すれば次へ進む。
+//   1. 状態ファイルの lastReviewedSha (往復 2 回目以降は前回レビュー以降の増分だけを送る)。
+//      SHA が現存しない (rebase や amend で消えた) 場合は使わない。
+//   2. PR の base ブランチ (gh pr view --json baseRefName)。スタック PR で親 PR の差分が
+//      混ざるのを防ぐ。origin/<name> が verify できたときだけ採用する。
+//   3. origin/main をベストエフォートで取得して verify (ローカル main が stale だと
+//      merge-base が古くなり、HEAD 取り込み済みの main 側コミットまで差分に混入するため)。
+//      解決できなければ従来どおりローカル main。
+// opts.mode === 'uncommitted' と opts.baseExplicit では何もせず opts.baseRef を返す
+// (ユーザが明示した base / 未コミット差分には介入しない。fetch も gh も呼ばない)。
+// 人向け通知は deps.err (無ければ process.stderr.write) へ。
+// gitRun は (args, opts) => stdout | null の関数 (allowFailure 経路で失敗時 null)。
+// deps.branchState に状態ファイルの当該ブランチ分を渡すと 1 段目が有効になる。
+function resolveBaseSelection(opts, gitRun, deps = {}) {
+  if (opts.mode === 'uncommitted') {
+    return { ref: opts.baseRef, source: 'uncommitted', label: '未コミットの作業ツリー差分', display: opts.baseRef };
+  }
+  if (opts.baseExplicit) {
+    return { ref: opts.baseRef, source: 'explicit', label: '--base 指定', display: opts.baseRef };
+  }
+  const writeErr = deps.err || ((s) => process.stderr.write(s));
+  const noFetch = isNoFetch(deps.env);
+
+  // 1. 前回レビュー時の SHA。
+  const branchState = deps.branchState || null;
+  const lastSha = branchState && branchState.lastReviewedSha;
+  if (lastSha && commitExists(gitRun, lastSha)) {
+    const round = (branchState.round || 0) + 1;
+    writeErr(`[cross-review] base として前回レビュー時の ${shortSha(lastSha)} を使用します (往復 ${round} 回目。--base で変更可)。\n`);
+    return { ref: lastSha, source: 'state', label: '前回レビュー時の SHA', display: shortSha(lastSha) };
+  }
+
+  // 2. PR の base ブランチ。
+  const prBase = resolvePrBaseRef(gitRun, deps, noFetch);
+  if (prBase) {
+    writeErr(`[cross-review] base として PR の base ブランチ ${prBase} を使用します (--base で変更可)。\n`);
+    return { ref: prBase, source: 'pr', label: 'PR の base', display: prBase };
+  }
+
+  // 3. origin/main → ローカル main。
+  // fetch の成否は allowFailure 経路の契約「null = 失敗 / null 以外 (空文字含む) = 成功」で判定する
+  // (--quiet 付き fetch は成功時 stdout が空。gitRun を差し替えるときもこの契約を守ること)。
+  let fetchFailed = false;
+  if (!noFetch) {
+    const fetched = gitRun(
+      ['fetch', 'origin', 'main', '--quiet'],
+      { allowFailure: true, timeoutMs: 10000 },
+    );
+    fetchFailed = fetched == null;
+  }
   const verified = gitRun(
     ['rev-parse', '--verify', '--quiet', 'origin/main'],
     { allowFailure: true },
   );
-  if (verified != null) {
-    writeErr('[cross-review] base として origin/main を使用します (--base で変更可)。\n');
-    return 'origin/main';
+  const ref = verified != null ? 'origin/main' : 'main';
+  if (fetchFailed) {
+    // どのローカル参照で比較するのかと、それがいつのコミットかまで出す
+    // (stale な参照との比較に気づけるようにする)。日時が取れない場合は省く。
+    const dated = gitRun(['log', '-1', '--format=%ci', ref], { allowFailure: true });
+    const when = dated == null ? '' : String(dated).trim();
+    writeErr(`[cross-review] origin の取得に失敗しました (オフライン等)。取得済みの ${ref} で続行します`
+      + `${when ? ` (${ref} の最終コミット: ${when})` : ''}。\n`);
   }
-  // c. 解決できなければ従来どおりローカル main。
-  return 'main';
+  if (ref === 'origin/main') {
+    writeErr('[cross-review] base として origin/main を使用します (--base で変更可)。\n');
+    return { ref, source: 'origin-main', label: 'origin/main 優先解決', display: ref };
+  }
+  return { ref: 'main', source: 'local-main', label: 'ローカル main', display: 'main' };
+}
+
+// 既定 base の解決結果からブランチ / SHA だけを取り出す薄いラッパ。
+// 解決方法まで要る呼び出し側は resolveBaseSelection を使う。
+function resolveBaseRef(opts, gitRun, deps = {}) {
+  return resolveBaseSelection(opts, gitRun, deps).ref;
 }
 
 // レビュー差分サイズのガード閾値 (KB) を解決する。優先順:
@@ -743,6 +1101,41 @@ function summarizeLargeFileDiffs(diffText, maxFileDiffKb) {
     return `${header}\n(この差分は ${kb}KB・追加 ${added} 行 / 削除 ${removed} 行のため本文を省略。レビューに必要なら作業ツリーのファイルを個別に読むこと)`;
   });
   return { text: outChunks.join('\n'), replacedCount };
+}
+
+// 差分サイズガードの段階的縮退を計算する純粋関数。
+// 全体閾値 (maxDiffKb) を超えた差分に対し、ファイル単位の要約閾値を steps の順に下げて
+// summarizeLargeFileDiffs を再適用し、全体閾値以下に収まった段で止める。
+// diffText には「要約を掛ける前の元の差分」を渡す。段ごとに元から計算し直すので git は再実行しない。
+// steps の既定は DIFF_SHRINK_STEPS。現在の閾値以上の段は縮まないので飛ばす。
+// 戻り値: { text, usedFileKb, replacedCount, fits, tried }
+//   - fits:true なら text をそのままレビューへ回してよい。
+//   - fits:false のときは最後に試した (最も強い) 段の結果を返す。呼び出し側は中断する。
+//   - 要約が無効 (maxFileDiffKb が 0) か全体ガードが無効 (maxDiffKb が 0) なら縮退しない。
+function shrinkDiffToFit(diffText, { maxDiffKb, maxFileDiffKb, steps } = {}) {
+  const tried = [];
+  if (!(maxFileDiffKb > 0) || !(maxDiffKb > 0)) {
+    return { text: diffText, usedFileKb: maxFileDiffKb, replacedCount: 0, fits: false, tried };
+  }
+  const candidates = (steps || DIFF_SHRINK_STEPS)
+    .filter((kb) => kb > 0 && kb < maxFileDiffKb)
+    .sort((a, b) => b - a);
+  let last = null;
+  for (const kb of candidates) {
+    tried.push(kb);
+    const summarized = summarizeLargeFileDiffs(diffText, kb);
+    const fits = Buffer.byteLength(summarized.text, 'utf8') / 1024 <= maxDiffKb;
+    last = {
+      text: summarized.text,
+      usedFileKb: kb,
+      replacedCount: summarized.replacedCount,
+      fits,
+      tried: tried.slice(),
+    };
+    if (fits) return last;
+  }
+  // 試せる段が無かった (既に最小の段より小さい閾値だった) 場合も「収まらない」で返す。
+  return last || { text: diffText, usedFileKb: maxFileDiffKb, replacedCount: 0, fits: false, tried };
 }
 
 // ファイル単位の差分置換しきい値 (KB) を解決する。優先順:
@@ -1197,10 +1590,27 @@ function runReview(opts, deps = {}) {
       return null;
     }
   }
-  // 既定 base (--base 未指定、コミット済み差分) のときは origin/main を優先解決する
-  // (ローカル main が stale だと無関係な差分が混入するため)。opts を直接書き換えず、
-  // 解決後の base を以降のスコープ表記、差分収集で使う。
-  const resolvedBaseRef = resolveBaseRef(opts, gitRun, deps);
+  // bridge の解決や状態ファイルの警告は、他の通知と同じ stderr の出口 (writeErr) へ流す。
+  const invDeps = deps.warn ? deps : { ...deps, warn: writeErr };
+  // 状態ファイル (往復回数 / 直前レビュー SHA / 非対応と判断した指摘) を読む。
+  // --no-state、ブランチ名を取れない、ファイルが壊れているときは記録を使わず読み書きもしない。
+  const readStateFn = deps.readState || readState;
+  const writeStateFn = deps.writeState || writeState;
+  const branch = opts.noState ? null : currentBranchName(gitRun);
+  const loadedState = branch ? readStateFn(invDeps) : null;
+  if (loadedState && loadedState.corrupt) {
+    writeErr(`[cross-review] 状態ファイルを読めません (JSON 不正)。無視して続行します: ${loadedState.path}\n`);
+  }
+  const stateUsable = !!(loadedState && !loadedState.corrupt);
+  const branchState = stateUsable ? branchStateOf(loadedState.state, branch) : null;
+  // レビュアーを起動する前の HEAD を控える。--fix は作業ツリーしか触らないので、
+  // 起動前後で HEAD は変わらない。
+  const headSha = stateUsable && opts.mode !== 'uncommitted' ? currentHeadSha(gitRun) : null;
+  // 既定 base (--base 未指定、コミット済み差分) は「前回レビュー SHA → PR の base →
+  // origin/main → ローカル main」の順に解決する。opts を直接書き換えず、解決後の base を
+  // 以降のスコープ表記、差分収集で使う。
+  const baseSelection = resolveBaseSelection(opts, gitRun, { ...invDeps, branchState });
+  const resolvedBaseRef = baseSelection.ref;
   // 除外パススペックを解決する (--no-exclude 指定時は無効化)。観点と同じ流儀で .cross-review-ignore を読む。
   const excludePatterns = opts.noExclude
     ? []
@@ -1229,31 +1639,75 @@ function runReview(opts, deps = {}) {
     return null;
   }
   // 巨大なファイル差分を stat 要約へ置換する (全体ガードの前に行う = 置換で縮んだ分はガードに掛からない)。
+  // 縮退 (shrinkDiffToFit) は要約前の本文から計算し直すので、元の差分をここで保持しておく。
+  const rawDiffText = diffText;
   const maxFileDiffKb = resolveMaxFileDiffKb(opts, deps.env);
-  const summarized = summarizeLargeFileDiffs(diffText, maxFileDiffKb);
+  const summarized = summarizeLargeFileDiffs(rawDiffText, maxFileDiffKb);
   diffText = summarized.text;
   if (summarized.replacedCount > 0) {
     writeErr(`[cross-review] 大きなファイル差分 ${summarized.replacedCount} 件を要約に置換しました (--max-file-diff-kb で調整可)\n`);
   }
-  // 差分サイズを常に表示し、閾値超過ならレビュアーを起動せず中断する (トークン浪費、stale base 検知)。
-  const diffBytes = Buffer.byteLength(diffText, 'utf8');
-  const diffKb = diffBytes / 1024;
-  writeErr(`[cross-review] レビュー差分サイズ: ${diffKb.toFixed(1)}KB\n`);
   const maxDiffKb = resolveMaxDiffKb(opts, deps.env);
-  if (maxDiffKb > 0 && diffKb > maxDiffKb) {
+  const overGuard = (text) => maxDiffKb > 0 && Buffer.byteLength(text, 'utf8') / 1024 > maxDiffKb;
+  // 閾値を超えたら即中断せず、ファイル単位の要約閾値を段階的に下げて縮退を試す
+  // (閾値をわずかに超えただけの差分で再実行させないため。git は再実行しない)。
+  // --strict-diff-guard と --max-file-diff-kb 0 (要約無効) のときは従来どおり即中断する。
+  let shrink = null;
+  if (overGuard(diffText) && !opts.strictDiffGuard && maxFileDiffKb > 0) {
+    shrink = shrinkDiffToFit(rawDiffText, { maxDiffKb, maxFileDiffKb });
+    if (shrink.fits) {
+      diffText = shrink.text;
+      writeErr(`[cross-review] 差分が閾値 ${maxDiffKb}KB を超えたため、ファイル単位の要約閾値を ${shrink.usedFileKb}KB へ下げて ${shrink.replacedCount} 件を要約に置換しました。\n`);
+    }
+  }
+  // 差分サイズは常に表示する (トークン浪費、stale base の検知)。
+  // どの base とどの解決方法で比較したのかを同じ行に出し、比較対象が分からないまま
+  // レビューが回ることを防ぐ。
+  const diffKb = Buffer.byteLength(diffText, 'utf8') / 1024;
+  const scopeLine = baseSelection.source === 'uncommitted'
+    ? `対象: ${baseSelection.label}`
+    : `base: ${baseSelection.display} (${baseSelection.label})`;
+  writeErr(`[cross-review] ${scopeLine} / レビュー差分サイズ: ${diffKb.toFixed(1)}KB\n`);
+  if (overGuard(diffText)) {
+    let reason = '';
+    if (opts.strictDiffGuard) {
+      reason = '  --strict-diff-guard 指定のため、ファイル要約による段階的縮退は試していません。\n';
+    } else if (maxFileDiffKb <= 0) {
+      reason = '  --max-file-diff-kb 0 (ファイル要約が無効) のため、段階的縮退は試していません。\n';
+    } else if (shrink && shrink.tried.length > 0) {
+      reason = `  ファイル単位の要約閾値を ${shrink.tried.join('KB → ')}KB まで下げても収まりませんでした。\n`;
+    }
     writeErr(
       `[cross-review] レビュー差分が閾値 ${maxDiffKb}KB を超えました (${diffKb.toFixed(1)}KB)。レビュアーを起動せず中断します。\n`
+      + reason
       + '  考えられる原因: ローカル main が stale (git fetch origin main 後に再実行 / --base origin/main を明示)、生成物・lock ファイルの混入。\n'
       + '  意図的に大きい差分なら --max-diff-kb <n> を引き上げるか --max-diff-kb 0 でガードを無効化してください。\n',
     );
     process.exitCode = 1;
     return null;
   }
-  const prompt = buildReviewPrompt(diffText, resolvedOpts, checklist, instructions, excludedFiles);
+  // 非対応と判断した指摘は、申し送り (--instructions) と同じ系統の追加テキストとして
+  // 観点と申し送りの後ろへ添える (buildReviewPrompt の引数は増やさない)。
+  const reviewerNotes = joinReviewerNotes(
+    instructions,
+    branchState ? buildDismissedSection(branchState.dismissed) : null,
+  );
+  const prompt = buildReviewPrompt(diffText, resolvedOpts, checklist, reviewerNotes, excludedFiles);
+  // サーキットブレーカーの 3 往復に達する実行は、起動前に知らせる (判断は運用側に残すので止めない)。
+  if (branchState && branchState.round + 1 >= 3) {
+    writeErr(`[cross-review] この枝の往復は ${branchState.round + 1} 回目です。3 往復到達時の扱いはサーキットブレーカーの規則を参照してください。\n`);
+  }
+  // レビュアーを実際に起動した (または subagent のプロンプトを出力した) ときだけ往復を数える。
+  // 差分なし、ガード中断、引数エラーではここに到達しないので記録されない。
+  const recordRound = () => {
+    if (!stateUsable) return;
+    writeStateFn(
+      nextState(loadedState.state, { branch, sha: headSha, reviewer: opts.reviewer }),
+      invDeps,
+    );
+  };
   // reviewerInvocation も解決後の opts で揃える (現状 baseRef は参照しないが、プロンプトの
   // スコープ表記と起動引数が将来食い違わないよう、解決後の値だけを下流に渡す)。
-  // bridge の解決で出る警告は、他の通知と同じ stderr の出口 (writeErr) へ流す。
-  const invDeps = deps.warn ? deps : { ...deps, warn: writeErr };
   const inv = reviewerInvocation(resolvedOpts, invDeps);
   if (inv.error) {
     // 定義ファイルの codex_sandbox が --fix の有無と食い違う。レビューのみで書き込み可能な
@@ -1268,6 +1722,7 @@ function runReview(opts, deps = {}) {
     // 通知は stderr に分けて、stdout を「そのまま客観サブエージェントへ渡せるプロンプト」に保つ。
     writeErr(inv.notice);
     writeOut(prompt + '\n');
+    recordRound();
     return null;
   }
   // レビュアーを起動し、終了コードで「bridge 未導入」「利用上限」を切り分ける。
@@ -1297,7 +1752,75 @@ function runReview(opts, deps = {}) {
       });
     });
   };
-  return start(inv);
+  // bridge 未導入で直接起動へやり直す経路は start の中で再帰するので、記録は start の外で 1 回だけ行う
+  // (1 回のレビュー実行を 2 往復と数えないため)。
+  const child = start(inv);
+  recordRound();
+  return child;
+}
+
+// `state` サブコマンド。現在の枝の記録を JSON で表示し、--reset ならその枝の記録を消す。
+// deps は runReview と同じ流儀で gitRun / 出力 / 状態ファイルの読み書きを差し替えられる。
+function runStateCommand(opts, deps = {}) {
+  const gitRun = deps.gitRun || defaultGitRunner;
+  const writeOut = deps.out || ((s) => process.stdout.write(s));
+  const writeErr = deps.err || ((s) => process.stderr.write(s));
+  const stateDeps = deps.warn ? deps : { ...deps, warn: writeErr };
+  const readStateFn = deps.readState || readState;
+  const writeStateFn = deps.writeState || writeState;
+  const branch = currentBranchName(gitRun);
+  if (!branch) {
+    writeErr('[cross-review] 現在のブランチ名を取得できません (git リポジトリの中で実行してください)。\n');
+    process.exitCode = 1;
+    return null;
+  }
+  const loaded = readStateFn(stateDeps);
+  if (loaded.corrupt) {
+    // 壊れたファイルへ書き戻すと他の枝の記録まで消えるので、読み書きどちらも行わない。
+    writeErr(`[cross-review] 状態ファイルを読めません (JSON 不正)。手で確認するか削除してください: ${loaded.path}\n`);
+    process.exitCode = 1;
+    return null;
+  }
+  if (opts.reset) {
+    writeStateFn(withoutBranch(loaded.state, branch), stateDeps);
+    writeErr(`[cross-review] ${branch} の記録を消しました: ${loaded.path}\n`);
+    return null;
+  }
+  const current = branchStateOf(loaded.state, branch);
+  writeOut(`${JSON.stringify({ branch, statePath: loaded.path, ...current }, null, 2)}\n`);
+  return null;
+}
+
+// `dismiss "<要約>"` サブコマンド。現在の枝の非対応指摘へ 1 件足す (重複は足さない)。
+function runDismissCommand(opts, deps = {}) {
+  const gitRun = deps.gitRun || defaultGitRunner;
+  const writeErr = deps.err || ((s) => process.stderr.write(s));
+  const stateDeps = deps.warn ? deps : { ...deps, warn: writeErr };
+  const readStateFn = deps.readState || readState;
+  const writeStateFn = deps.writeState || writeState;
+  const branch = currentBranchName(gitRun);
+  if (!branch) {
+    writeErr('[cross-review] 現在のブランチ名を取得できません (git リポジトリの中で実行してください)。\n');
+    process.exitCode = 1;
+    return null;
+  }
+  const loaded = readStateFn(stateDeps);
+  if (loaded.corrupt) {
+    writeErr(`[cross-review] 状態ファイルを読めません (JSON 不正)。手で確認するか削除してください: ${loaded.path}\n`);
+    process.exitCode = 1;
+    return null;
+  }
+  const text = String(opts.dismissText == null ? '' : opts.dismissText).trim();
+  const before = branchStateOf(loaded.state, branch).dismissed.length;
+  const updated = withDismissed(loaded.state, branch, text);
+  const after = branchStateOf(updated, branch).dismissed.length;
+  if (after === before) {
+    writeErr(`[cross-review] 同じ要約が既に記録されています (${branch}): ${text}\n`);
+    return null;
+  }
+  writeStateFn(updated, stateDeps);
+  writeErr(`[cross-review] 非対応と判断した指摘を記録しました (${branch}): ${text}\n`);
+  return null;
 }
 
 function main() {
@@ -1309,6 +1832,14 @@ function main() {
   if (opts.error) {
     process.stderr.write(`${opts.error}\n\n${USAGE}\n`);
     process.exitCode = 2;
+    return;
+  }
+  if (opts.command === 'state') {
+    runStateCommand(opts);
+    return;
+  }
+  if (opts.command === 'dismiss') {
+    runDismissCommand(opts);
     return;
   }
   runReview(opts);
@@ -1331,11 +1862,30 @@ module.exports = {
   emitFallbackPrompt,
   collectReviewDiff,
   resolveBaseRef,
+  resolveBaseSelection,
   resolveMaxDiffKb,
   resolveMaxFileDiffKb,
   summarizeLargeFileDiffs,
+  shrinkDiffToFit,
   buildReviewPrompt,
+  buildDismissedSection,
+  joinReviewerNotes,
+  resolveStatePath,
+  emptyBranchState,
+  normalizeState,
+  branchStateOf,
+  nextState,
+  withDismissed,
+  withoutBranch,
+  readState,
+  writeState,
+  currentBranchName,
+  currentHeadSha,
+  commitExists,
+  isNoFetch,
   runReview,
+  runStateCommand,
+  runDismissCommand,
   loadChecklist,
   loadInstructions,
   loadIgnorePatterns,
@@ -1343,6 +1893,9 @@ module.exports = {
   resolveReviewerCommandForSpawn,
   CHECKLIST_FILENAME,
   IGNORE_FILENAME,
+  STATE_FILENAME,
+  DIFF_SHRINK_STEPS,
+  NO_FETCH_ENV,
   CODEX_AGENT_REVIEW_NAME,
   CODEX_AGENT_FIX_NAME,
   CODEX_AGENT_EXIT_MISSING,
@@ -1354,6 +1907,7 @@ module.exports = {
   REVIEW_ONLY_INSTRUCTION,
   FIX_INSTRUCTION,
   REVIEWER_NOTES_HEADER,
+  DISMISSED_HEADER,
 };
 
 if (require.main === module) main();

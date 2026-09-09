@@ -19,7 +19,7 @@ git の差分をそのままレビュアー CLI（`codex` / `claude`）へ渡し
 - **CLI を起動できない環境にも対応**：クラウド / リモート実行で `codex` / `claude` CLI を起動できない（または API 接続が通らない）ときは、`subagent` モードがレビュー用プロンプトを stdout に出力します。  
   それを Claude の客観サブエージェントへ渡せば、外部 CLI 無しで同じ観点のレビューを回せます（後述「CLI を起動できない環境（`subagent` モード）」）。  
 - **トークンを節約**：ロックファイル、生成物（`package-lock.json` / `*.min.js` / `*.map` など）を既定で差分から除外し、巨大なファイル差分は stat 要約に置換します。  
-  既定の比較先は `origin/main` を優先解決し、差分サイズが閾値を超えたらレビュアーを起動せず中断します（stale なローカル `main` による差分の肥大を防ぎます）。  
+  既定の比較先は「前回レビュー SHA → PR の base → `origin/main` → ローカル `main`」の順に解決し、差分サイズが閾値を超えたらファイル要約で縮退を試みたうえで、収まらなければレビュアーを起動せず中断します（stale なローカル `main` による差分の肥大を防ぎます）。  
 - **観点を分離**：プロジェクト固有のレビュー観点は `.cross-review.md` に分けてあります。  
   本体は完全に汎用です。  
   導入するときは、決まったファイル一式をコピーし、`.cross-review.md` だけを自分のプロジェクト向けに編集します。  
@@ -41,7 +41,7 @@ git の差分をそのままレビュアー CLI（`codex` / `claude`）へ渡し
 ## 使い方
 
 ```bash
-npm run review:codex                      # 現在のブランチ (main との差分) を Codex がレビュー (read-only)
+npm run review:codex                      # 現在のブランチ (既定 base との差分) を Codex がレビュー (read-only)
 npm run review:codex:fix                  # 同上 + 見つかった問題を Codex が直接修正 (workspace-write)
 npm run review:claude                     # 現在のブランチを Claude がレビュー
 npm run review:codex -- --uncommitted     # 未コミット差分 (tracked + untracked) をレビュー
@@ -56,6 +56,8 @@ node tools/cross-review.js codex --base origin/main
 node tools/cross-review.js subagent --uncommitted   # CLI を起動せずレビュー用プロンプトを stdout に出力 (CLI を使えない環境用)
 node tools/cross-review.js codex --no-codex-agent   # claude-codex-bridge (codex-agent.sh) を経由せず codex を直接起動
 node tools/cross-review.js codex --no-fallback      # Codex が利用上限でも subagent 代替へ切り替えず失敗終了する
+node tools/cross-review.js state                    # この枝の往復回数・直前レビュー SHA・非対応指摘を表示 (--reset で消去)
+node tools/cross-review.js dismiss "<要約>"          # 非対応と判断した指摘を記録し、以降のレビューで再指摘させない
 node tools/cross-review.js --help
 ```
 
@@ -97,9 +99,11 @@ CLI は起動できても、ネットワーク/API 接続が許可されずレ�
 |------------|------|
 | `--fix` | 修正まで依頼する（`codex` は `-s workspace-write` で直接修正 / `subagent` は FIX 指示付きでプロンプト出力。`claude` CLI 経路は非対応） |
 | `--uncommitted` | 未コミットの作業ツリー差分（tracked + untracked）をレビュー |
-| `--base <ref>` | 比較先ブランチを指定（既定：未指定なら `origin/main` を優先解決し、無ければ `main`） |
-| `--max-diff-kb <n>` | レビュー差分サイズの上限（KB）。超過時はレビュアーを起動せず中断（既定 256、`0` で無効。環境変数 `CROSS_REVIEW_MAX_DIFF_KB` でも指定可） |
+| `--base <ref>` | 比較先のブランチまたはコミットを指定（既定：未指定なら 前回レビュー SHA → PR の base → `origin/main` → ローカル `main` の順に解決） |
+| `--max-diff-kb <n>` | レビュー差分サイズの上限（KB）。超過時はファイル要約の閾値を段階的に下げて縮退を試み、収まらなければ起動せず中断（既定 256、`0` で無効。環境変数 `CROSS_REVIEW_MAX_DIFF_KB` でも指定可） |
 | `--max-file-diff-kb <n>` | ファイル単位の差分がこの KB を超えたら本文を stat 要約に置換（既定 64、`0` で無効。環境変数 `CROSS_REVIEW_MAX_FILE_DIFF_KB` でも指定可） |
+| `--strict-diff-guard` | 差分サイズ超過時に段階的縮退を試さず、従来どおり即中断する |
+| `--no-state` | 状態ファイル（`.cross-review-state.json`）の読み書きを行わない（CI 等） |
 | `--no-exclude` | 既定除外も含めすべての除外を無効化（生成物、ロックファイルもまとめてレビューしたいとき） |
 | `--instructions <path>` | レビュアーへの申し送り、重点指摘ファイルをプロンプトに追加する（観点 `.cross-review.md` は置き換えず追加。`--fix` と併用すると、その指摘を直接修正させる） |
 | `-h`, `--help` | ヘルプを表示 |
@@ -173,8 +177,9 @@ docs/generated/*.md
    同期スクリプトを使うなら `sync` / `sync:check` も足す（後述「同期スクリプトで更新する」）。  
 4. Claude Code を使うなら `.claude/skills/cross-review/SKILL.md` をコピーする（実行手順スキル、汎用）。  
    このスキルは vendored（上書き更新の対象）なので**直接編集せず**、プロジェクト固有の運用（検証コマンド、CI、同期スクリプト名など）は `.cross-review.md` や自分の doc 側に書く。  
-5. `codex` / `claude` の CLI を PATH に通す（CLI を起動できないときは `subagent` モードを使う）。  
-6. 更新するときは、コピーするファイルを上書きでコピーし直すだけ。  
+5. `.gitignore` に `.cross-review-state.json` を足す（往復回数、直前レビュー SHA、非対応と判断した指摘を持つローカル状態。共有しない）。  
+6. `codex` / `claude` の CLI を PATH に通す（CLI を起動できないときは `subagent` モードを使う）。  
+7. 更新するときは、コピーするファイルを上書きでコピーし直すだけ。  
    自分で編集するファイルは触らない。  
    毎回手でコピーする代わりに、後述の**同期スクリプト**でこの上書きコピーを自動化できる。
 

@@ -44,7 +44,45 @@ const {
   REVIEW_ONLY_INSTRUCTION,
   FIX_INSTRUCTION,
   REVIEWER_NOTES_HEADER,
+  DISMISSED_HEADER,
+  resolveBaseSelection,
+  shrinkDiffToFit,
+  normalizeState,
+  branchStateOf,
+  nextState,
+  withDismissed,
+  withoutBranch,
+  readState,
+  writeState,
+  currentBranchName,
+  currentHeadSha,
+  isNoFetch,
+  buildDismissedSection,
+  joinReviewerNotes,
+  runStateCommand,
+  runDismissCommand,
+  STATE_FILENAME,
 } = require('../tools/cross-review.js');
+
+// 実行環境の状態ファイル (.cross-review-state.json) と gh CLI に依存しないためのスタブ。
+// runReview の deps へ展開して使う。状態は「空・壊れていない」、gh は「PR 無し」を返す。
+const isolated = (overrides = {}) => ({
+  readState: () => ({ path: '<test-state>', state: { branches: {} }, corrupt: false }),
+  writeState: () => true,
+  ghRun: () => null,
+  ...overrides,
+});
+
+// 状態ファイルの読み書きをメモリ上で行うスタブ。書かれた内容を後から検証できる。
+const memoryState = (initial = { branches: {} }, opts = {}) => {
+  const store = { state: initial, writes: [], corrupt: !!opts.corrupt };
+  return {
+    store,
+    readState: () => ({ path: '<test-state>', state: store.state, corrupt: store.corrupt }),
+    writeState: (next) => { store.writes.push(next); store.state = next; return true; },
+    ghRun: () => null,
+  };
+};
 
 describe('cross-review parseArgs', () => {
   it('codex を既定スコープ (base=main) で解釈する', () => {
@@ -216,6 +254,52 @@ describe('cross-review parseArgs', () => {
 
   it('不明なオプションはエラー', () => {
     expect(parseArgs(['codex', '--bogus']).error).toMatch(/不明なオプション/);
+  });
+
+  it('--no-state / --strict-diff-guard を取り込む (既定はどちらも false)', () => {
+    const d = parseArgs(['codex']);
+    expect(d.noState).toBe(false);
+    expect(d.strictDiffGuard).toBe(false);
+    const o = parseArgs(['codex', '--no-state', '--strict-diff-guard']);
+    expect(o.noState).toBe(true);
+    expect(o.strictDiffGuard).toBe(true);
+    expect(o.error).toBeNull();
+  });
+
+  it('state / dismiss サブコマンドを受け付ける (レビュアーは決めない)', () => {
+    const s = parseArgs(['state']);
+    expect(s.command).toBe('state');
+    expect(s.reviewer).toBeNull();
+    expect(s.error).toBeNull();
+    const r = parseArgs(['state', '--reset']);
+    expect(r.reset).toBe(true);
+    expect(r.error).toBeNull();
+    const d = parseArgs(['dismiss', '運用上到達しない入力への指摘']);
+    expect(d.command).toBe('dismiss');
+    expect(d.dismissText).toBe('運用上到達しない入力への指摘');
+    expect(d.error).toBeNull();
+  });
+
+  it('dismiss は引用符を付け忘れた複数語も 1 件の要約として受ける', () => {
+    expect(parseArgs(['dismiss', 'A', 'の', '指摘']).dismissText).toBe('A の 指摘');
+  });
+
+  it('dismiss に要約が無ければエラー', () => {
+    expect(parseArgs(['dismiss']).error).toMatch(/要約が必要/);
+  });
+
+  it('--reset は state サブコマンドでのみ使える', () => {
+    expect(parseArgs(['codex', '--reset']).error).toMatch(/--reset は state/);
+    expect(parseArgs(['dismiss', 'A', '--reset']).error).toMatch(/--reset は state/);
+  });
+
+  it('--no-state と state / dismiss サブコマンドは併用できない', () => {
+    expect(parseArgs(['state', '--no-state']).error).toMatch(/--no-state/);
+    expect(parseArgs(['dismiss', 'A', '--no-state']).error).toMatch(/--no-state/);
+  });
+
+  it('レビュアー実行の既定 command は review', () => {
+    expect(parseArgs(['codex']).command).toBe('review');
   });
 
   it('--help はヘルプ要求として扱う (エラーにしない)', () => {
@@ -1134,10 +1218,13 @@ describe('cross-review loadChecklist', () => {
 });
 
 describe('cross-review resolveBaseRef', () => {
+  // gh と環境変数は実行環境に依存させない (gh 不在 = PR 無しの既定挙動を固定する)。
+  const baseDeps = (extra = {}) => ({ ghRun: () => null, env: {}, ...extra });
+
   it('--base 明示時は fetch も rev-parse も呼ばれず baseRef をそのまま返す', () => {
     const calls = [];
     const gitRun = (args) => { calls.push(args); return ''; };
-    const out = resolveBaseRef({ mode: 'base', baseRef: 'develop', baseExplicit: true }, gitRun);
+    const out = resolveBaseRef({ mode: 'base', baseRef: 'develop', baseExplicit: true }, gitRun, baseDeps());
     expect(out).toBe('develop');
     expect(calls).toEqual([]); // git は一切呼ばれない
   });
@@ -1145,7 +1232,7 @@ describe('cross-review resolveBaseRef', () => {
   it('uncommitted 時も git を呼ばず baseRef をそのまま返す', () => {
     const calls = [];
     const gitRun = (args) => { calls.push(args); return ''; };
-    const out = resolveBaseRef({ mode: 'uncommitted', baseRef: 'main', baseExplicit: false }, gitRun);
+    const out = resolveBaseRef({ mode: 'uncommitted', baseRef: 'main', baseExplicit: false }, gitRun, baseDeps());
     expect(out).toBe('main');
     expect(calls).toEqual([]);
   });
@@ -1156,7 +1243,7 @@ describe('cross-review resolveBaseRef', () => {
       if (args[0] === 'rev-parse') return 'abc123\n'; // origin/main は verify できる
       return '';
     };
-    const out = resolveBaseRef({ mode: 'base', baseRef: 'main', baseExplicit: false }, gitRun);
+    const out = resolveBaseRef({ mode: 'base', baseRef: 'main', baseExplicit: false }, gitRun, baseDeps());
     expect(out).toBe('origin/main');
   });
 
@@ -1166,19 +1253,23 @@ describe('cross-review resolveBaseRef', () => {
       if (args[0] === 'rev-parse') return null; // origin/main 無し
       return '';
     };
-    const out = resolveBaseRef({ mode: 'base', baseRef: 'main', baseExplicit: false }, gitRun);
+    const out = resolveBaseRef({ mode: 'base', baseRef: 'main', baseExplicit: false }, gitRun, baseDeps());
     expect(out).toBe('main');
   });
 
-  it('fetch 失敗時は stderr に警告を出す', () => {
+  it('fetch 失敗時は stderr に警告を出し、使う参照の最終コミット日時を添える', () => {
     let err = '';
-    const gitRun = (args) => (args[0] === 'fetch' ? null : null);
+    const gitRun = (args) => {
+      if (args[0] === 'log') return '2026-09-01 12:00:00 +0900\n';
+      return null; // fetch も rev-parse も失敗 → ローカル main
+    };
     resolveBaseRef(
       { mode: 'base', baseRef: 'main', baseExplicit: false },
       gitRun,
-      { err: (s) => { err += s; } },
+      baseDeps({ err: (s) => { err += s; } }),
     );
     expect(err).toMatch(/取得に失敗/);
+    expect(err).toContain('2026-09-01 12:00:00 +0900');
   });
 
   it('origin/main 採用時は stderr に通知を出す', () => {
@@ -1187,9 +1278,363 @@ describe('cross-review resolveBaseRef', () => {
     resolveBaseRef(
       { mode: 'base', baseRef: 'main', baseExplicit: false },
       gitRun,
-      { err: (s) => { err += s; } },
+      baseDeps({ err: (s) => { err += s; } }),
     );
     expect(err).toMatch(/origin\/main/);
+  });
+});
+
+describe('cross-review resolveBaseSelection (既定 base の 3 段解決)', () => {
+  const sha = 'a'.repeat(40);
+  const opts = { mode: 'base', baseRef: 'main', baseExplicit: false };
+
+  it('1 段目: 状態ファイルの lastReviewedSha が現存すればそれを base にする', () => {
+    const calls = [];
+    let err = '';
+    const gitRun = (args) => {
+      calls.push(args[0]);
+      if (args[0] === 'cat-file') return ''; // SHA は現存する
+      return '';
+    };
+    const sel = resolveBaseSelection(opts, gitRun, {
+      env: {},
+      err: (s) => { err += s; },
+      ghRun: () => { throw new Error('SHA が使えるなら gh は呼ばない'); },
+      branchState: { round: 1, lastReviewedSha: sha, dismissed: [] },
+    });
+    expect(sel.ref).toBe(sha);
+    expect(sel.source).toBe('state');
+    expect(calls).not.toContain('fetch'); // 増分レビューでは fetch も要らない
+    expect(err).toMatch(/往復 2 回目/);
+  });
+
+  it('1 段目: SHA が現存しなければ (rebase 等) 次の解決へ進む', () => {
+    const gitRun = (args) => {
+      if (args[0] === 'cat-file') return null; // SHA が消えている
+      if (args[0] === 'rev-parse') return 'abc\n';
+      return '';
+    };
+    const sel = resolveBaseSelection(opts, gitRun, {
+      env: {},
+      err: () => {},
+      ghRun: () => null,
+      branchState: { round: 2, lastReviewedSha: sha, dismissed: [] },
+    });
+    expect(sel.ref).toBe('origin/main');
+    expect(sel.source).toBe('origin-main');
+  });
+
+  it('2 段目: gh の baseRefName を origin/<name> として採用する (スタック PR 対策)', () => {
+    const fetched = [];
+    let err = '';
+    const gitRun = (args) => {
+      if (args[0] === 'fetch') { fetched.push(args[2]); return ''; }
+      if (args[0] === 'rev-parse') return args[3] === 'origin/develop' ? 'def\n' : null;
+      return '';
+    };
+    const sel = resolveBaseSelection(opts, gitRun, {
+      env: {},
+      err: (s) => { err += s; },
+      ghRun: () => 'develop\n',
+    });
+    expect(sel.ref).toBe('origin/develop');
+    expect(sel.source).toBe('pr');
+    expect(fetched).toEqual(['develop']);
+    expect(err).toMatch(/PR の base/);
+  });
+
+  it('2 段目: origin/<name> が verify できなければ origin/main の解決へ戻る', () => {
+    const gitRun = (args) => {
+      if (args[0] === 'rev-parse') return args[3] === 'origin/main' ? 'abc\n' : null;
+      return '';
+    };
+    const sel = resolveBaseSelection(opts, gitRun, { env: {}, err: () => {}, ghRun: () => 'develop\n' });
+    expect(sel.ref).toBe('origin/main');
+  });
+
+  it('2 段目: gh が無い / PR が無い / 危険なブランチ名は黙って次へ進む', () => {
+    const gitRun = (args) => (args[0] === 'rev-parse' ? 'abc\n' : '');
+    const run = (ghRun) => resolveBaseSelection(opts, gitRun, { env: {}, err: () => {}, ghRun }).ref;
+    expect(run(() => null)).toBe('origin/main');                       // gh 不在 / PR 無し
+    expect(run(() => '')).toBe('origin/main');                          // 空出力
+    expect(run(() => { throw new Error('spawn failed'); })).toBe('origin/main');
+    expect(run(() => '--upload-pack=evil\n')).toBe('origin/main');      // オプションに化ける名前は使わない
+  });
+
+  it('CROSS_REVIEW_NO_FETCH=1 なら fetch も gh も呼ばない', () => {
+    const calls = [];
+    const gitRun = (args) => {
+      calls.push(args[0]);
+      if (args[0] === 'rev-parse') return 'abc\n';
+      return '';
+    };
+    const sel = resolveBaseSelection(opts, gitRun, {
+      env: { CROSS_REVIEW_NO_FETCH: '1' },
+      err: () => {},
+      ghRun: () => { throw new Error('NO_FETCH では gh を呼ばない'); },
+    });
+    expect(sel.ref).toBe('origin/main');
+    expect(calls).not.toContain('fetch');
+  });
+
+  it('CROSS_REVIEW_NO_FETCH=0 / 空文字は無効 (従来どおり fetch する)', () => {
+    expect(isNoFetch({ CROSS_REVIEW_NO_FETCH: '1' })).toBe(true);
+    expect(isNoFetch({ CROSS_REVIEW_NO_FETCH: 'true' })).toBe(true);
+    expect(isNoFetch({ CROSS_REVIEW_NO_FETCH: '0' })).toBe(false);
+    expect(isNoFetch({ CROSS_REVIEW_NO_FETCH: '' })).toBe(false);
+    expect(isNoFetch({})).toBe(false);
+  });
+
+  it('--base 明示と --uncommitted では解決方法を explicit / uncommitted で返す', () => {
+    const gitRun = () => { throw new Error('git は呼ばない'); };
+    const deps = { env: {}, ghRun: () => { throw new Error('gh も呼ばない'); } };
+    expect(resolveBaseSelection({ ...opts, baseExplicit: true, baseRef: 'develop' }, gitRun, deps).source).toBe('explicit');
+    expect(resolveBaseSelection({ ...opts, mode: 'uncommitted' }, gitRun, deps).source).toBe('uncommitted');
+  });
+});
+
+describe('cross-review shrinkDiffToFit (差分ガードの段階的縮退)', () => {
+  // 1 ファイル 20KB 相当のチャンクを 2 つ作る。32KB の段では置換されず、16KB の段で 2 件とも置換される。
+  const chunk = (name) => [`diff --git a/${name} b/${name}`, `+${'x'.repeat(20 * 1024)}`].join('\n');
+  const diffText = [chunk('a.txt'), chunk('b.txt')].join('\n');
+
+  it('段を下げて閾値以下に収まればその段で止める', () => {
+    const out = shrinkDiffToFit(diffText, { maxDiffKb: 1, maxFileDiffKb: 64 });
+    expect(out.fits).toBe(true);
+    expect(out.usedFileKb).toBe(16);   // 32KB では縮まず 16KB で収まる
+    expect(out.replacedCount).toBe(2);
+    expect(out.tried).toEqual([32, 16]);
+    expect(out.text).toContain('本文を省略');
+  });
+
+  it('最小の段でも収まらなければ fits:false と試した段を返す', () => {
+    // 要約後も 1 チャンクあたり 1 行残るので、極端に小さい全体閾値には収まらない。
+    const out = shrinkDiffToFit(diffText, { maxDiffKb: 0.05, maxFileDiffKb: 64 });
+    expect(out.fits).toBe(false);
+    expect(out.tried).toEqual([32, 16, 8]);
+  });
+
+  it('要約が無効 (maxFileDiffKb 0) なら縮退しない', () => {
+    const out = shrinkDiffToFit(diffText, { maxDiffKb: 1, maxFileDiffKb: 0 });
+    expect(out.fits).toBe(false);
+    expect(out.replacedCount).toBe(0);
+    expect(out.tried).toEqual([]);
+    expect(out.text).toBe(diffText);
+  });
+
+  it('全体ガードが無効 (maxDiffKb 0) なら縮退しない', () => {
+    const out = shrinkDiffToFit(diffText, { maxDiffKb: 0, maxFileDiffKb: 64 });
+    expect(out.tried).toEqual([]);
+    expect(out.text).toBe(diffText);
+  });
+
+  it('現在の閾値以上の段は飛ばす (縮まないので試さない)', () => {
+    const out = shrinkDiffToFit(diffText, { maxDiffKb: 1, maxFileDiffKb: 16 });
+    expect(out.tried).toEqual([8]);
+  });
+});
+
+describe('cross-review 状態ファイルの純粋関数', () => {
+  const sha = 'b'.repeat(40);
+
+  it('nextState: 初回は round 1 と lastReviewedSha を記録する', () => {
+    const out = nextState({ branches: {} }, { branch: 'feat/x', sha, reviewer: 'codex' });
+    expect(out.branches['feat/x']).toEqual({ round: 1, lastReviewedSha: sha, dismissed: [] });
+  });
+
+  it('nextState: sha が無い (--uncommitted) 場合は round だけ増やし SHA は据え置く', () => {
+    const before = { branches: { 'feat/x': { round: 1, lastReviewedSha: sha, dismissed: ['既知'] } } };
+    const out = nextState(before, { branch: 'feat/x', sha: null, reviewer: 'subagent' });
+    expect(out.branches['feat/x']).toEqual({ round: 2, lastReviewedSha: sha, dismissed: ['既知'] });
+  });
+
+  it('nextState: ブランチ名が無ければ何も記録しない', () => {
+    const out = nextState({ branches: {} }, { branch: null, sha, reviewer: 'codex' });
+    expect(out).toEqual({ branches: {} });
+  });
+
+  it('nextState: 他の枝の記録は変えない', () => {
+    const before = { branches: { other: { round: 3, lastReviewedSha: null, dismissed: [] } } };
+    const out = nextState(before, { branch: 'feat/x', sha, reviewer: 'codex' });
+    expect(out.branches.other).toEqual({ round: 3, lastReviewedSha: null, dismissed: [] });
+    expect(before.branches['feat/x']).toBeUndefined(); // 元の state を破壊しない
+  });
+
+  it('withDismissed: 同じ要約は重複して追加しない (前後の空白は無視)', () => {
+    let state = withDismissed({ branches: {} }, 'feat/x', '運用上到達しない入力への指摘');
+    state = withDismissed(state, 'feat/x', '  運用上到達しない入力への指摘  ');
+    state = withDismissed(state, 'feat/x', '別の指摘');
+    expect(branchStateOf(state, 'feat/x').dismissed).toEqual(['運用上到達しない入力への指摘', '別の指摘']);
+  });
+
+  it('withDismissed: 空の要約は追加しない', () => {
+    const state = withDismissed({ branches: {} }, 'feat/x', '   ');
+    expect(branchStateOf(state, 'feat/x').dismissed).toEqual([]);
+  });
+
+  it('withoutBranch: 指定した枝だけを消す', () => {
+    const before = {
+      branches: {
+        'feat/x': { round: 2, lastReviewedSha: sha, dismissed: ['a'] },
+        other: { round: 1, lastReviewedSha: null, dismissed: [] },
+      },
+    };
+    const out = withoutBranch(before, 'feat/x');
+    expect(out.branches['feat/x']).toBeUndefined();
+    expect(out.branches.other.round).toBe(1);
+  });
+
+  it('normalizeState: 型が違う値は初期値へ落とす', () => {
+    const out = normalizeState({ branches: { x: { round: -1, lastReviewedSha: 42, dismissed: 'a' } } });
+    expect(out.branches.x).toEqual({ round: 0, lastReviewedSha: null, dismissed: [] });
+    expect(normalizeState(null)).toEqual({ branches: {} });
+    expect(normalizeState('壊れた値')).toEqual({ branches: {} });
+  });
+
+  it('branchStateOf: 記録が無ければ初期状態', () => {
+    expect(branchStateOf({ branches: {} }, 'feat/x')).toEqual({ round: 0, lastReviewedSha: null, dismissed: [] });
+  });
+});
+
+describe('cross-review readState / writeState', () => {
+  const statePath = path.join('/repo', STATE_FILENAME);
+  const deps = (files) => ({
+    scriptDir: path.join('/repo', 'tools'),
+    exists: (p) => Object.prototype.hasOwnProperty.call(files, p),
+    readFile: (p) => files[p],
+  });
+
+  it('ファイルが無ければ空の状態を返す (corrupt:false)', () => {
+    const out = readState(deps({}));
+    expect(out.state).toEqual({ branches: {} });
+    expect(out.corrupt).toBe(false);
+    expect(out.path).toBe(statePath);
+  });
+
+  it('JSON が壊れていれば corrupt:true で空の状態を返す', () => {
+    const out = readState(deps({ [statePath]: '{壊れた' }));
+    expect(out.corrupt).toBe(true);
+    expect(out.state).toEqual({ branches: {} });
+  });
+
+  it('読み込んだ内容は正規化して返す', () => {
+    const body = JSON.stringify({ branches: { 'feat/x': { round: 2, lastReviewedSha: 'c'.repeat(40), dismissed: ['x'] } } });
+    const out = readState(deps({ [statePath]: body }));
+    expect(branchStateOf(out.state, 'feat/x').round).toBe(2);
+  });
+
+  it('writeState は正規化した JSON を書き、失敗しても例外を投げず警告する', () => {
+    const written = {};
+    const ok = writeState({ branches: { x: { round: 1, lastReviewedSha: null, dismissed: [] } } }, {
+      scriptDir: path.join('/repo', 'tools'),
+      writeStateFile: (p, body) => { written[p] = body; },
+    });
+    expect(ok).toBe(true);
+    expect(JSON.parse(written[statePath]).branches.x.round).toBe(1);
+
+    let warned = '';
+    const ng = writeState({ branches: {} }, {
+      scriptDir: path.join('/repo', 'tools'),
+      writeStateFile: () => { throw new Error('EACCES'); },
+      warn: (s) => { warned += s; },
+    });
+    expect(ng).toBe(false);
+    expect(warned).toMatch(/状態ファイルを書けません/);
+  });
+});
+
+describe('cross-review buildDismissedSection / joinReviewerNotes', () => {
+  it('1 件以上あれば見出し付きの節にする', () => {
+    const out = buildDismissedSection(['A の指摘', 'B の指摘']);
+    expect(out).toContain(DISMISSED_HEADER);
+    expect(out).toContain('- A の指摘');
+    expect(out).toContain('- B の指摘');
+  });
+
+  it('空なら null (何も添えない)', () => {
+    expect(buildDismissedSection([])).toBeNull();
+    expect(buildDismissedSection(undefined)).toBeNull();
+    expect(buildDismissedSection(['  '])).toBeNull();
+  });
+
+  it('joinReviewerNotes は申し送りの後ろに dismissed を置く', () => {
+    const out = joinReviewerNotes('申し送り本文', buildDismissedSection(['A の指摘']));
+    expect(out.indexOf('申し送り本文')).toBeLessThan(out.indexOf(DISMISSED_HEADER));
+    expect(joinReviewerNotes(null, null)).toBeNull();
+    expect(joinReviewerNotes('のみ', null)).toBe('のみ');
+  });
+});
+
+describe('cross-review state / dismiss サブコマンド', () => {
+  const gitRun = (args) => (args[0] === 'rev-parse' && args[1] === '--abbrev-ref' ? 'feat/x\n' : '');
+
+  it('state は現在の枝の記録を JSON で表示する', () => {
+    let out = '';
+    const mem = memoryState({ branches: { 'feat/x': { round: 2, lastReviewedSha: 'd'.repeat(40), dismissed: ['A'] } } });
+    runStateCommand({ reset: false }, { ...mem, gitRun, out: (s) => { out += s; }, err: () => {} });
+    const parsed = JSON.parse(out);
+    expect(parsed.branch).toBe('feat/x');
+    expect(parsed.round).toBe(2);
+    expect(parsed.dismissed).toEqual(['A']);
+  });
+
+  it('state --reset は現在の枝だけを消す', () => {
+    const mem = memoryState({
+      branches: {
+        'feat/x': { round: 2, lastReviewedSha: null, dismissed: [] },
+        other: { round: 1, lastReviewedSha: null, dismissed: [] },
+      },
+    });
+    runStateCommand({ reset: true }, { ...mem, gitRun, out: () => {}, err: () => {} });
+    expect(mem.store.state.branches['feat/x']).toBeUndefined();
+    expect(mem.store.state.branches.other.round).toBe(1);
+  });
+
+  it('壊れた状態ファイルには書き戻さず、エラー終了する (記録を消さない)', () => {
+    const mem = memoryState({ branches: {} }, { corrupt: true });
+    let err = '';
+    process.exitCode = 0;
+    runStateCommand({ reset: true }, { ...mem, gitRun, out: () => {}, err: (s) => { err += s; } });
+    expect(mem.store.writes).toEqual([]);
+    expect(process.exitCode).toBe(1);
+    expect(err).toMatch(/JSON 不正/);
+    process.exitCode = 0;
+  });
+
+  it('dismiss は要約を追加し、同じ要約は追加しない', () => {
+    const mem = memoryState();
+    let err = '';
+    runDismissCommand({ dismissText: 'A の指摘' }, { ...mem, gitRun, err: (s) => { err += s; } });
+    expect(branchStateOf(mem.store.state, 'feat/x').dismissed).toEqual(['A の指摘']);
+    runDismissCommand({ dismissText: 'A の指摘' }, { ...mem, gitRun, err: (s) => { err += s; } });
+    expect(mem.store.writes).toHaveLength(1);          // 2 回目は書かない
+    expect(err).toMatch(/既に記録されています/);
+  });
+
+  it('ブランチ名を取れなければ何もせずエラー終了する', () => {
+    const mem = memoryState();
+    process.exitCode = 0;
+    runStateCommand({ reset: false }, { ...mem, gitRun: () => null, out: () => {}, err: () => {} });
+    expect(process.exitCode).toBe(1);
+    expect(mem.store.writes).toEqual([]);
+    process.exitCode = 0;
+  });
+});
+
+describe('cross-review currentBranchName / currentHeadSha', () => {
+  it('取得できなければ null (状態の読み書きを行わない印)', () => {
+    expect(currentBranchName(() => null)).toBeNull();
+    expect(currentBranchName(() => '  \n')).toBeNull();
+    expect(currentHeadSha(() => null)).toBeNull();
+  });
+
+  it('detached HEAD は git が返す HEAD をそのままキーにする', () => {
+    expect(currentBranchName(() => 'HEAD\n')).toBe('HEAD');
+  });
+
+  it('SHA として解釈できない出力は記録しない', () => {
+    expect(currentHeadSha(() => 'abc\n')).toBeNull();
+    expect(currentHeadSha(() => `${'e'.repeat(40)}\n`)).toBe('e'.repeat(40));
   });
 });
 
@@ -1224,7 +1669,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     const gitRun = (args) => (args[0] === 'diff' ? 'diff --git a/x b/x\n+changed\n' : '');
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', fix: false },
-      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', exists: () => false },
+      { ...isolated(), gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', exists: () => false },
     );
     expect(captured.cmd).toBe('codex');
     expect(captured.args).toContain('read-only');
@@ -1243,7 +1688,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     };
     runReview(
       { reviewer: 'codex', mode: 'uncommitted', fix: true },
-      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', exists: () => false },
+      { ...isolated(), gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', exists: () => false },
     );
     expect(captured.cmd).toBe('codex');
     expect(captured.args).toContain('workspace-write');
@@ -1257,7 +1702,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     const gitRun = (args) => (args[0] === 'diff' ? 'CLAUDE_DIFF\n' : '');
     runReview(
       { reviewer: 'claude', mode: 'base', baseRef: 'main', fix: false },
-      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', exists: () => false },
+      { ...isolated(), gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', exists: () => false },
     );
     expect(captured.cmd).toBe('claude');
     expect(captured.args).toEqual(['-p']);
@@ -1270,7 +1715,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     const gitRun = (args) => (args[0] === 'diff' && args[1] === 'HEAD' ? 'DIFF_BODY\n' : '');
     runReview(
       { reviewer: 'codex', mode: 'uncommitted', fix: true, instructionsPath: 'notes.md' },
-      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', instructions: 'レビュアーの指摘: X を直す', exists: () => false },
+      { ...isolated(), gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', instructions: 'レビュアーの指摘: X を直す', exists: () => false },
     );
     expect(captured.args).toContain('workspace-write');
     expect(captured.stdin).toContain('CHECKLIST_MARKER');           // 観点は残る
@@ -1287,7 +1732,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     let err = '';
     const ret = runReview(
       { reviewer: 'subagent', mode: 'base', baseRef: 'main', fix: false },
-      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', out: (s) => { out += s; }, exists: () => false, err: (s) => { err += s; } },
+      { ...isolated(), gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', out: (s) => { out += s; }, exists: () => false, err: (s) => { err += s; } },
     );
     expect(called).toBe(false);                  // 外部プロセスは起動しない
     expect(ret).toBeNull();
@@ -1304,7 +1749,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     let out = '';
     runReview(
       { reviewer: 'subagent', mode: 'uncommitted', fix: true },
-      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', out: (s) => { out += s; }, exists: () => false, err: () => {} },
+      { ...isolated(), gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', out: (s) => { out += s; }, exists: () => false, err: () => {} },
     );
     expect(out).toContain('FIX_DIFF');
     expect(out).toContain(FIX_INSTRUCTION);
@@ -1317,7 +1762,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     const gitRun = () => '';
     const ret = runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', fix: false },
-      { gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', exists: () => false },
+      { ...isolated(), gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', exists: () => false },
     );
     expect(called).toBe(false);
     expect(ret).toBeNull();
@@ -1333,7 +1778,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     process.exitCode = 0;
     const ret = runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 1 },
-      { gitRun, spawnFn, checklist: 'CL', out: () => {}, exists: () => false, err: (s) => { err += s; } },
+      { ...isolated(), gitRun, spawnFn, checklist: 'CL', out: () => {}, exists: () => false, err: (s) => { err += s; } },
     );
     expect(called).toBe(false);
     expect(ret).toBeNull();
@@ -1351,7 +1796,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     process.exitCode = 0;
     runReview(
       { reviewer: 'subagent', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 1 },
-      { gitRun, spawnFn: () => { throw new Error('spawn してはいけない'); }, checklist: 'CL', out: (s) => { out += s; }, exists: () => false, err: () => {} },
+      { ...isolated(), gitRun, spawnFn: () => { throw new Error('spawn してはいけない'); }, checklist: 'CL', out: (s) => { out += s; }, exists: () => false, err: () => {} },
     );
     expect(out).toBe('');
     expect(process.exitCode).toBe(1);
@@ -1365,7 +1810,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     let err = '';
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: null },
-      { gitRun, spawnFn, checklist: 'CL', out: () => {}, exists: () => false, err: (s) => { err += s; }, env: { CROSS_REVIEW_MAX_DIFF_KB: '256' } },
+      { ...isolated(), gitRun, spawnFn, checklist: 'CL', out: () => {}, exists: () => false, err: (s) => { err += s; }, env: { CROSS_REVIEW_MAX_DIFF_KB: '256' } },
     );
     expect(captured.cmd).toBe('codex');
     expect(captured.stdin).toContain('SMALL_DIFF');
@@ -1383,7 +1828,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     };
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 0 },
-      { gitRun, spawnFn, checklist: 'CL', out: () => {}, exists: () => false, err: () => {} },
+      { ...isolated(), gitRun, spawnFn, checklist: 'CL', out: () => {}, exists: () => false, err: () => {} },
     );
     expect(captured.stdin).toContain('origin/main...HEAD');
   });
@@ -1399,7 +1844,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     let err = '';
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 0, maxFileDiffKb: 1, noExclude: true },
-      { gitRun, spawnFn, checklist: 'CL', out: () => {}, exists: () => false, err: (s) => { err += s; } },
+      { ...isolated(), gitRun, spawnFn, checklist: 'CL', out: () => {}, exists: () => false, err: (s) => { err += s; } },
     );
     expect(captured.stdin).toContain('本文を省略');         // stat 要約に置換された
     expect(captured.stdin).not.toContain('+x');             // 本文は載らない
@@ -1419,7 +1864,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     process.exitCode = 0;
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 2, maxFileDiffKb: 1, noExclude: true },
-      { gitRun, spawnFn: (...a) => { called = true; return spawnFn(...a); }, checklist: 'CL', out: () => {}, exists: () => false, err: () => {} },
+      { ...isolated(), gitRun, spawnFn: (...a) => { called = true; return spawnFn(...a); }, checklist: 'CL', out: () => {}, exists: () => false, err: () => {} },
     );
     expect(called).toBe(true);          // 置換で縮みガードを通過し spawn される
     expect(process.exitCode).toBe(0);
@@ -1438,7 +1883,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     };
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: false, fix: false, maxDiffKb: 0, maxFileDiffKb: 0 },
-      { gitRun, spawnFn, checklist: 'CL', ignorePatterns: ['package-lock.json'], out: () => {}, exists: () => false, err: () => {} },
+      { ...isolated(), gitRun, spawnFn, checklist: 'CL', ignorePatterns: ['package-lock.json'], out: () => {}, exists: () => false, err: () => {} },
     );
     expect(captured.stdin).toContain('レビュー対象外（除外済み）');
     expect(captured.stdin).toContain('- package-lock.json');
@@ -1450,7 +1895,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     const gitRun = (args) => { calls.push(args); return args[0] === 'diff' ? 'DIFF\n' : ''; };
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: true, fix: false, maxDiffKb: 0, maxFileDiffKb: 0, noExclude: true },
-      { gitRun, spawnFn, checklist: 'CL', ignorePatterns: ['package-lock.json'], out: () => {}, exists: () => false, err: () => {} },
+      { ...isolated(), gitRun, spawnFn, checklist: 'CL', ignorePatterns: ['package-lock.json'], out: () => {}, exists: () => false, err: () => {} },
     );
     const diffCall = calls.find((c) => c[0] === 'diff' && !c.includes('--name-only'));
     expect(diffCall).toEqual(['diff', 'main...HEAD']); // 除外指定が入らない (baseExplicit で origin/main 解決をスキップ)
@@ -1461,11 +1906,263 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     let err = '';
     const ret = runReview(
       { reviewer: 'subagent', mode: 'base', baseRef: 'main', fix: false },
-      { gitRun: () => '', spawnFn: () => { throw new Error('起動しないはず'); }, checklist: 'CL', out: (s) => { out += s; }, exists: () => false, err: (s) => { err += s; } },
+      { ...isolated(), gitRun: () => '', spawnFn: () => { throw new Error('起動しないはず'); }, checklist: 'CL', out: (s) => { out += s; }, exists: () => false, err: (s) => { err += s; } },
     );
     expect(ret).toBeNull();
     expect(out).toBe('');                    // stdout は空 (空通知をプロンプトと誤認させない)
     expect(err).toContain('差分がありません'); // 通知は stderr 側
+  });
+
+  // 状態ファイル (往復回数 / 直前レビュー SHA / 非対応指摘) の配線。
+  const sha = 'f'.repeat(40);
+  const stateGitRun = (extra = {}) => (args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x\n';
+    if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+    if (args[0] === 'diff') return 'STATE_DIFF\n';
+    if (Object.prototype.hasOwnProperty.call(extra, args[0])) return extra[args[0]];
+    return '';
+  };
+  const stateOpts = (extra = {}) => ({
+    reviewer: 'codex', mode: 'base', baseRef: 'main', baseExplicit: true, fix: false, maxDiffKb: 0, ...extra,
+  });
+
+  it('レビュアーを起動したら往復を 1 増やし、直前レビュー SHA を記録する', () => {
+    const mem = memoryState();
+    runReview(stateOpts(), {
+      ...mem,
+      gitRun: stateGitRun(),
+      spawnFn: () => null,
+      checklist: 'CL',
+      out: () => {},
+      err: () => {},
+      exists: () => false,
+    });
+    expect(mem.store.writes).toHaveLength(1);
+    expect(branchStateOf(mem.store.state, 'feat/x')).toEqual({ round: 1, lastReviewedSha: sha, dismissed: [] });
+  });
+
+  it('--uncommitted は往復だけ増やし、直前レビュー SHA を更新しない', () => {
+    const mem = memoryState({ branches: { 'feat/x': { round: 1, lastReviewedSha: sha, dismissed: [] } } });
+    runReview(stateOpts({ mode: 'uncommitted' }), {
+      ...mem,
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x\n';
+        if (args[0] === 'diff' && args[1] === 'HEAD') return 'UNCOMMITTED_DIFF\n';
+        if (args[0] === 'rev-parse') throw new Error('--uncommitted では HEAD の SHA を取らない');
+        return '';
+      },
+      spawnFn: () => null,
+      checklist: 'CL',
+      out: () => {},
+      err: () => {},
+      exists: () => false,
+    });
+    expect(branchStateOf(mem.store.state, 'feat/x')).toEqual({ round: 2, lastReviewedSha: sha, dismissed: [] });
+  });
+
+  it('差分が無ければ往復を数えない', () => {
+    const mem = memoryState();
+    runReview(stateOpts(), {
+      ...mem,
+      gitRun: (args) => (args[0] === 'rev-parse' && args[1] === '--abbrev-ref' ? 'feat/x\n' : ''),
+      spawnFn: () => null,
+      checklist: 'CL',
+      out: () => {},
+      err: () => {},
+      exists: () => false,
+    });
+    expect(mem.store.writes).toEqual([]);
+  });
+
+  it('ガード中断でも往復を数えない', () => {
+    const mem = memoryState();
+    process.exitCode = 0;
+    runReview(stateOpts({ maxDiffKb: 1, maxFileDiffKb: 0 }), {
+      ...mem,
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x\n';
+        if (args[0] === 'rev-parse') return `${sha}\n`;
+        return args[0] === 'diff' ? 'z'.repeat(2 * 1024) : '';
+      },
+      spawnFn: () => { throw new Error('起動しないはず'); },
+      checklist: 'CL',
+      out: () => {},
+      err: () => {},
+      exists: () => false,
+    });
+    expect(mem.store.writes).toEqual([]);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('--no-state なら状態ファイルを読み書きしない', () => {
+    const mem = memoryState();
+    runReview(stateOpts({ noState: true }), {
+      ...mem,
+      readState: () => { throw new Error('--no-state では読まない'); },
+      gitRun: stateGitRun(),
+      spawnFn: () => null,
+      checklist: 'CL',
+      out: () => {},
+      err: () => {},
+      exists: () => false,
+    });
+    expect(mem.store.writes).toEqual([]);
+  });
+
+  it('状態ファイルが壊れていれば警告して無視し、書き戻さない', () => {
+    const mem = memoryState({ branches: {} }, { corrupt: true });
+    let err = '';
+    runReview(stateOpts(), {
+      ...mem,
+      gitRun: stateGitRun(),
+      spawnFn: () => null,
+      checklist: 'CL',
+      out: () => {},
+      err: (s) => { err += s; },
+      exists: () => false,
+    });
+    expect(err).toMatch(/JSON 不正/);
+    expect(mem.store.writes).toEqual([]);
+  });
+
+  it('非対応と判断した指摘はプロンプトへ「再指摘しない」節として乗る', () => {
+    const captured = {};
+    const mem = memoryState({
+      branches: { 'feat/x': { round: 1, lastReviewedSha: null, dismissed: ['運用上到達しない入力への指摘'] } },
+    });
+    runReview(stateOpts(), {
+      ...mem,
+      gitRun: stateGitRun(),
+      spawnFn: (cmd, args, stdin) => { Object.assign(captured, { stdin }); return null; },
+      checklist: 'CL',
+      instructions: '申し送り本文',
+      out: () => {},
+      err: () => {},
+      exists: () => false,
+    });
+    expect(captured.stdin).toContain(DISMISSED_HEADER);
+    expect(captured.stdin).toContain('- 運用上到達しない入力への指摘');
+    // 観点 → 申し送り → 非対応指摘 → 差分 の順を保つ。
+    expect(captured.stdin.indexOf('CL')).toBeLessThan(captured.stdin.indexOf('申し送り本文'));
+    expect(captured.stdin.indexOf('申し送り本文')).toBeLessThan(captured.stdin.indexOf(DISMISSED_HEADER));
+    expect(captured.stdin.indexOf(DISMISSED_HEADER)).toBeLessThan(captured.stdin.indexOf('STATE_DIFF'));
+  });
+
+  it('3 往復目の実行は起動前に警告を出す (実行は止めない)', () => {
+    let err = '';
+    let called = false;
+    const mem = memoryState({ branches: { 'feat/x': { round: 2, lastReviewedSha: null, dismissed: [] } } });
+    runReview(stateOpts(), {
+      ...mem,
+      gitRun: stateGitRun(),
+      spawnFn: () => { called = true; return null; },
+      checklist: 'CL',
+      out: () => {},
+      err: (s) => { err += s; },
+      exists: () => false,
+    });
+    expect(err).toMatch(/往復は 3 回目/);
+    expect(called).toBe(true);
+    expect(branchStateOf(mem.store.state, 'feat/x').round).toBe(3);
+  });
+
+  it('往復 2 回目は既定 base に前回レビュー SHA を使い、その旨を出す', () => {
+    const captured = {};
+    let err = '';
+    const mem = memoryState({ branches: { 'feat/x': { round: 1, lastReviewedSha: sha, dismissed: [] } } });
+    runReview(stateOpts({ baseExplicit: false }), {
+      ...mem,
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x\n';
+        if (args[0] === 'rev-parse') return `${sha}\n`;
+        if (args[0] === 'cat-file') return '';        // 前回 SHA は現存する
+        if (args[0] === 'diff') return 'INCREMENTAL_DIFF\n';
+        return '';
+      },
+      spawnFn: (cmd, args, stdin) => { Object.assign(captured, { stdin }); return null; },
+      checklist: 'CL',
+      out: () => {},
+      err: (s) => { err += s; },
+      exists: () => false,
+    });
+    expect(captured.stdin).toContain(`${sha}...HEAD`);   // スコープ表記に前回 SHA が入る
+    expect(err).toMatch(/往復 2 回目/);
+    expect(err).toMatch(/base: fffffff \(前回レビュー時の SHA\)/); // 差分サイズと同じ行に解決方法を出す
+  });
+
+  // 差分サイズガードの段階的縮退。
+  const bigFileDiff = (name, kb) => [`diff --git a/${name} b/${name}`, `+${'x'.repeat(kb * 1024)}`].join('\n');
+
+  it('閾値超過はファイル要約の閾値を下げて縮退し、通知したうえで続行する', () => {
+    const captured = {};
+    let err = '';
+    const body = [bigFileDiff('a.txt', 20), bigFileDiff('b.txt', 20)].join('\n');
+    runReview(stateOpts({ maxDiffKb: 1, maxFileDiffKb: 64 }), {
+      ...isolated(),
+      gitRun: (args) => (args[0] === 'diff' ? body : ''),
+      spawnFn: (cmd, args, stdin) => { Object.assign(captured, { stdin }); return null; },
+      checklist: 'CL',
+      out: () => {},
+      err: (s) => { err += s; },
+      exists: () => false,
+    });
+    expect(captured.stdin).toContain('本文を省略');
+    expect(err).toMatch(/要約閾値を 16KB へ下げて 2 件/);
+    expect(err).not.toMatch(/レビュアーを起動せず中断/);
+  });
+
+  it('--strict-diff-guard は縮退を試さず従来どおり即中断する', () => {
+    let err = '';
+    const body = [bigFileDiff('a.txt', 20), bigFileDiff('b.txt', 20)].join('\n');
+    process.exitCode = 0;
+    runReview(stateOpts({ maxDiffKb: 1, maxFileDiffKb: 64, strictDiffGuard: true }), {
+      ...isolated(),
+      gitRun: (args) => (args[0] === 'diff' ? body : ''),
+      spawnFn: () => { throw new Error('起動しないはず'); },
+      checklist: 'CL',
+      out: () => {},
+      err: (s) => { err += s; },
+      exists: () => false,
+    });
+    expect(process.exitCode).toBe(1);
+    expect(err).toMatch(/--strict-diff-guard 指定のため/);
+    process.exitCode = 0;
+  });
+
+  it('縮退しても収まらなければ、試した閾値を添えて中断する', () => {
+    let err = '';
+    const body = Array.from({ length: 40 }, (_, i) => bigFileDiff(`f${i}.txt`, 20)).join('\n');
+    process.exitCode = 0;
+    runReview(stateOpts({ maxDiffKb: 1, maxFileDiffKb: 64 }), {
+      ...isolated(),
+      gitRun: (args) => (args[0] === 'diff' ? body : ''),
+      spawnFn: () => { throw new Error('起動しないはず'); },
+      checklist: 'CL',
+      out: () => {},
+      err: (s) => { err += s; },
+      exists: () => false,
+    });
+    expect(process.exitCode).toBe(1);
+    expect(err).toMatch(/32KB → 16KB → 8KB まで下げても収まりませんでした/);
+    process.exitCode = 0;
+  });
+
+  it('--max-file-diff-kb 0 (要約無効) では縮退を試さない', () => {
+    let err = '';
+    process.exitCode = 0;
+    runReview(stateOpts({ maxDiffKb: 1, maxFileDiffKb: 0 }), {
+      ...isolated(),
+      gitRun: (args) => (args[0] === 'diff' ? bigFileDiff('a.txt', 20) : ''),
+      spawnFn: () => { throw new Error('起動しないはず'); },
+      checklist: 'CL',
+      out: () => {},
+      err: (s) => { err += s; },
+      exists: () => false,
+    });
+    expect(process.exitCode).toBe(1);
+    expect(err).toMatch(/--max-file-diff-kb 0/);
+    process.exitCode = 0;
   });
 
   // 利用上限のフォールバックと bridge 未導入時の再起動は spawnFn の onExit を差し替えて検証する。
@@ -1479,6 +2176,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     const rest = { ...extra };
     delete rest.files;
     return {
+      ...isolated(),
       gitRun: (args) => (args[0] === 'diff' ? 'LIMIT_DIFF\n' : ''),
       checklist: 'CL',
       out: () => {},
