@@ -99,6 +99,7 @@ bridge #15 はこのフェーズと並行して bridge 側で進める。
 
 - `sync --check-manifest` を足し、上流の `sync.example.json` にあって取り込み先のマニフェストに無いエントリを報告する。`sync-all --check` の集計にも含める。
 - `sync-all` に `--global-skill` を足し、SKILL を `~/.claude/skills/cross-review/` へ配る。集計に「global」の行を足す。
+- Codex 側の写し（`~/.codex/skills/cross-review/`）も配布対象にする。Codex はレビュー時にこの写しを読むため、古いままだと旧ルールで動くからである（ただし Codex 未導入の環境にディレクトリを作らないよう、`~/.codex/skills/` が既にあるときだけ配る）。
 - 取り込み先の CLAUDE.md と AGENTS.md の相互レビュー節を短い形に縮めるテンプレートを `docs/cross-review.md` に置く。
 - `docs/cross-review.md` の「同期スクリプト」節に、取り込み先の更新手順（同期 → 移行ノートの作業 → lint とテスト）を書く。
 - bridge を走査対象に含め、フェーズ 1 から 4 の変更を取り込み先 4 プロジェクト（agent-limit-checker、clipy-for-windows、session-score-player、claude-codex-bridge）へ同期し、表示された移行ノートの作業を各プロジェクトで行う。
