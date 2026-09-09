@@ -293,8 +293,22 @@ describe('cross-review parseArgs', () => {
     expect(parseArgs(['dismiss', 'A', '--reset']).error).toMatch(/--reset は state/);
   });
 
+  it('state --mark を受け付け、他のサブコマンドでは使えない', () => {
+    const m = parseArgs(['state', '--mark']);
+    expect(m.command).toBe('state');
+    expect(m.mark).toBe(true);
+    expect(m.error).toBeNull();
+    expect(parseArgs(['codex', '--mark']).error).toMatch(/--mark は state/);
+    expect(parseArgs(['dismiss', 'A', '--mark']).error).toMatch(/--mark は state/);
+  });
+
+  it('--reset と --mark は併用できない (記録の消去と往復の記録は相反する)', () => {
+    expect(parseArgs(['state', '--reset', '--mark']).error).toMatch(/--reset と --mark/);
+  });
+
   it('--no-state と state / dismiss サブコマンドは併用できない', () => {
     expect(parseArgs(['state', '--no-state']).error).toMatch(/--no-state/);
+    expect(parseArgs(['state', '--mark', '--no-state']).error).toMatch(/--no-state/);
     expect(parseArgs(['dismiss', 'A', '--no-state']).error).toMatch(/--no-state/);
   });
 
@@ -1590,6 +1604,41 @@ describe('cross-review state / dismiss サブコマンド', () => {
     expect(mem.store.state.branches.other.round).toBe(1);
   });
 
+  // state --mark は、利用上限フォールバックのように CLI がレビューの成立を観測できない経路で、
+  // レビューを終えた利用者が往復を進めるための入口。
+  const markSha = 'e'.repeat(40);
+  const markGitRun = (args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x\n';
+    if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${markSha}\n`;
+    return '';
+  };
+
+  it('state --mark は往復を 1 増やし、直前レビュー SHA を現在の HEAD にする', () => {
+    const mem = memoryState({
+      branches: {
+        'feat/x': { round: 1, lastReviewedSha: 'd'.repeat(40), dismissed: ['A'] },
+        other: { round: 3, lastReviewedSha: null, dismissed: [] },
+      },
+    });
+    let err = '';
+    runStateCommand({ mark: true }, {
+      ...mem, gitRun: markGitRun, out: () => {}, err: (s) => { err += s; },
+    });
+    expect(branchStateOf(mem.store.state, 'feat/x')).toEqual({ round: 2, lastReviewedSha: markSha, dismissed: ['A'] });
+    expect(mem.store.state.branches.other.round).toBe(3); // 他の枝は触らない
+    expect(err).toMatch(/往復を記録しました/);
+  });
+
+  it('state --mark は書き込みに失敗したら成功通知を出さずエラー終了する', () => {
+    let err = '';
+    process.exitCode = 0;
+    runStateCommand({ mark: true }, { ...failingWriteDeps((s) => { err += s; }), gitRun: markGitRun });
+    expect(process.exitCode).toBe(1);
+    expect(err).toMatch(/状態ファイルを書けません/);
+    expect(err).not.toMatch(/往復を記録しました/);
+    process.exitCode = 0;
+  });
+
   it('壊れた状態ファイルには書き戻さず、エラー終了する (記録を消さない)', () => {
     const mem = memoryState({ branches: {} }, { corrupt: true });
     let err = '';
@@ -2531,9 +2580,12 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
       process.exitCode = 0;
     });
 
-    it('利用上限で代替プロンプトを書き出したら往復を数える (subagent でレビューが続く)', () => {
+    // CLI はサブエージェントがレビューを終えたかを観測できない。書き出した時点で数えると、
+    // プロンプトを渡さずに再実行したとき未レビューの差分が「差分なし」になってしまう。
+    it('利用上限の代替プロンプトを書き出しても往復を数えない (記録は state --mark で行う)', () => {
       const mem = memoryState();
       const written = {};
+      let err = '';
       process.exitCode = 0;
       runReview(stateOpts({ fallbackPromptPath: 'fb.md' }), recordDeps(mem, {
         spawnFn: (cmd, args, stdin, onExit) => {
@@ -2541,9 +2593,11 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
           return null;
         },
         writeFile: (p, body) => { written[p] = body; },
+        err: (s) => { err += s; },
       }));
       expect(Object.keys(written)).toEqual(['fb.md']);
-      expect(branchStateOf(mem.store.state, 'feat/x')).toEqual({ round: 1, lastReviewedSha: sha, dismissed: [] });
+      expect(mem.store.writes).toEqual([]);
+      expect(err).toMatch(/state --mark/); // 記録の手順を案内する
       expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
       process.exitCode = 0;
     });
@@ -2564,6 +2618,54 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
       expect(calls).toEqual(['bash', 'codex']);
       expect(mem.store.writes).toHaveLength(1);
       expect(branchStateOf(mem.store.state, 'feat/x').round).toBe(1);
+      process.exitCode = 0;
+    });
+
+    // レビュアーの実行中に別プロセスが状態ファイルを書くことがある。起動前のスナップショットを
+    // 基に書き戻すとその更新が消えるので、書く直前に読み直した状態へ遷移を適用する。
+    it('書き込み直前に状態を読み直し、実行中に入った他プロセスの更新を保つ', () => {
+      const before = { branches: { 'feat/x': { round: 0, lastReviewedSha: null, dismissed: [] } } };
+      // 起動後に別プロセスが「他の枝のレビュー完了」と「現在の枝への dismiss」を書いた状態。
+      const during = {
+        branches: {
+          'feat/x': { round: 0, lastReviewedSha: null, dismissed: ['実行中に登録された指摘'] },
+          other: { round: 5, lastReviewedSha: 'c'.repeat(40), dismissed: [] },
+        },
+      };
+      const reads = [before, during];
+      const writes = [];
+      process.exitCode = 0;
+      runReview(stateOpts(), recordDeps({}, {
+        readState: () => ({ path: '<test-state>', state: reads.shift() || during, corrupt: false }),
+        writeState: (next) => { writes.push(next); return true; },
+        ghRun: () => null,
+        spawnFn: (cmd, args, stdin, onExit) => { settle(onExit, { code: 0 }); return null; },
+      }));
+      expect(writes).toHaveLength(1);
+      expect(writes[0].branches.other).toEqual({ round: 5, lastReviewedSha: 'c'.repeat(40), dismissed: [] });
+      expect(branchStateOf(writes[0], 'feat/x')).toEqual({
+        round: 1, lastReviewedSha: sha, dismissed: ['実行中に登録された指摘'],
+      });
+      process.exitCode = 0;
+    });
+
+    it('読み直しで状態ファイルが壊れていたら往復を記録しない', () => {
+      const writes = [];
+      let err = '';
+      let reads = 0;
+      process.exitCode = 0;
+      runReview(stateOpts(), recordDeps({}, {
+        readState: () => {
+          reads += 1;
+          return { path: '<test-state>', state: { branches: {} }, corrupt: reads > 1 };
+        },
+        writeState: (next) => { writes.push(next); return true; },
+        ghRun: () => null,
+        spawnFn: (cmd, args, stdin, onExit) => { settle(onExit, { code: 0 }); return null; },
+        err: (s) => { err += s; },
+      }));
+      expect(writes).toEqual([]);
+      expect(err).toMatch(/往復を記録しません/);
       process.exitCode = 0;
     });
 

@@ -57,6 +57,7 @@ node tools/cross-review.js subagent --uncommitted   # CLI を起動せずレビ�
 node tools/cross-review.js codex --no-codex-agent   # claude-codex-bridge (codex-agent.sh) を経由せず codex を直接起動
 node tools/cross-review.js codex --no-fallback      # Codex が利用上限でも subagent 代替へ切り替えず失敗終了する
 node tools/cross-review.js state                    # この枝の往復回数・直前レビュー SHA・非対応指摘を表示 (--reset で消去)
+node tools/cross-review.js state --mark             # 往復を 1 回分記録する (CLI がレビューの成立を観測できない経路の後で使う)
 node tools/cross-review.js dismiss "<要約>"          # 非対応と判断した指摘を記録し、以降のレビューで再指摘させない
 node tools/cross-review.js --help
 ```

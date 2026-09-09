@@ -69,8 +69,12 @@ Codex が利用上限に達したときは、subagent 代替のプロンプト�
 ```bash
 node tools/cross-review.js state          # この枝の往復回数 / 直前レビュー SHA / 非対応指摘を表示
 node tools/cross-review.js state --reset  # この枝の記録を消す
+node tools/cross-review.js state --mark   # 往復を 1 回分記録する (round を 1 増やし、直前レビュー SHA を現在の HEAD にする)
 node tools/cross-review.js dismiss "<要約>"  # 非対応と判断した指摘を登録 (以降のレビューで再指摘させない)
 ```
+
+往復が自動で記録されるのは、`subagent` がプロンプトを stdout に出したときと、レビュアー CLI が終了コード 0 で終わったときだけ。
+**利用上限フォールバックでは記録されない**（CLI はサブエージェントのレビュー完了を観測できないため）ので、サブエージェントでのレビューを終えたら `state --mark` で記録する。
 
 差分サイズが閾値を超えたときは、ファイル要約の閾値を 32/16/8KB と下げて縮退を試し、収まらないときだけ中断する（`--strict-diff-guard` で従来の即中断）。
 差分ガード `--max-diff-kb` / 巨大ファイル要約 `--max-file-diff-kb` / 除外無効化 `--no-exclude`、fetch と gh の省略 (`CROSS_REVIEW_NO_FETCH=1`)、ロックファイル等の既定除外 (`.cross-review-ignore` / `CROSS_REVIEW_IGNORE`)、bridge (codex-agent.sh) 経由の起動と `--no-codex-agent` は `docs/cross-review.md` 参照。

@@ -62,6 +62,10 @@
 //   会話の外に置かないと妥当性確認のたびに人が SHA を控え直すことになるため。状態遷移は純粋関数
 //   (nextState / withDismissed / withoutBranch) に閉じ、読み書きだけを I/O 側 (readState /
 //   writeState) に置く。ファイルが壊れているときは警告して無視し、書き戻さない (記録を消さない)。
+//   書き込みは必ず「書く直前に読み直した状態」を基にする。レビュアーの実行中に別プロセスが
+//   dismiss や別ブランチのレビュー完了を書いていることがあり、起動前のスナップショットで
+//   上書きするとその更新が消えるため。往復を CLI が観測できない経路 (利用上限フォールバック) は
+//   記録せず、レビューを終えた利用者が `state --mark` で進める。
 // - 既定 base は「前回レビュー SHA → PR の base ブランチ → origin/main → ローカル main」の順で
 //   解決する。前者ほど差分が小さく、かつ人の指定なしで決まる情報だから。決めた base と解決方法は
 //   差分サイズと同じ stderr 行に必ず出し、stale な比較に気づけるようにする。
@@ -369,6 +373,9 @@ const USAGE = [
   'サブコマンド (状態ファイル .cross-review-state.json の操作):',
   '  state             現在のブランチの往復回数・直前レビュー SHA・非対応指摘を JSON で表示',
   '  state --reset     現在のブランチの記録を消す',
+  '  state --mark      往復を 1 回分記録する (round を 1 増やし、直前レビュー SHA を現在の HEAD にする)。',
+  '                    利用上限フォールバックのプロンプトを客観サブエージェントへ渡してレビューを',
+  '                    終えた後など、CLI がレビューの成立を観測できないときに手で記録する',
   '  dismiss "<要約>"  非対応と判断した指摘を記録する (以降のレビュープロンプトに',
   '                    「再指摘しない」節として添えられる。同じ要約は重複追加しない)',
   '',
@@ -402,7 +409,8 @@ const USAGE = [
   '  bridge 経由はスクリプトが approval_policy=never を明示している場合に限ります (無ければ直接起動)。',
   '  定義の codex_sandbox が --fix の有無と食い違う場合は起動せずエラー終了します。',
   '利用上限時: Codex が利用上限に達したら subagent 代替のプロンプトをファイルへ書き出し、終了コード 75 で終わります',
-  '  (--no-fallback で無効化)。',
+  '  (--no-fallback で無効化)。このとき往復は記録しません (レビューの成立を CLI が観測できないため)。',
+  '  サブエージェントでのレビューを終えたら state --mark で記録してください。',
   'レビュー観点: リポジトリ直下の .cross-review.md を読み込みます',
   '  (環境変数 CROSS_REVIEW_CHECKLIST でパス指定可。スクリプト位置からも解決。無ければ汎用観点)。',
   '差分の除外: ロックファイル・生成物 (package-lock.json / *.min.js / *.map 等) を既定で除外します',
@@ -430,6 +438,8 @@ const USAGE = [
   '      (利用上限でも subagent 代替へ切り替えない)',
   '  node tools/cross-review.js state',
   '      (現在のブランチの往復回数・直前レビュー SHA・非対応指摘を表示)',
+  '  node tools/cross-review.js state --mark',
+  '      (サブエージェントでのレビューを終えた後に、往復を 1 回分記録する)',
   '  node tools/cross-review.js dismiss "運用上到達しない入力への指摘"',
   '      (非対応と判断した指摘を記録し、以降のレビューで再指摘させない)',
 ].join('\n');
@@ -456,6 +466,7 @@ function parseArgs(argv) {
     reviewer: null,
     dismissText: null, // dismiss の要約 (command === 'dismiss' のときだけ使う)
     reset: false, // state --reset (現在の枝の記録を消す)
+    mark: false, // state --mark (現在の枝の往復を手で 1 進める)
     noState: false, // --no-state で状態ファイルの読み書きを無効化する (CI 等)
     strictDiffGuard: false, // --strict-diff-guard で差分ガードを従来の即中断に戻す
     mode: 'base',
@@ -492,6 +503,8 @@ function parseArgs(argv) {
       out.strictDiffGuard = true;
     } else if (a === '--reset') {
       out.reset = true;
+    } else if (a === '--mark') {
+      out.mark = true;
     } else if (a === '--no-codex-agent') {
       out.codexAgent = false;
     } else if (a === '--no-fallback') {
@@ -606,6 +619,8 @@ function parseArgs(argv) {
     } else if (out.command === 'dismiss') {
       if (out.reset) {
         out.error = '--reset は state サブコマンドでのみ使えます';
+      } else if (out.mark) {
+        out.error = '--mark は state サブコマンドでのみ使えます';
       } else {
         // 引用符を付け忘れた複数語の要約も 1 件として受ける。
         const text = rest.slice(1).join(' ').trim();
@@ -615,6 +630,9 @@ function parseArgs(argv) {
           out.dismissText = text;
         }
       }
+    } else if (out.reset && out.mark) {
+      // 記録を消すのと往復を 1 進めるのは相反する操作なので、どちらの意図か決められない。
+      out.error = '--reset と --mark は併用できません';
     }
   } else if (!out.help && !out.error) {
     out.reviewer = rest[0] || null;
@@ -637,8 +655,9 @@ function parseArgs(argv) {
         out.error = `--codex-agent ${CODEX_AGENT_FIX_NAME} は書き込み可能な定義です (--fix 無しでは使えません)`;
       }
     }
-    // --reset は状態ファイルの初期化用なので、レビュアー実行では受け付けない。
+    // --reset / --mark は状態ファイルの操作用なので、レビュアー実行では受け付けない。
     if (!out.error && out.reset) out.error = '--reset は state サブコマンドでのみ使えます';
+    if (!out.error && out.mark) out.error = '--mark は state サブコマンドでのみ使えます';
   }
   return out;
 }
@@ -1560,6 +1579,7 @@ function emitFallbackPrompt(prompt, opts, deps = {}) {
   writeErr(
     `[cross-review] Codex の利用上限のため subagent 代替に切り替えます。プロンプト: ${promptPath}\n`
     + '  その内容を Claude の客観サブエージェント (読み取り専用。--fix 時は書込権限付き) へ渡してください。\n'
+    + '  サブエージェントでのレビューが終わったら `node tools/cross-review.js state --mark` で往復を記録してください。\n'
     + '  PR コメントには「Codex を直接実行できないため (利用上限) subagent 代替で確認した」と残してください。\n',
   );
   process.exitCode = USAGE_LIMIT_EXIT_CODE;
@@ -1697,21 +1717,33 @@ function runReview(opts, deps = {}) {
   if (branchState && branchState.round + 1 >= 3) {
     writeErr(`[cross-review] この枝の往復は ${branchState.round + 1} 回目です。3 往復到達時の扱いはサーキットブレーカーの規則を参照してください。\n`);
   }
-  // 往復を数えるのは「レビューが実際に成立した」ときだけに限る。成立とみなすのは次の 3 つ:
-  //   1. subagent 経路でプロンプトを stdout に出力したとき (出力した時点でレビューへ渡せる)。
+  // 往復を数えるのは「レビューが実際に成立した」と CLI が観測できたときだけに限る。
+  // 観測できるのは次の 2 つ:
+  //   1. subagent 経路でプロンプトを stdout に出力したとき (明示的に選んだ経路なので、
+  //      利用者がその場でサブエージェントへ渡す前提で数える)。
   //   2. レビュアー CLI が終了コード 0 で終わったとき (bridge → 直接起動のやり直しがある場合は
   //      やり直した後の結果で判断する)。
-  //   3. 利用上限フォールバックで代替プロンプトを書き出せたとき (subagent でレビューが続く前提)。
-  // 起動失敗 (ENOENT 等)、非ゼロ終了、--no-fallback の失敗終了では記録しない。記録してしまうと
-  // 次回の既定 base が失敗時の SHA になり「差分なし」で再試行できなくなるため。
+  // 起動失敗 (ENOENT 等)、非ゼロ終了、--no-fallback の失敗終了、利用上限フォールバックでは
+  // 記録しない。記録してしまうと次回の既定 base がその時点の SHA になり、未レビューの差分が
+  // 「差分なし」になって再試行できなくなるため。フォールバック後の記録は、サブエージェントでの
+  // レビューを終えた利用者が `state --mark` で行う。
   // 1 実行につき最大 1 回 (bridge のやり直しを 2 往復と数えない)。
   let roundRecorded = false;
   const recordRound = () => {
     if (roundRecorded) return;
     roundRecorded = true;
     if (!stateUsable) return;
+    // 書き込む直前に状態を読み直す (read-modify-write)。レビュアーの実行中に別プロセスが
+    // dismiss や別ブランチのレビュー完了を書いていることがあり、起動前のスナップショットを
+    // 基に書くとその更新を消してしまうため。
+    const latest = readStateFn(invDeps);
+    if (latest.corrupt) {
+      // 壊れたファイルへ書き戻すと他の枝の記録まで消える。往復は記録せず警告に留める。
+      writeErr(`[cross-review] 状態ファイルを読めません (JSON 不正)。往復を記録しません: ${latest.path}\n`);
+      return;
+    }
     writeStateFn(
-      nextState(loadedState.state, { branch, sha: headSha, reviewer: opts.reviewer }),
+      nextState(latest.state, { branch, sha: headSha, reviewer: opts.reviewer }),
       invDeps,
     );
   };
@@ -1759,20 +1791,24 @@ function runReview(opts, deps = {}) {
       if (resolvedOpts.reviewer !== 'codex') return;
       if (opts.noFallback) return; // --no-fallback は従来どおり失敗終了 (終了コードはそのまま)。
       if (!isUsageLimitExit({ via: invocation.via, code: exit.code, outputTail: exit.outputTail })) return;
-      const fallbackPath = emitFallbackPrompt(prompt, opts, {
+      // 往復は記録しない。CLI はサブエージェントがレビューを終えたかを観測できないので、
+      // 書き出した時点で記録すると、プロンプトを渡さずに再実行したとき未レビューの差分が
+      // 「差分なし」になって再試行できなくなる。記録は `state --mark` で利用者が行う。
+      emitFallbackPrompt(prompt, opts, {
         err: writeErr,
         writeFile: deps.writeFile,
         tmpdir: deps.tmpdir,
         pid: deps.pid,
       });
-      // 代替プロンプトを渡せたときだけ数える (書き出しに失敗したら再試行できるよう記録しない)。
-      if (fallbackPath) recordRound();
     });
   };
   return start(inv);
 }
 
-// `state` サブコマンド。現在の枝の記録を JSON で表示し、--reset ならその枝の記録を消す。
+// `state` サブコマンド。現在の枝の記録を JSON で表示し、--reset ならその枝の記録を消し、
+// --mark なら往復を 1 回分記録する (round を 1 増やし、直前レビュー SHA を現在の HEAD にする)。
+// --mark があるのは、利用上限フォールバックのように CLI がレビューの成立を観測できない経路で、
+// レビューを終えた利用者が往復を進められるようにするため。
 // deps は runReview と同じ流儀で gitRun / 出力 / 状態ファイルの読み書きを差し替えられる。
 function runStateCommand(opts, deps = {}) {
   const gitRun = deps.gitRun || defaultGitRunner;
@@ -1792,6 +1828,20 @@ function runStateCommand(opts, deps = {}) {
     // 壊れたファイルへ書き戻すと他の枝の記録まで消えるので、読み書きどちらも行わない。
     writeErr(`[cross-review] 状態ファイルを読めません (JSON 不正)。手で確認するか削除してください: ${loaded.path}\n`);
     process.exitCode = 1;
+    return null;
+  }
+  if (opts.mark) {
+    // 直前に読んだ状態へ 1 往復分の遷移を適用する。SHA を取れなければ nextState が
+    // lastReviewedSha を据え置くので、往復だけが進む。
+    const headSha = currentHeadSha(gitRun);
+    const updated = nextState(loaded.state, { branch, sha: headSha });
+    // 書けていないのに「記録しました」とは言わない (失敗理由は writeState が警告済み)。
+    if (!writeStateFn(updated, stateDeps)) {
+      process.exitCode = 1;
+      return null;
+    }
+    const marked = branchStateOf(updated, branch);
+    writeErr(`[cross-review] ${branch} の往復を記録しました (${marked.round} 回目 / 直前レビュー SHA: ${marked.lastReviewedSha || 'なし'}): ${loaded.path}\n`);
     return null;
   }
   if (opts.reset) {
