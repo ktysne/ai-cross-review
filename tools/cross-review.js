@@ -97,6 +97,7 @@ const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { StringDecoder } = require('string_decoder');
 
 // レビュー観点はプロジェクト固有なので、リポジトリ直下の `.cross-review.md` を単一ソースとして
 // 読み込む。この CLI を他リポへコピーしても `.cross-review.md` を置くだけで観点を差し替えられる。
@@ -121,6 +122,15 @@ const REVIEW_DIR_NAME = '.cross-review';
 // PR コメントに載せる検証出力の行数上限 (末尾から数える)。長いテスト出力で
 // コメントが埋まらないようにするための上限で、切り詰めたときはその旨を本文に書く。
 const VERIFY_TAIL_LINES = 200;
+
+// PR コメントに載せるレビュー出力の文字数上限 (末尾から数える)。GitHub のコメント上限は
+// 65,536 文字なので、判断本文と検証出力の余地を残してここで止める。超えた分は保存ファイル
+// (`.cross-review/round-<N>-<reviewer>.md`) にあるので、summary にその旨とパスを書く。
+const COMMENT_REVIEW_LIMIT = 40000;
+
+// 生成したコメント全体がこの文字数を超えたら警告する。GitHub の上限 65,536 文字に対する
+// 余裕分で、投稿すると弾かれる可能性を知らせるだけ (投稿は利用者が行うので実行は止めない)。
+const COMMENT_SIZE_WARN_LIMIT = 65000;
 
 // 差分サイズガードの段階的縮退で試す「ファイル単位の要約閾値」(KB)。大きい順に下げる。
 // 既定 64KB で全体閾値を超えた差分を、再度 git を叩かずに縮めるための段。
@@ -174,6 +184,11 @@ const OUTPUT_TAIL_LIMIT = 64 * 1024;
 // 保存用は全文を溜める。青天井にすると異常出力でメモリを食い潰すため上限を設け、
 // 超えた分は先頭を捨てて末尾を残す (保存時に切り詰めた旨を書き添える)。
 const OUTPUT_CAPTURE_LIMIT = 4 * 1024 * 1024;
+
+// 上限超過で先頭を捨てたときに、保存する本文の先頭へ入れる注記。保存ファイルはそのまま
+// PR コメントへ転載されるので、「全文ではない」ことがファイル単体で分かるようにする。
+const OUTPUT_TRUNCATED_NOTICE = `（レビュー出力が上限 ${OUTPUT_CAPTURE_LIMIT / 1024 / 1024}MiB を超えたため先頭を切り詰めた。`
+  + `保持しているのは末尾 ${OUTPUT_CAPTURE_LIMIT / 1024 / 1024}MiB）`;
 
 // 既定で差分本文から除外するファイル群 (ロックファイル、生成物、ソースマップ)。
 // レビュー価値が低くトークンを浪費しがちなので、明示的に除外する。
@@ -1494,6 +1509,12 @@ const TRIAGE_TEMPLATE = [
   '**対応**: <対応内容とコミット、または非対応の理由>',
 ].join('\n');
 
+// 桁区切りを入れた数値表記。文字数を人向けに書くときに使う。Intl (toLocaleString) は
+// Node のビルドによってロケールデータの有無が変わるので、自前で揃えて出力を一定にする。
+function groupDigits(value) {
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
 // 本文をコードフェンスで囲むときの区切り。本文に含まれるバックティック連なりより 1 つ長くし、
 // 検証出力に ``` が含まれていてもフェンスが割れないようにする。
 function fenceFor(text) {
@@ -1519,12 +1540,30 @@ function buildMetaSummary(meta) {
   return `実行経路: ${via} / ${scope} / 差分サイズ: ${size}`;
 }
 
+// レビュー出力の節 (<details> の summary) に書く文言を決める純粋関数。
+// 「全文」と書けるのは、コメントへ載せる分を切っておらず、保存時にも切り詰めていないときだけ。
+// 載せない分がある場合は、どこを見れば残りがあるかが分かるよう保存ファイル名を添える。
+//   - コメント側の切り詰め: reviewBody が COMMENT_REVIEW_LIMIT を超えている
+//   - 保存側の切り詰め:     メタの outputTruncated (spawnReviewer が上限で先頭を捨てた)
+function reviewSectionSummary(round, reviewer, meta, reviewBody) {
+  const commentTruncated = String(reviewBody == null ? '' : reviewBody).length > COMMENT_REVIEW_LIMIT;
+  const savedTruncated = !!(meta && typeof meta === 'object' && meta.outputTruncated);
+  if (!commentTruncated && !savedTruncated) return 'レビュー出力（全文）';
+  const file = `\`${REVIEW_DIR_NAME}/${roundFileNames(round, reviewer).review}\``;
+  const notes = [];
+  if (commentTruncated) notes.push(`末尾 ${groupDigits(COMMENT_REVIEW_LIMIT)} 文字`);
+  if (savedTruncated) notes.push('保存時に上限超過で先頭を切り詰め済みのため全文ではない');
+  notes.push(savedTruncated ? `保存ファイルは ${file}` : `全文は ${file}`);
+  return `レビュー出力（${notes.join('。')}）`;
+}
+
 // 1 往復分の PR コメント本文を組み立てる純粋関数 (I/O は持たない)。
 //   - round / reviewer: 見出しに使う往復番号とレビュアー。
 //   - meta:    round-<N>-<reviewer>.json の内容 (無ければ null)。
 //   - triage:  判断ファイルの本文 (無ければ null。指摘の節は空にして、その旨を書く)。
 //   - verify:  検証コマンドの出力 (無ければ節ごと省く)。長ければ末尾 VERIFY_TAIL_LINES 行に切る。
-//   - review:  レビュアーの出力全文 (details で折りたたむ)。
+//   - review:  レビュアーの出力 (details で折りたたむ)。長ければ末尾 COMMENT_REVIEW_LIMIT
+//              文字に切り、summary に切り詰めた旨と保存ファイル名を書く (reviewSectionSummary)。
 // 見出しは運用で使ってきた「## クロスレビュー N 往復目: <レビュアー> の指摘と対応」に合わせる。
 function buildRoundComment({ round, reviewer, meta, triage, verify, review } = {}) {
   const parts = [
@@ -1552,9 +1591,9 @@ function buildRoundComment({ round, reviewer, meta, triage, verify, review } = {
   }
   const reviewBody = review == null ? '' : String(review).replace(/\s+$/, '');
   parts.push(
-    '<details><summary>レビュー出力（全文）</summary>',
+    `<details><summary>${reviewSectionSummary(round, reviewer, meta, reviewBody)}</summary>`,
     '',
-    reviewBody,
+    reviewBody.length > COMMENT_REVIEW_LIMIT ? reviewBody.slice(-COMMENT_REVIEW_LIMIT) : reviewBody,
     '',
     '</details>',
   );
@@ -1837,12 +1876,57 @@ function resolveReviewerCommandForSpawn(cmd, deps = {}) {
   return { cmd: candidates[0] || cmd, shell: true };
 }
 
+// 子プロセスの出力 (Buffer の塊) を文字列として溜め込む収集器を作る純粋関数 (I/O は持たない)。
+// ストリームごとに StringDecoder を持つのが要点で、塊の境界でマルチバイト文字が割れても
+// 置換文字 (U+FFFD) を混ぜずに復元する (塊ごとに toString('utf8') すると、3 バイト文字が
+// 2 分割された時点で壊れ、保存した全文を PR コメントへ転載したときに文字化けとして残る)。
+// 保持するのは 2 種類で、用途が違うので上限も別:
+//   - outputTail: 利用上限の判定に使う末尾 OUTPUT_TAIL_LIMIT
+//   - output:     `.cross-review/` へ保存する全文。OUTPUT_CAPTURE_LIMIT を超えたら先頭を捨て、
+//                 捨てたことを truncated で知らせる (保存側が注記を足せるようにするため)
+// 使い方: push(ストリーム名, chunk) で流し込み、終了時に end() で decoder の残りを回収する。
+function createStreamCollector() {
+  const decoders = new Map();
+  let output = '';
+  let outputTail = '';
+  let truncated = false;
+  const absorb = (text) => {
+    if (!text) return;
+    outputTail += text;
+    if (outputTail.length > OUTPUT_TAIL_LIMIT) outputTail = outputTail.slice(-OUTPUT_TAIL_LIMIT);
+    output += text;
+    if (output.length > OUTPUT_CAPTURE_LIMIT) {
+      output = output.slice(-OUTPUT_CAPTURE_LIMIT);
+      truncated = true;
+    }
+  };
+  const result = () => ({ output, outputTail, truncated });
+  return {
+    push(stream, chunk) {
+      let decoder = decoders.get(stream);
+      if (!decoder) {
+        decoder = new StringDecoder('utf8');
+        decoders.set(stream, decoder);
+      }
+      absorb(decoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8')));
+    },
+    // 未完成のバイト列が残っていれば吐き出す。2 回呼んでも二重に足さないよう decoder を捨てる。
+    end() {
+      for (const decoder of decoders.values()) absorb(decoder.end());
+      decoders.clear();
+      return result();
+    },
+    result,
+  };
+}
+
 // レビュアー CLI を起動し、stdin にプロンプトを流し込む。出力は端末へそのまま流す。
 // Windows では起動直前に where.exe で実体を解決し、可能なら shell を使わずに起動する。
 // stdio を pipe にするのは、端末へ転送しつつ末尾を保持して利用上限の判定に使うため
 // (受け取った塊をそのまま書き出すので、見た目は stdio:'inherit' と変わらない)。
-// onExit は終了時に 1 回だけ { code, outputTail, output, error } で呼ぶ
-// (runReview が outputTail を上限判定に、output を `.cross-review/` への保存に使う)。
+// onExit は終了時に 1 回だけ { code, outputTail, output, truncated, error } で呼ぶ
+// (runReview が outputTail を上限判定に、output を `.cross-review/` への保存に使い、
+//  truncated なら保存本文の先頭へ切り詰めの注記を足す)。
 function spawnReviewer(cmd, args, stdinText, onExit) {
   const resolved = resolveReviewerCommandForSpawn(cmd);
   const child = spawn(resolved.cmd, args, {
@@ -1850,30 +1934,26 @@ function spawnReviewer(cmd, args, stdinText, onExit) {
     // Windows では .cmd/.bat shim のことがあるため、その場合だけ shell 経由にする。
     shell: resolved.shell,
   });
-  // 上限判定には末尾のみ保持する。判定に使う語 (usage limit 等) は ASCII なので、塊の境界で
-  // マルチバイト文字が割れても判定には影響しない。転送側は Buffer のまま書いてバイト列を保つ。
-  // 保存用の output は全文を溜めるが、異常出力でメモリを食い潰さないよう上限で先頭を捨てる。
-  let outputTail = '';
-  let output = '';
-  const forward = (stream, sink) => {
+  // 転送側は Buffer のまま書いてバイト列を保ち、保持側は収集器 (StringDecoder) に任せる。
+  // stdout と stderr は別々にデコードする (混ぜると片方の未完成バイト列がもう片方の先頭に
+  // 継ぎ足され、境界で壊れるため)。
+  const collector = createStreamCollector();
+  const forward = (stream, sink, name) => {
     if (!stream) return;
     stream.on('data', (chunk) => {
       sink.write(chunk);
-      const text = chunk.toString('utf8');
-      outputTail += text;
-      if (outputTail.length > OUTPUT_TAIL_LIMIT) outputTail = outputTail.slice(-OUTPUT_TAIL_LIMIT);
-      output += text;
-      if (output.length > OUTPUT_CAPTURE_LIMIT) output = output.slice(-OUTPUT_CAPTURE_LIMIT);
+      collector.push(name, chunk);
     });
   };
-  forward(child.stdout, process.stdout);
-  forward(child.stderr, process.stderr);
+  forward(child.stdout, process.stdout, 'stdout');
+  forward(child.stderr, process.stderr, 'stderr');
   let settled = false;
   const finish = (code, error) => {
     if (settled) return; // error → close の順で両方発火することがあるため 1 回に絞る。
     settled = true;
     process.exitCode = code == null ? 1 : code;
-    if (typeof onExit === 'function') onExit({ code, outputTail, output, error: error || null });
+    const { output, outputTail, truncated } = collector.end();
+    if (typeof onExit === 'function') onExit({ code, outputTail, output, truncated, error: error || null });
   };
   child.on('error', (err) => {
     if (err && err.code === 'ENOENT') {
@@ -2126,13 +2206,18 @@ function runReview(opts, deps = {}) {
   // レビュー出力 (codex / claude) か、サブエージェントへ渡したプロンプト (subagent) を
   // `.cross-review/` へ保存する。往復番号が確定したときだけ保存し、失敗しても警告に留める。
   const nowIso = () => (deps.now ? String(deps.now()) : new Date().toISOString());
-  const saveRound = (round, { body, isPrompt, via }) => {
+  const saveRound = (round, { body, isPrompt, via, truncated }) => {
     if (round == null) return;
     const names = roundFileNames(round, opts.reviewer);
+    // 保持量の上限で先頭を捨てていたら、保存本文の先頭に注記を入れ、メタにも印を残す。
+    // 保存ファイルは PR コメントへ転載されるので、本文だけを見ても全文でないと分かるようにし、
+    // メタの印は `comment` が summary へ反映する (reviewSectionSummary)。
+    // 切り詰めていないときはキーごと書かない (無ければ全文、という読み方を保つ)。
+    const text = truncated ? `${OUTPUT_TRUNCATED_NOTICE}\n\n${String(body == null ? '' : body)}` : body;
     saveRoundArtifacts({
       round,
       reviewer: opts.reviewer,
-      body,
+      body: text,
       bodyName: isPrompt ? names.prompt : names.review,
       meta: {
         reviewer: opts.reviewer,
@@ -2141,6 +2226,7 @@ function runReview(opts, deps = {}) {
         diffKb: Number(diffKb.toFixed(1)),
         headSha,
         recordedAt: nowIso(),
+        ...(truncated ? { outputTruncated: true } : {}),
       },
     }, invDeps);
   };
@@ -2188,6 +2274,7 @@ function runReview(opts, deps = {}) {
           body: exit.output,
           isPrompt: false,
           via: invocation.via || 'direct',
+          truncated: !!exit.truncated,
         });
         return;
       }
@@ -2419,8 +2506,18 @@ function runCommentCommand(opts, deps = {}) {
   const prInfoOf = deps.prInfo || createPrInfoReader(deps, isNoFetch(deps.env));
   const prInfo = prInfoOf();
   const prNumber = prInfo.known && prInfo.present && prInfo.number ? String(prInfo.number) : '<PR番号>';
+  // パスは二重引用符で囲む。空白を含むパス (Windows の "Program Files" 配下など) でも
+  // PowerShell / cmd / POSIX シェルのいずれでもそのまま貼れるようにするため。
+  // パス自体に二重引用符が含まれる場合は想定しない (ファイル名として現れない)。
   writeErr(`[cross-review] PR コメントの本文を生成しました: ${outPath}\n`
-    + `  gh pr comment ${prNumber} --body-file ${outPath}\n`);
+    + `  gh pr comment ${prNumber} --body-file "${outPath}"\n`);
+  // 上限を超えていても書き出しは済んでいるので止めない。投稿するのは利用者なので、
+  // 弾かれうることだけ知らせて、判断ファイルや検証出力を削る判断を委ねる。
+  if (body.length > COMMENT_SIZE_WARN_LIMIT) {
+    writeErr(`[cross-review] 生成した本文が ${groupDigits(body.length)} 文字あります`
+      + ' (GitHub のコメント上限 65,536 文字を超えると投稿できません)。\n'
+      + '  判断ファイルか --verify の出力を削ってから投稿してください。\n');
+  }
   return outPath;
 }
 
@@ -2508,11 +2605,16 @@ module.exports = {
   loadIgnorePatterns,
   toExcludePathspecs,
   resolveReviewerCommandForSpawn,
+  createStreamCollector,
   CHECKLIST_FILENAME,
   IGNORE_FILENAME,
   STATE_FILENAME,
   REVIEW_DIR_NAME,
   VERIFY_TAIL_LINES,
+  COMMENT_REVIEW_LIMIT,
+  COMMENT_SIZE_WARN_LIMIT,
+  OUTPUT_CAPTURE_LIMIT,
+  OUTPUT_TRUNCATED_NOTICE,
   TRIAGE_TEMPLATE,
   DIFF_SHRINK_STEPS,
   NO_FETCH_ENV,

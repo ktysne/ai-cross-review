@@ -31,6 +31,7 @@ const {
   loadIgnorePatterns,
   toExcludePathspecs,
   resolveReviewerCommandForSpawn,
+  createStreamCollector,
   CHECKLIST_FILENAME,
   IGNORE_FILENAME,
   CODEX_AGENT_REVIEW_NAME,
@@ -72,6 +73,10 @@ const {
   readPrInfo,
   REVIEW_DIR_NAME,
   VERIFY_TAIL_LINES,
+  COMMENT_REVIEW_LIMIT,
+  COMMENT_SIZE_WARN_LIMIT,
+  OUTPUT_CAPTURE_LIMIT,
+  OUTPUT_TRUNCATED_NOTICE,
   TRIAGE_TEMPLATE,
 } = require('../tools/cross-review.js');
 
@@ -2728,6 +2733,49 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
   });
 });
 
+describe('cross-review createStreamCollector (出力のデコードと保持上限)', () => {
+  const aBytes = Buffer.from('あ', 'utf8'); // 3 バイト。塊の境界で割れる代表として使う。
+
+  it('マルチバイト文字が塊の境界で割れても置換文字を混ぜずに復元する', () => {
+    const collector = createStreamCollector();
+    collector.push('stdout', aBytes.subarray(0, 2));
+    collector.push('stdout', aBytes.subarray(2));
+    const { output, outputTail, truncated } = collector.end();
+    expect(output).toBe('あ');
+    expect(output).not.toContain('�');
+    expect(outputTail).toBe('あ');
+    expect(truncated).toBe(false);
+  });
+
+  it('stdout と stderr は別々にデコードする (未完成のバイト列が混ざらない)', () => {
+    const collector = createStreamCollector();
+    collector.push('stdout', aBytes.subarray(0, 2));
+    collector.push('stderr', Buffer.from('い', 'utf8')); // 割り込んでも stdout の続きを壊さない
+    collector.push('stdout', aBytes.subarray(2));
+    expect(collector.end().output).toBe('いあ');
+  });
+
+  it('未完成のまま終わったバイト列は end() で回収し、2 回呼んでも二重に足さない', () => {
+    const collector = createStreamCollector();
+    collector.push('stdout', aBytes.subarray(0, 2));
+    expect(collector.result().output).toBe(''); // 完成するまでは吐き出さない
+    const first = collector.end().output;
+    expect(first).toBe('�');
+    expect(collector.end().output).toBe(first);
+  });
+
+  it('保存用は上限で先頭を捨て、捨てたことを truncated で知らせる', () => {
+    const collector = createStreamCollector();
+    collector.push('stdout', Buffer.from('a'.repeat(OUTPUT_CAPTURE_LIMIT), 'utf8'));
+    expect(collector.result().truncated).toBe(false); // 上限ちょうどはまだ切らない
+    collector.push('stdout', Buffer.from('bZ', 'utf8'));
+    const { output, truncated } = collector.end();
+    expect(truncated).toBe(true);
+    expect(output).toHaveLength(OUTPUT_CAPTURE_LIMIT);
+    expect(output.endsWith('bZ')).toBe(true); // 残すのは末尾
+  });
+});
+
 describe('cross-review buildRoundComment (PR コメントの定型)', () => {
   const meta = {
     reviewer: 'codex',
@@ -2794,6 +2842,46 @@ describe('cross-review buildRoundComment (PR コメントの定型)', () => {
     expect(body).toContain('実行経路: 直接起動 / 対象: 未コミットの作業ツリー差分 / 差分サイズ: 12.3KB');
   });
 
+  it('レビュー出力が上限ちょうどなら全文として載せる', () => {
+    const review = 'x'.repeat(COMMENT_REVIEW_LIMIT);
+    const body = buildRoundComment({ round: 1, reviewer: 'codex', meta, triage: 'T', review });
+    expect(body).toContain('<details><summary>レビュー出力（全文）</summary>');
+    expect(body).toContain(review);
+  });
+
+  it('上限を 1 文字でも超えたら末尾だけ載せ、全文の在り処を summary に書く', () => {
+    const review = `HEAD_MARKER${'x'.repeat(COMMENT_REVIEW_LIMIT)}`;
+    const body = buildRoundComment({ round: 2, reviewer: 'codex', meta, triage: 'T', review });
+    expect(body).toContain(
+      `<details><summary>レビュー出力（末尾 40,000 文字。全文は \`${REVIEW_DIR_NAME}/round-2-codex.md\`）</summary>`,
+    );
+    expect(body).not.toContain('HEAD_MARKER'); // 先頭は落ちている
+  });
+
+  it('保存時に切り詰められていたら、コメントに収まっていても全文でない旨を書く', () => {
+    const body = buildRoundComment({
+      round: 3,
+      reviewer: 'codex',
+      meta: { ...meta, outputTruncated: true },
+      triage: 'T',
+      review: 'SHORT',
+    });
+    expect(body).toContain('保存時に上限超過で先頭を切り詰め済みのため全文ではない');
+    expect(body).toContain(`保存ファイルは \`${REVIEW_DIR_NAME}/round-3-codex.md\``);
+    expect(body).not.toContain('レビュー出力（全文）');
+  });
+
+  it('コメント側と保存側の両方で切れていたら両方書く', () => {
+    const body = buildRoundComment({
+      round: 1,
+      reviewer: 'codex',
+      meta: { ...meta, outputTruncated: true },
+      triage: 'T',
+      review: 'x'.repeat(COMMENT_REVIEW_LIMIT + 1),
+    });
+    expect(body).toContain('末尾 40,000 文字。保存時に上限超過で先頭を切り詰め済みのため全文ではない。');
+  });
+
   it('レビュアー表示名は codex / claude / subagent を運用の呼び名に対応させる', () => {
     expect(reviewerDisplayName('codex')).toBe('Codex');
     expect(reviewerDisplayName('claude')).toBe('Claude');
@@ -2846,6 +2934,33 @@ describe('cross-review レビュー出力の保存 (.cross-review/)', () => {
       headSha: sha,
       recordedAt: '2026-09-10T00:00:00.000Z',
     });
+    process.exitCode = 0;
+  });
+
+  it('保持上限で先頭を捨てていたら、保存本文の先頭に注記を入れメタに印を残す', () => {
+    const mem = memoryState();
+    process.exitCode = 0;
+    runReview(saveOpts(), saveDeps(mem, {
+      spawnFn: (cmd, args, stdin, onExit) => {
+        settle(onExit, { code: 0, output: 'TAIL_ONLY', truncated: true });
+        return null;
+      },
+    }));
+    const names = roundFileNames(1, 'codex');
+    expect(mem.store.files[path.join(dir, names.review)]).toBe(`${OUTPUT_TRUNCATED_NOTICE}\n\nTAIL_ONLY\n`);
+    expect(JSON.parse(mem.store.files[path.join(dir, names.meta)]).outputTruncated).toBe(true);
+    process.exitCode = 0;
+  });
+
+  it('切り詰めていなければ注記も印も付けない', () => {
+    const mem = memoryState();
+    process.exitCode = 0;
+    runReview(saveOpts(), saveDeps(mem, {
+      spawnFn: (cmd, args, stdin, onExit) => { settle(onExit, { code: 0, output: 'FULL' }); return null; },
+    }));
+    const names = roundFileNames(1, 'codex');
+    expect(mem.store.files[path.join(dir, names.review)]).toBe('FULL\n');
+    expect(JSON.parse(mem.store.files[path.join(dir, names.meta)])).not.toHaveProperty('outputTruncated');
     process.exitCode = 0;
   });
 
@@ -3195,6 +3310,34 @@ describe('cross-review comment サブコマンド', () => {
     const { deps, written } = commentDeps(files);
     expect(runCommentCommand({ round: 1, outPath: 'comment.md' }, deps)).toBe('comment.md');
     expect(written['comment.md']).toContain('## クロスレビュー 1 往復目');
+  });
+
+  it('コマンド例の --body-file はパスを二重引用符で囲む (空白を含んでも貼れるように)', () => {
+    const files = { [at(names.meta)]: '{}', [at(names.review)]: 'R', [at(names.triage)]: 'T' };
+    const { deps, logs } = commentDeps(files);
+    runCommentCommand({ round: 1 }, deps);
+    expect(logs.err).toContain(`--body-file "${at(names.comment)}"`);
+  });
+
+  it('生成した本文が大きすぎれば警告する (書き出しも投稿の判断も止めない)', () => {
+    const files = {
+      [at(names.meta)]: '{}',
+      [at(names.review)]: 'R',
+      [at(names.triage)]: 'T'.repeat(COMMENT_SIZE_WARN_LIMIT + 1),
+    };
+    const { deps, written, logs } = commentDeps(files);
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1 }, deps)).toBe(at(names.comment));
+    expect(written[at(names.comment)]).toBeDefined();
+    expect(logs.err).toMatch(/GitHub のコメント上限/);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('上限に収まっていれば大きさの警告は出さない', () => {
+    const files = { [at(names.meta)]: '{}', [at(names.review)]: 'R', [at(names.triage)]: 'T' };
+    const { deps, logs } = commentDeps(files);
+    runCommentCommand({ round: 1 }, deps);
+    expect(logs.err).not.toMatch(/GitHub のコメント上限/);
   });
 
   it('detectRoundReviewers は同じ往復のメタ情報だけを拾う', () => {
