@@ -878,11 +878,19 @@ function readCodexAgentDefinition(name, deps = {}) {
   const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
   for (const dir of [cwd, home]) {
     const defPath = path.join(dir, ...CODEX_AGENT_DEF_SUBDIR, `${name}.md`);
+    let present = false;
     try {
-      if (!exists(defPath)) continue;
-      return { path: defPath, text: readFile(defPath) };
+      present = !!exists(defPath);
     } catch {
-      // 読めない候補は無いものとして次へ進む (最終的に bridge 側の検査に委ねる)。
+      present = false; // 存在確認そのものの失敗は「無い」と同じ扱い (bridge 側の検査に委ねる)。
+    }
+    if (!present) continue;
+    // 存在するのに読めない定義は「無い」と同じにしない。bridge はその定義で起動するため、
+    // 検証できないまま起動したり、別候補 (ホーム側) を検証して安全と見なしたりできない。
+    try {
+      return { path: defPath, text: readFile(defPath) };
+    } catch (err) {
+      return { path: defPath, error: (err && err.message) || 'read error' };
     }
   }
   return null;
@@ -900,8 +908,17 @@ function checkCodexAgentSandbox({ fix, sandbox } = {}) {
 // codex-agent.sh が承認方針を never に固定しているかを判定する純粋関数。
 // スクリプトが codex への追加引数を受け付けない以上、この明示が無ければ承認方針は
 // codex の config.toml 次第になり、「Codex の承認は never 固定」を保証できない。
+// 文字列の存在ではなく「コメント行を除いた本文に、-c の引数として approval_policy=never が
+// 書かれている」ことを要求する (コメントや TODO に書かれているだけでは起動引数に乗らないため)。
+// 引用符の有無 (-c approval_policy=never / -c "approval_policy=never" / -c 'approval_policy=never')
+// は問わない。
+const APPROVAL_NEVER_ARG_PATTERN = /(^|\s)-c\s+["']?approval_policy=never["']?(\s|$)/m;
 function scriptPinsApprovalNever(text) {
-  return String(text == null ? '' : text).includes(APPROVAL_NEVER_MARKER);
+  const withoutComments = String(text == null ? '' : text)
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n');
+  return APPROVAL_NEVER_ARG_PATTERN.test(withoutComments);
 }
 
 // bridge (codex-agent.sh) 経由の起動を組み立てる。起動前に 2 つの不変条件を確かめる:
@@ -928,6 +945,9 @@ function codexAgentInvocation(script, opts, deps = {}) {
   }
   const agentName = codexAgentNameFor(opts);
   const def = readCodexAgentDefinition(agentName, deps);
+  if (def && def.error) {
+    return { error: `定義 ${agentName} を読めないため起動しません (${def.error}): ${def.path}` };
+  }
   if (def) {
     const check = checkCodexAgentSandbox({ fix: opts.fix, sandbox: codexAgentSandboxOf(def.text) });
     if (!check.ok) {

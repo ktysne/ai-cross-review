@@ -472,6 +472,25 @@ describe('cross-review reviewerInvocation (bridge 経由の codex 起動)', () =
     expect(inv.via).toBe('agent');
   });
 
+  it('定義が存在するのに読めなければエラーを返し、ホーム側の検証にも起動にも進まない', () => {
+    const projectDef = path.join('/repo', '.claude', 'gpt-agents', `${CODEX_AGENT_REVIEW_NAME}.md`);
+    const deps = bridge({
+      files: {
+        [projectDef]: defText('read-only'),
+        [defPath(CODEX_AGENT_REVIEW_NAME)]: defText('read-only'),
+      },
+    });
+    const readFile = deps.readFile;
+    deps.readFile = (p) => {
+      if (p === projectDef) throw new Error('EACCES');
+      return readFile(p);
+    };
+    const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, deps);
+    expect(inv.error).toMatch(/読めない/);
+    expect(inv.error).toMatch(/EACCES/);
+    expect(inv.cmd).toBeUndefined();
+  });
+
   it('定義はプロジェクト側 (cwd) をユーザ側 (home) より優先する', () => {
     const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, bridge({
       files: {
@@ -540,6 +559,17 @@ describe('cross-review scriptPinsApprovalNever', () => {
     expect(scriptPinsApprovalNever('codex exec -\n')).toBe(false);
     expect(scriptPinsApprovalNever('')).toBe(false);
     expect(scriptPinsApprovalNever(undefined)).toBe(false);
+  });
+
+  it('コメント行にだけ書かれていても false (起動引数に乗らない)', () => {
+    expect(scriptPinsApprovalNever('# TODO: -c approval_policy=never\ncodex exec -\n')).toBe(false);
+    expect(scriptPinsApprovalNever('  # -c approval_policy=never を後で足す\ncodex exec -\n')).toBe(false);
+  });
+
+  it('-c の引数として書かれていなければ false、引用符付きや行継続の -c 引数は true', () => {
+    expect(scriptPinsApprovalNever('echo approval_policy=never\ncodex exec -\n')).toBe(false);
+    expect(scriptPinsApprovalNever('codex exec -c "approval_policy=never" -\n')).toBe(true);
+    expect(scriptPinsApprovalNever("codex exec \\\n  -c 'approval_policy=never' \\\n  -\n")).toBe(true);
   });
 });
 
