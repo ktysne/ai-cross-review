@@ -59,6 +59,7 @@ node tools/cross-review.js codex --no-fallback      # Codex が利用上限で�
 node tools/cross-review.js state                    # この枝の往復回数・直前レビュー SHA・非対応指摘を表示 (--reset で消去)
 node tools/cross-review.js state --mark             # 往復を 1 回分記録する (CLI がレビューの成立を観測できない経路の後で使う)
 node tools/cross-review.js dismiss "<要約>"          # 非対応と判断した指摘を記録し、以降のレビューで再指摘させない
+node tools/cross-review.js comment --round 1        # 保存したレビュー出力と判断ファイルから PR コメント本文を生成 (投稿はしない)
 node tools/cross-review.js --help
 ```
 
@@ -107,7 +108,28 @@ CLI は起動できても、ネットワーク/API 接続が許可されずレ�
 | `--no-state` | 状態ファイル（`.cross-review-state.json`）の読み書きを行わない（CI 等） |
 | `--no-exclude` | 既定除外も含めすべての除外を無効化（生成物、ロックファイルもまとめてレビューしたいとき） |
 | `--instructions <path>` | レビュアーへの申し送り、重点指摘ファイルをプロンプトに追加する（観点 `.cross-review.md` は置き換えず追加。`--fix` と併用すると、その指摘を直接修正させる） |
+| `--no-pr-check` | レビュー実行前の PR 存在確認（`gh pr view`）を省く（既定では PR が無いと分かったときだけ警告し、実行は止めません） |
+| `--round <N>` | `comment` 専用。対象の往復番号（必須） |
+| `--reviewer <name>` | `comment` 専用。対象のレビュアー（省略時は `.cross-review/round-<N>-*.json` から自動選択。複数あればエラー） |
+| `--verify <path>` | `comment` 専用。検証コマンドの出力ファイルを「確認内容」節に入れる（長い出力は末尾 200 行） |
+| `--out <path>` | `comment` 専用。生成した本文の書き出し先（既定 `.cross-review/round-<N>-comment.md`） |
 | `-h`, `--help` | ヘルプを表示 |
+
+### PR コメントを生成する（`comment`）
+
+往復を記録できたとき、レビュアーの出力とメタ情報が `.cross-review/round-<N>-*` に保存されます。  
+裏取りと対応を `.cross-review/round-<N>-triage.md` に書いてから `comment` を実行すると、`gh pr comment --body-file` へ渡す本文ができます（投稿はしません）。
+
+```bash
+npm run review:codex                                        # レビュー (出力が .cross-review/ に保存される)
+# .cross-review/round-1-triage.md に裏取りと対応を書く (無ければ雛形が出ます)
+npm test > verify.log 2>&1
+node tools/cross-review.js comment --round 1 --verify verify.log
+gh pr comment <番号> --body-file .cross-review/round-1-comment.md
+```
+
+`.cross-review/` は生成物なので `.gitignore` に追加します。  
+詳しくは [docs/cross-review.md](docs/cross-review.md) の「PR を共有ログにする」節を参照してください。
 
 ## レビュー観点（`.cross-review.md`）
 
@@ -178,7 +200,7 @@ docs/generated/*.md
    同期スクリプトを使うなら `sync` / `sync:check` も足す（後述「同期スクリプトで更新する」）。  
 4. Claude Code を使うなら `.claude/skills/cross-review/SKILL.md` をコピーする（実行手順スキル、汎用）。  
    このスキルは vendored（上書き更新の対象）なので**直接編集せず**、プロジェクト固有の運用（検証コマンド、CI、同期スクリプト名など）は `.cross-review.md` や自分の doc 側に書く。  
-5. `.gitignore` に `.cross-review-state.json` を足す（往復回数、直前レビュー SHA、非対応と判断した指摘を持つローカル状態。共有しない）。  
+5. `.gitignore` に `.cross-review-state.json`（往復回数、直前レビュー SHA、非対応と判断した指摘を持つローカル状態）と `.cross-review/`（往復ごとのレビュー出力、判断ファイル、生成した PR コメント本文）を足す。どちらも共有せず、共有は PR コメントで行う。  
 6. `codex` / `claude` の CLI を PATH に通す（CLI を起動できないときは `subagent` モードを使う）。  
 7. 更新するときは、コピーするファイルを上書きでコピーし直すだけ。  
    自分で編集するファイルは触らない。  

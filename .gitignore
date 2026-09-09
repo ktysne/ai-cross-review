@@ -4,3 +4,5 @@ tools/node_modules/
 .DS_Store
 # 相互レビューの往復回数・直前レビュー SHA・非対応指摘を持つローカル状態 (共有しない)
 .cross-review-state.json
+# 往復ごとのレビュー出力・判断ファイル・生成した PR コメント本文 (生成物。共有は PR コメントで行う)
+.cross-review/
