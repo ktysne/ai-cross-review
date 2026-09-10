@@ -6,3 +6,5 @@ tools/node_modules/
 .cross-review-state.json
 # 往復ごとのレビュー出力・判断ファイル・生成した PR コメント本文 (生成物。共有は PR コメントで行う)
 .cross-review/
+# CodeGraph のローカル索引 (マシン固有。コミットしない)
+.codegraph/
