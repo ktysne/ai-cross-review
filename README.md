@@ -59,7 +59,7 @@ node tools/cross-review.js codex --no-fallback      # Codex が利用上限で�
 node tools/cross-review.js state                    # この枝の往復回数・直前レビュー SHA・非対応指摘を表示 (--reset で消去)
 node tools/cross-review.js state --mark             # 往復を 1 回分記録する (CLI がレビューの成立を観測できない経路の後で使う)
 node tools/cross-review.js dismiss "<要約>"          # 非対応と判断した指摘を記録し、以降のレビューで再指摘させない
-node tools/cross-review.js comment --round 1        # 保存したレビュー出力と判断ファイルから PR コメント本文を生成 (投稿はしない)
+node tools/cross-review.js comment --round 1        # 判断ファイルと検証出力から PR コメント本文を生成 (投稿はしない)
 node tools/cross-review.js --help
 ```
 

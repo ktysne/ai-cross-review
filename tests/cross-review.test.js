@@ -73,7 +73,6 @@ const {
   readPrInfo,
   REVIEW_DIR_NAME,
   VERIFY_TAIL_LINES,
-  COMMENT_REVIEW_LIMIT,
   COMMENT_SIZE_WARN_LIMIT,
   OUTPUT_CAPTURE_LIMIT,
   OUTPUT_TRUNCATED_NOTICE,
@@ -2817,47 +2816,55 @@ describe('cross-review buildRoundComment (PR コメントの定型)', () => {
     recordedAt: '2026-09-10T00:00:00.000Z',
   };
 
-  it('見出し・要約行・判断ファイル本文・レビュー出力の折りたたみを並べる', () => {
+  it('見出し・要約行・判断ファイル本文を並べる', () => {
     const body = buildRoundComment({
       round: 2,
       reviewer: 'codex',
       meta,
       triage: '### 指摘 1（要修正）: X\n**対応**: 直した',
       verify: null,
-      review: 'REVIEW_BODY',
     });
     expect(body).toContain('## クロスレビュー 2 往復目: Codex の指摘と対応');
     expect(body).toContain('実行経路: bridge 経由 / base: origin/main (origin/main 優先解決) / 差分サイズ: 12.3KB');
     expect(body).toContain('### 指摘 1（要修正）: X');
-    expect(body).toContain('<details><summary>レビュー出力（全文）</summary>');
-    expect(body).toContain('REVIEW_BODY');
-    expect(body).toContain('</details>');
     expect(body).not.toContain('### 確認内容'); // 検証出力が無ければ節ごと出さない
   });
 
+  it('レビュー出力を渡してもコメント本文に載せない', () => {
+    const body = buildRoundComment({
+      round: 2,
+      reviewer: 'codex',
+      meta,
+      triage: 'T',
+      review: 'REVIEW_BODY',
+    });
+    expect(body).not.toContain(`<${'details'}>`);
+    expect(body).not.toContain('REVIEW_BODY');
+  });
+
   it('判断ファイルが無いときは指摘の節を空にし、その旨を書く', () => {
-    const body = buildRoundComment({ round: 1, reviewer: 'subagent', meta: null, triage: null, review: 'R' });
+    const body = buildRoundComment({ round: 1, reviewer: 'subagent', meta: null, triage: null });
     expect(body).toContain('## クロスレビュー 1 往復目: Claude 客観サブエージェント の指摘と対応');
     expect(body).toContain('判断ファイルが未記入');
     expect(body).toContain('実行経路: 不明'); // メタ情報が無くても本文は作る
   });
 
   it('検証出力があれば「確認内容」節にコードブロックで入れる', () => {
-    const body = buildRoundComment({ round: 1, reviewer: 'claude', meta, triage: 'T', verify: 'PASS 10 tests', review: 'R' });
+    const body = buildRoundComment({ round: 1, reviewer: 'claude', meta, triage: 'T', verify: 'PASS 10 tests' });
     expect(body).toContain('### 確認内容');
     expect(body).toContain('```text\nPASS 10 tests\n```');
   });
 
   it('検証出力が長ければ末尾 200 行に切り、切ったことを書く', () => {
     const lines = Array.from({ length: VERIFY_TAIL_LINES + 50 }, (_, i) => `line ${i + 1}`);
-    const body = buildRoundComment({ round: 1, reviewer: 'codex', meta, triage: 'T', verify: lines.join('\n'), review: 'R' });
+    const body = buildRoundComment({ round: 1, reviewer: 'codex', meta, triage: 'T', verify: lines.join('\n') });
     expect(body).toContain(`（出力が長いため末尾 ${VERIFY_TAIL_LINES} 行のみ。全 ${lines.length} 行）`);
     expect(body).toContain(`line ${lines.length}`);
     expect(body).not.toContain('\nline 1\n'); // 先頭は落ちている
   });
 
   it('検証出力にコードフェンスが含まれても囲みが割れない', () => {
-    const body = buildRoundComment({ round: 1, reviewer: 'codex', meta, triage: 'T', verify: '```\ninner\n```', review: 'R' });
+    const body = buildRoundComment({ round: 1, reviewer: 'codex', meta, triage: 'T', verify: '```\ninner\n```' });
     expect(body).toContain('````text');
     expect(body).toContain('\n````\n');
   });
@@ -2868,49 +2875,8 @@ describe('cross-review buildRoundComment (PR コメントの定型)', () => {
       reviewer: 'codex',
       meta: { ...meta, via: 'direct', base: { ref: 'main', source: 'uncommitted' } },
       triage: 'T',
-      review: 'R',
     });
     expect(body).toContain('実行経路: 直接起動 / 対象: 未コミットの作業ツリー差分 / 差分サイズ: 12.3KB');
-  });
-
-  it('レビュー出力が上限ちょうどなら全文として載せる', () => {
-    const review = 'x'.repeat(COMMENT_REVIEW_LIMIT);
-    const body = buildRoundComment({ round: 1, reviewer: 'codex', meta, triage: 'T', review });
-    expect(body).toContain('<details><summary>レビュー出力（全文）</summary>');
-    expect(body).toContain(review);
-  });
-
-  it('上限を 1 文字でも超えたら末尾だけ載せ、全文の在り処を summary に書く', () => {
-    const review = `HEAD_MARKER${'x'.repeat(COMMENT_REVIEW_LIMIT)}`;
-    const body = buildRoundComment({ round: 2, reviewer: 'codex', meta, triage: 'T', review });
-    expect(body).toContain(
-      `<details><summary>レビュー出力（末尾 40,000 文字。全文は \`${REVIEW_DIR_NAME}/round-2-codex.md\`）</summary>`,
-    );
-    expect(body).not.toContain('HEAD_MARKER'); // 先頭は落ちている
-  });
-
-  it('保存時に切り詰められていたら、コメントに収まっていても全文でない旨を書く', () => {
-    const body = buildRoundComment({
-      round: 3,
-      reviewer: 'codex',
-      meta: { ...meta, outputTruncated: true },
-      triage: 'T',
-      review: 'SHORT',
-    });
-    expect(body).toContain('保存時に上限超過で先頭を切り詰め済みのため全文ではない');
-    expect(body).toContain(`保存ファイルは \`${REVIEW_DIR_NAME}/round-3-codex.md\``);
-    expect(body).not.toContain('レビュー出力（全文）');
-  });
-
-  it('コメント側と保存側の両方で切れていたら両方書く', () => {
-    const body = buildRoundComment({
-      round: 1,
-      reviewer: 'codex',
-      meta: { ...meta, outputTruncated: true },
-      triage: 'T',
-      review: 'x'.repeat(COMMENT_REVIEW_LIMIT + 1),
-    });
-    expect(body).toContain('末尾 40,000 文字。保存時に上限超過で先頭を切り詰め済みのため全文ではない。');
   });
 
   it('レビュアー表示名は codex / claude / subagent を運用の呼び名に対応させる', () => {
@@ -3209,7 +3175,6 @@ describe('cross-review comment サブコマンド', () => {
   it('レビュアーを 1 つに決められれば、判断ファイルと合わせてコメント本文を書き出す', () => {
     const files = {
       [at(names.meta)]: JSON.stringify({ reviewer: 'codex', via: 'agent', base: { ref: 'origin/main', source: 'origin-main' }, diffKb: 3.5 }),
-      [at(names.review)]: 'REVIEWER_SAID',
       [at(names.triage)]: '### 指摘 1（要修正）: A\n**対応**: 直した',
     };
     const { deps, written, logs } = commentDeps(files);
@@ -3217,7 +3182,6 @@ describe('cross-review comment サブコマンド', () => {
     const outPath = runCommentCommand({ round: 1 }, deps);
     expect(outPath).toBe(at(names.comment));
     expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目: Codex の指摘と対応');
-    expect(written[at(names.comment)]).toContain('REVIEWER_SAID');
     expect(written[at(names.comment)]).toContain('### 指摘 1（要修正）: A');
     expect(logs.err).toContain('gh pr comment <PR番号> --body-file');
     expect(process.exitCode).toBe(0);
@@ -3226,7 +3190,6 @@ describe('cross-review comment サブコマンド', () => {
   it('PR 番号が取れればコマンド例に埋める', () => {
     const files = {
       [at(names.meta)]: '{}',
-      [at(names.review)]: 'R',
       [at(names.triage)]: 'T',
     };
     const { deps, logs } = commentDeps(files, { ghRun: () => '{"number":42,"baseRefName":"main"}' });
@@ -3253,43 +3216,44 @@ describe('cross-review comment サブコマンド', () => {
     const files = {
       [at('round-1-codex.json')]: '{}',
       [at('round-1-claude.json')]: '{}',
-      [at('round-1-claude.md')]: 'CLAUDE_SAID',
       [at(names.triage)]: 'T',
     };
     const { deps, written } = commentDeps(files);
     runCommentCommand({ round: 1, reviewerName: 'claude' }, deps);
     expect(written[at(names.comment)]).toContain('Claude の指摘と対応');
-    expect(written[at(names.comment)]).toContain('CLAUDE_SAID');
   });
 
-  it('保存されたレビューが無ければエラーにする', () => {
-    const { deps, logs } = commentDeps({});
+  it('レビュー出力が無くてもメタ情報と判断ファイルから生成できる', () => {
+    const round3Names = roundFileNames(3, 'codex');
+    const files = {
+      [at(round3Names.meta)]: '{}',
+      [at(round3Names.triage)]: 'T',
+    };
+    const { deps, written } = commentDeps(files);
     process.exitCode = 0;
-    expect(runCommentCommand({ round: 3 }, deps)).toBeNull();
-    expect(logs.err).toMatch(/レビュー出力が見つかりません/);
-    expect(process.exitCode).toBe(1);
-    process.exitCode = 0;
+    expect(runCommentCommand({ round: 3 }, deps)).toBe(at(round3Names.comment));
+    expect(written[at(round3Names.comment)]).toContain('## クロスレビュー 3 往復目');
+    expect(process.exitCode).toBe(0);
   });
 
-  it('メタ情報だけあってレビュー出力が無ければ、貼り付け先を示してエラーにする (subagent 経路)', () => {
+  it('subagent 経路でもレビュー出力を貼らずに生成できる', () => {
     const subNames = roundFileNames(1, 'subagent');
     const files = {
       [at(subNames.meta)]: '{}',
       [at(subNames.prompt)]: 'PROMPT',
+      [at(subNames.triage)]: 'T',
     };
-    const { deps, logs } = commentDeps(files);
+    const { deps, written } = commentDeps(files);
     process.exitCode = 0;
-    expect(runCommentCommand({ round: 1 }, deps)).toBeNull();
-    expect(logs.err).toContain(subNames.review);
-    expect(logs.err).toContain(subNames.prompt);
-    expect(process.exitCode).toBe(1);
+    expect(runCommentCommand({ round: 1 }, deps)).toBe(at(subNames.comment));
+    expect(written[at(subNames.comment)]).toContain('Claude 客観サブエージェント の指摘と対応');
+    expect(process.exitCode).toBe(0);
     process.exitCode = 0;
   });
 
   it('判断ファイルが無ければ雛形を書き出し、指摘の節を空にして続行する', () => {
     const files = {
       [at(names.meta)]: '{}',
-      [at(names.review)]: 'R',
     };
     const { deps, written, logs } = commentDeps(files);
     process.exitCode = 0;
@@ -3303,7 +3267,6 @@ describe('cross-review comment サブコマンド', () => {
   it('メタ情報が壊れていても警告して本文は作る', () => {
     const files = {
       [at(names.meta)]: '{ broken',
-      [at(names.review)]: 'R',
       [at(names.triage)]: 'T',
     };
     const { deps, written, logs } = commentDeps(files);
@@ -3315,7 +3278,6 @@ describe('cross-review comment サブコマンド', () => {
   it('--verify の検証出力を「確認内容」節に入れる', () => {
     const files = {
       [at(names.meta)]: '{}',
-      [at(names.review)]: 'R',
       [at(names.triage)]: 'T',
       'verify.log': 'ok 347 tests',
     };
@@ -3326,7 +3288,7 @@ describe('cross-review comment サブコマンド', () => {
   });
 
   it('--verify のファイルを読めなければエラーにする (黙って省かない)', () => {
-    const files = { [at(names.meta)]: '{}', [at(names.review)]: 'R', [at(names.triage)]: 'T' };
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
     const { deps, logs, written } = commentDeps(files);
     process.exitCode = 0;
     expect(runCommentCommand({ round: 1, verifyPath: 'missing.log' }, deps)).toBeNull();
@@ -3337,14 +3299,14 @@ describe('cross-review comment サブコマンド', () => {
   });
 
   it('--out で書き出し先を変えられる', () => {
-    const files = { [at(names.meta)]: '{}', [at(names.review)]: 'R', [at(names.triage)]: 'T' };
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
     const { deps, written } = commentDeps(files);
     expect(runCommentCommand({ round: 1, outPath: 'comment.md' }, deps)).toBe('comment.md');
     expect(written['comment.md']).toContain('## クロスレビュー 1 往復目');
   });
 
   it('コマンド例の --body-file はパスを二重引用符で囲む (空白を含んでも貼れるように)', () => {
-    const files = { [at(names.meta)]: '{}', [at(names.review)]: 'R', [at(names.triage)]: 'T' };
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
     const { deps, logs } = commentDeps(files);
     runCommentCommand({ round: 1 }, deps);
     expect(logs.err).toContain(`--body-file "${at(names.comment)}"`);
@@ -3353,7 +3315,6 @@ describe('cross-review comment サブコマンド', () => {
   it('生成した本文が大きすぎれば警告する (書き出しも投稿の判断も止めない)', () => {
     const files = {
       [at(names.meta)]: '{}',
-      [at(names.review)]: 'R',
       [at(names.triage)]: 'T'.repeat(COMMENT_SIZE_WARN_LIMIT + 1),
     };
     const { deps, written, logs } = commentDeps(files);
@@ -3365,7 +3326,7 @@ describe('cross-review comment サブコマンド', () => {
   });
 
   it('上限に収まっていれば大きさの警告は出さない', () => {
-    const files = { [at(names.meta)]: '{}', [at(names.review)]: 'R', [at(names.triage)]: 'T' };
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
     const { deps, logs } = commentDeps(files);
     runCommentCommand({ round: 1 }, deps);
     expect(logs.err).not.toMatch(/GitHub のコメント上限/);
