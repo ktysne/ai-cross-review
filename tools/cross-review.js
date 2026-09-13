@@ -911,7 +911,7 @@ function defaultGhRunner(args, options = {}) {
   });
   const error = res.error
     ? `${res.error.code ? `${res.error.code}: ` : ''}${res.error.message || 'gh execution error'}`
-    : '';
+    : (res.signal ? `gh がシグナル ${res.signal} で終了しました` : '');
   return {
     status: Number.isInteger(res.status) ? res.status : null,
     stdout: res.stdout || '',
@@ -920,17 +920,19 @@ function defaultGhRunner(args, options = {}) {
   };
 }
 
-// ghRun の戻り値を { status, stdout, stderr } に正規化する純粋関数。
-// 文字列を返す実装 (テストの簡易スタブなど) は「成功して stdout を返した」とみなす。
+// ghRun の戻り値を { status, stdout, stderr, error } に正規化する純粋関数。
+// 文字列と error の無い status 省略オブジェクトは、既存スタブとの互換性のため成功とみなす。
+// 起動エラーやシグナル終了では status を null のまま残し、成功へ変換しない。
 function normalizeGhResult(res) {
   if (res == null) return null;
   if (typeof res === 'string') return { status: 0, stdout: res, stderr: '' };
   if (typeof res !== 'object') return null;
+  const error = String(res.error == null ? '' : res.error);
   return {
-    status: Number.isInteger(res.status) ? res.status : null,
+    status: Number.isInteger(res.status) ? res.status : (error ? null : 0),
     stdout: String(res.stdout == null ? '' : res.stdout),
     stderr: String(res.stderr == null ? '' : res.stderr),
-    error: String(res.error == null ? '' : res.error),
+    error,
   };
 }
 

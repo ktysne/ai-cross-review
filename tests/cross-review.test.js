@@ -3166,6 +3166,15 @@ describe('cross-review readPrInfo / normalizeGhResult', () => {
     });
   });
 
+  it('error の無い status 省略オブジェクトは従来どおり成功とみなす', () => {
+    expect(normalizeGhResult({ stdout: 'x' })).toEqual({
+      status: 0,
+      stdout: 'x',
+      stderr: '',
+      error: '',
+    });
+  });
+
   it('PR 無しの非ゼロ終了だけを present:false と確定させる', () => {
     expect(readPrInfo(() => ({ status: 1, stdout: '', stderr: 'no pull requests found' }), false))
       .toMatchObject({ known: true, present: false });
