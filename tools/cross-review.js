@@ -15,7 +15,7 @@
 //   node tools/cross-review.js claude --base develop  # 比較先ブランチを変更
 //   node tools/cross-review.js state            # この枝の往復回数・直前レビュー SHA・非対応指摘を表示
 //   node tools/cross-review.js dismiss "<要約>" # 非対応と判断した指摘を記録し、以降再指摘させない
-//   node tools/cross-review.js comment --round 1  # 保存済みレビュー出力と判断ファイルから PR コメント本文を生成
+//   node tools/cross-review.js comment --round 1  # 判断ファイルと検証出力から PR コメント本文を生成
 //   npm run review:codex                        # = node tools/cross-review.js codex
 //   npm run review:codex:fix                    # = node tools/cross-review.js codex --fix
 //   npm run review:claude -- --uncommitted      # npm 経由で追加引数を渡す (-- が必要)
@@ -71,8 +71,8 @@
 //   解決する。前者ほど差分が小さく、かつ人の指定なしで決まる情報だから。決めた base と解決方法は
 //   差分サイズと同じ stderr 行に必ず出し、stale な比較に気づけるようにする。
 // - 往復を記録できたときは、レビュアーの出力 (subagent 経路は渡したプロンプト) と実行経路の
-//   メタ情報を `.cross-review/round-<N>-*` へ保存する。PR コメントの定型はレビュー出力、主セッションが
-//   書く判断ファイル、検証出力の 3 つからの機械的な変換なので、材料を会話の外へ残しておく。
+//   メタ情報を `.cross-review/round-<N>-*` へ保存する。PR コメントの定型は主セッションが
+//   書く判断ファイルと検証出力からの機械的な変換なので、材料を会話の外へ残しておく。
 //   保存の失敗はレビューを失敗にしない (出力は端末に出ているため)。整形は `comment` サブコマンドが
 //   行い、投稿はしない。判断内容は主セッションが書くもので、CLI が PR へ直接書くと誤投稿の取り消しが
 //   難しいため、`gh pr comment --body-file` のコマンド例を出すに留める。
@@ -122,11 +122,6 @@ const REVIEW_DIR_NAME = '.cross-review';
 // PR コメントに載せる検証出力の行数上限 (末尾から数える)。長いテスト出力で
 // コメントが埋まらないようにするための上限で、切り詰めたときはその旨を本文に書く。
 const VERIFY_TAIL_LINES = 200;
-
-// PR コメントに載せるレビュー出力の文字数上限 (末尾から数える)。GitHub のコメント上限は
-// 65,536 文字なので、判断本文と検証出力の余地を残してここで止める。超えた分は保存ファイル
-// (`.cross-review/round-<N>-<reviewer>.md`) にあるので、summary にその旨とパスを書く。
-const COMMENT_REVIEW_LIMIT = 40000;
 
 // 生成したコメント全体がこの文字数を超えたら警告する。GitHub の上限 65,536 文字に対する
 // 余裕分で、投稿すると弾かれる可能性を知らせるだけ (投稿は利用者が行うので実行は止めない)。
@@ -434,7 +429,7 @@ const USAGE = [
   '                    「再指摘しない」節として添えられる。同じ要約は重複追加しない)',
   '',
   'サブコマンド (PR コメントの生成):',
-  '  comment --round <N>   保存済みのレビュー出力 (.cross-review/round-<N>-<reviewer>.md)、判断ファイル',
+  '  comment --round <N>   保存済みのメタ情報 (.cross-review/round-<N>-<reviewer>.json)、判断ファイル',
   '                        (round-<N>-triage.md)、検証出力を定型に整形し、gh pr comment --body-file 用の',
   '                        ファイルを書き出す (投稿はしない。コマンド例は stderr に出る)',
   '',
@@ -487,7 +482,7 @@ const USAGE = [
   'レビュー出力: 往復を記録できたときだけ <スクリプト>/../.cross-review/ へ保存します',
   '  (codex / claude はレビュアーの出力を round-<N>-<reviewer>.md、subagent は渡したプロンプトを',
   '   round-<N>-<reviewer>-prompt.md、いずれも実行経路と base を round-<N>-<reviewer>.json に記録)。',
-  '  subagent 経路はサブエージェントの出力を round-<N>-subagent.md へ貼ってから comment を使います。',
+  '  subagent 経路はサブエージェントの出力を round-<N>-subagent.md へ任意で貼れます (記録用。comment は読みません)。',
   'PR の確認: レビュー実行前に gh pr view で PR の有無を調べ、無いと分かったときだけ警告します',
   '  (実行は止めません。--no-pr-check と CROSS_REVIEW_NO_FETCH=1 で省略)。',
   '',
@@ -537,7 +532,7 @@ function parseArgs(argv) {
   const out = {
     // 実行するサブコマンド。'review' はレビュアー (codex / claude / subagent) の実行、
     // 'state' は状態ファイルの表示と初期化、'dismiss' は非対応と判断した指摘の記録、
-    // 'comment' は保存済みレビュー出力と判断ファイルからの PR コメント本文の生成。
+    // 'comment' は保存済みメタ情報、判断ファイル、検証出力から PR コメント本文を生成する。
     command: 'review',
     reviewer: null,
     dismissText: null, // dismiss の要約 (command === 'dismiss' のときだけ使う)
@@ -736,7 +731,7 @@ function parseArgs(argv) {
     }
   }
   if (!out.help && !out.error && rest[0] === 'comment') {
-    // PR コメント本文の生成。保存済みのレビュー出力と判断ファイルを読むだけで、
+    // PR コメント本文の生成。保存済みのメタ情報と判断ファイルを読むだけで、
     // レビュアーの起動も状態ファイルの更新も行わない。
     out.command = 'comment';
     if (out.noState) {
@@ -1449,7 +1444,7 @@ function resolveReviewDir(deps = {}) {
 
 // 往復 N とレビュアー名から、`.cross-review/` に置くファイル名一式を返す純粋関数。
 // 保存側 (runReview) と読み出し側 (runCommentCommand)、ドキュメントで名前がずれないよう 1 か所で決める。
-//   - review: レビュアーの出力全文 (subagent 経路は主セッションが貼る)
+//   - review: レビュアーの出力全文 (subagent 経路は主セッションが任意で貼る)
 //   - prompt: subagent へ渡したプロンプト (subagent 経路のみ保存する)
 //   - meta:   実行経路や base を記録する JSON
 //   - triage: 主セッションが書く判断ファイル (指摘ごとの裏取りと対応)
@@ -1553,32 +1548,13 @@ function buildMetaSummary(meta) {
   return `実行経路: ${via} / ${scope} / 差分サイズ: ${size}`;
 }
 
-// レビュー出力の節 (<details> の summary) に書く文言を決める純粋関数。
-// 「全文」と書けるのは、コメントへ載せる分を切っておらず、保存時にも切り詰めていないときだけ。
-// 載せない分がある場合は、どこを見れば残りがあるかが分かるよう保存ファイル名を添える。
-//   - コメント側の切り詰め: reviewBody が COMMENT_REVIEW_LIMIT を超えている
-//   - 保存側の切り詰め:     メタの outputTruncated (spawnReviewer が上限で先頭を捨てた)
-function reviewSectionSummary(round, reviewer, meta, reviewBody) {
-  const commentTruncated = String(reviewBody == null ? '' : reviewBody).length > COMMENT_REVIEW_LIMIT;
-  const savedTruncated = !!(meta && typeof meta === 'object' && meta.outputTruncated);
-  if (!commentTruncated && !savedTruncated) return 'レビュー出力（全文）';
-  const file = `\`${REVIEW_DIR_NAME}/${roundFileNames(round, reviewer).review}\``;
-  const notes = [];
-  if (commentTruncated) notes.push(`末尾 ${groupDigits(COMMENT_REVIEW_LIMIT)} 文字`);
-  if (savedTruncated) notes.push('保存時に上限超過で先頭を切り詰め済みのため全文ではない');
-  notes.push(savedTruncated ? `保存ファイルは ${file}` : `全文は ${file}`);
-  return `レビュー出力（${notes.join('。')}）`;
-}
-
 // 1 往復分の PR コメント本文を組み立てる純粋関数 (I/O は持たない)。
 //   - round / reviewer: 見出しに使う往復番号とレビュアー。
 //   - meta:    round-<N>-<reviewer>.json の内容 (無ければ null)。
 //   - triage:  判断ファイルの本文 (無ければ null。指摘の節は空にして、その旨を書く)。
 //   - verify:  検証コマンドの出力 (無ければ節ごと省く)。長ければ末尾 VERIFY_TAIL_LINES 行に切る。
-//   - review:  レビュアーの出力 (details で折りたたむ)。長ければ末尾 COMMENT_REVIEW_LIMIT
-//              文字に切り、summary に切り詰めた旨と保存ファイル名を書く (reviewSectionSummary)。
 // 見出しは運用で使ってきた「## クロスレビュー N 往復目: <レビュアー> の指摘と対応」に合わせる。
-function buildRoundComment({ round, reviewer, meta, triage, verify, review } = {}) {
+function buildRoundComment({ round, reviewer, meta, triage, verify } = {}) {
   const parts = [
     `## クロスレビュー ${round} 往復目: ${reviewerDisplayName(reviewer)} の指摘と対応`,
     '',
@@ -1602,14 +1578,6 @@ function buildRoundComment({ round, reviewer, meta, triage, verify, review } = {
     const fence = fenceFor(verifyBody);
     parts.push(`${fence}text`, shown.join('\n'), fence, '');
   }
-  const reviewBody = review == null ? '' : String(review).replace(/\s+$/, '');
-  parts.push(
-    `<details><summary>${reviewSectionSummary(round, reviewer, meta, reviewBody)}</summary>`,
-    '',
-    tailChars(reviewBody, COMMENT_REVIEW_LIMIT),
-    '',
-    '</details>',
-  );
   return `${parts.join('\n')}\n`;
 }
 
@@ -2223,8 +2191,8 @@ function runReview(opts, deps = {}) {
     if (round == null) return;
     const names = roundFileNames(round, opts.reviewer);
     // 保持量の上限で先頭を捨てていたら、保存本文の先頭に注記を入れ、メタにも印を残す。
-    // 保存ファイルは PR コメントへ転載されるので、本文だけを見ても全文でないと分かるようにし、
-    // メタの印は `comment` が summary へ反映する (reviewSectionSummary)。
+    // 保存ファイルの先頭に注記を入れ、保存ファイルだけを見ても全文でないと分かるようにする。
+    // outputTruncated は保存ファイル先頭の注記に対応するメタ情報で、`comment` では参照しない。
     // 切り詰めていないときはキーごと書かない (無ければ全文、という読み方を保つ)。
     const text = truncated ? `${OUTPUT_TRUNCATED_NOTICE}\n\n${String(body == null ? '' : body)}` : body;
     saveRoundArtifacts({
@@ -2259,8 +2227,8 @@ function runReview(opts, deps = {}) {
     // 通知は stderr に分けて、stdout を「そのまま客観サブエージェントへ渡せるプロンプト」に保つ。
     writeErr(inv.notice);
     writeOut(prompt + '\n');
-    // 保存するのは「渡したプロンプト」。レビュー結果はサブエージェントから戻るので、
-    // 主セッションがその出力を round-<N>-subagent.md へ貼ってから `comment` を使う。
+    // 保存するのは「渡したプロンプト」。レビュー結果を round-<N>-subagent.md へ貼る場合は
+    // ローカルの記録として残すためで、`comment` はそのファイルを読まない。
     saveRound(recordRound(), { body: prompt, isPrompt: true, via: 'subagent' });
     return null;
   }
@@ -2421,7 +2389,7 @@ function detectRoundReviewers(dir, round, deps = {}) {
   return found.sort();
 }
 
-// `comment --round <N>` サブコマンド。保存済みのレビュー出力、主セッションが書いた判断ファイル、
+// `comment --round <N>` サブコマンド。保存済みのメタ情報、主セッションが書いた判断ファイル、
 // 検証出力を定型に整形し、`gh pr comment --body-file` へ渡すファイルを書き出す。
 // 投稿はしない。判断内容は主セッションが書くものなので、CLI が PR へ直接書くと誤投稿の
 // 取り消しが難しいため。コマンド例だけを stderr に出す。
@@ -2453,7 +2421,7 @@ function runCommentCommand(opts, deps = {}) {
   if (!reviewer) {
     const found = detectRoundReviewers(dir, round, deps);
     if (found.length === 0) {
-      return fail(`[cross-review] ${round} 往復目のレビュー出力が見つかりません: ${path.join(dir, `round-${round}-<reviewer>.json`)}\n`
+      return fail(`[cross-review] ${round} 往復目のレビュアーのメタ情報が見つかりません: ${path.join(dir, `round-${round}-<reviewer>.json`)}\n`
         + '  レビューを実行すると保存されます (--no-state では保存しません)。\n');
     }
     if (found.length > 1) {
@@ -2463,12 +2431,6 @@ function runCommentCommand(opts, deps = {}) {
     reviewer = found[0];
   }
   const names = roundFileNames(round, reviewer);
-  const reviewPath = path.join(dir, names.review);
-  const review = readIfPresent(reviewPath);
-  if (review == null) {
-    return fail(`[cross-review] レビュー出力を読めません: ${reviewPath}\n`
-      + `  subagent 経路ではサブエージェントの出力をこのファイルへ貼ってから実行してください (CLI が保存するのは ${names.prompt} です)。\n`);
-  }
 
   // メタ情報が無くてもコメントは作れる (要約行が「不明」になるだけ) ので、警告に留める。
   const metaPath = path.join(dir, names.meta);
@@ -2485,7 +2447,7 @@ function runCommentCommand(opts, deps = {}) {
   }
 
   // 判断ファイルが無いのはエラーにしない。雛形を書き出し、指摘の節を空にしたコメントを作る
-  // (レビュー出力と検証出力だけ先に整形しておき、裏取りを書いてから作り直せるようにする)。
+  // (メタ情報と検証出力だけ先に整形しておき、裏取りを書いてから作り直せるようにする)。
   const triagePath = path.join(dir, names.triage);
   const triage = readIfPresent(triagePath);
   if (triage == null) {
@@ -2509,7 +2471,7 @@ function runCommentCommand(opts, deps = {}) {
     }
   }
 
-  const body = buildRoundComment({ round, reviewer, meta, triage, verify, review });
+  const body = buildRoundComment({ round, reviewer, meta, triage, verify });
   const outPath = opts.outPath || path.join(dir, names.comment);
   try {
     writeReviewFile(outPath, body);
@@ -2624,7 +2586,6 @@ module.exports = {
   STATE_FILENAME,
   REVIEW_DIR_NAME,
   VERIFY_TAIL_LINES,
-  COMMENT_REVIEW_LIMIT,
   COMMENT_SIZE_WARN_LIMIT,
   OUTPUT_CAPTURE_LIMIT,
   OUTPUT_TRUNCATED_NOTICE,
