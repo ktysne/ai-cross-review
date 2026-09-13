@@ -96,12 +96,11 @@ CLI 経由（`npm run review:*`）で回すには `codex` / `claude` が PATH �
 **Claude 主導**：3 択は `AskUserQuestion` で示します（チャット本文の番号付きリストで代用しない）。  
 手で Codex へ切り替えず、Claude が端末からレビューを実行し、出力を読んで先まで自分で進めます。
 
-**Codex 主導**：Codex desktop では利用可能なツール一覧を確認し、`request_user_input_async` や `request_user_input` など、クリック可能な選択 UI を表示するユーザ入力ツールがあれば必ず使います。  
+**Codex 主導**：Codex desktop では利用可能なツール一覧を確認し、`request_user_input_async` や `request_user_input` など、クリック可能な選択 UI を表示するユーザ入力ツールが利用可能なら必ず優先します。  
 ユーザ入力ツールが利用可能な場合、チャット本文の番号付きリストでは代用しません。  
-現在の実行モードでユーザ入力ツールを利用できない場合も、本文の 3 択へ自動的に切り替えません。  
-そのモードでは選択 UI を使用できないことと、選択 UI を利用できるモードまたはセッションで再提示する必要があることを伝えます。  
+現在の実行モードでユーザ入力ツールを利用できない場合でも、対話可能なら上の表の 3 択を同じ順序・意味で本文に示し、推奨選択肢のラベル末尾に「(推奨)」を付けて返信を待ちます。  
+CLI、`codex exec`、非対話実行などユーザの返信を受け取れない環境では、選択 UI や本文でユーザの回答を待たず、起動元が指定したレビュー経路をそのまま実行します。  
 Codex が自発的に Plan mode へ切り替えることはできないため、選択 UI 自体の表示は、そのターンでユーザ入力ツールが提供されている場合に限られます。  
-CLI、`codex exec`、非対話実行も選択 UI の対象外です。  
 実装者が Codex なので、選択肢 1 のレビュアーは Claude です。
 
 ### 選択肢 1 と 2 に共通の手順
@@ -296,7 +295,7 @@ node tools/cross-review.js subagent      # CLI を起動せずレビュー用プ
   `gh` が無い、認証していない、ネットワークに繋がらないといった「分からない」場合は黙って続行します（リモートを持たない取り込み先を止めないため）。  
   `--no-pr-check` と `CROSS_REVIEW_NO_FETCH=1` で省けます。  
   この呼び出しは既定 base の解決（PR の base ブランチ）と**同じ 1 回**で、PR 番号は `comment` が出すコマンド例にも使われます。  
-- レビュー出力の保存：往復を記録できたとき、レビュアーの出力とメタ情報を `.cross-review/round-<N>-*` へ保存します（後述「PR を共有ログにする」節）。  
+- レビュー出力の保存：往復を記録できたとき、レビュアーの出力とメタ情報を開始時のブランチ名から決めた `.cross-review/branch-<slug>-<hash>/round-<N>-*` へ保存します（後述「PR を共有ログにする」節）。旧形式の平置き出力は自動で読みません。  
 - 既定 base の解決で使う fetch と `gh` の呼び出しは、環境変数 `CROSS_REVIEW_NO_FETCH=1` で省けます（オフライン作業向け）。  
 - 引数解析、差分生成、プロンプト生成、観点解決、申し送り注入は `tests/cross-review.test.js`（vitest）が担保します。  
   このテストは**取り込み先では任意**で、vitest を使うときだけ同梱します（同梱しなくても engine の振る舞いは upstream のテストが担保）。
@@ -704,8 +703,10 @@ node tools/cross-review.sync.js --check-manifest  # 配布物の取りこぼし�
 
 ### 往復ごとに保存されるファイル（`.cross-review/`）
 
-往復を記録できたとき（レビュアー CLI が終了コード 0 で終わったとき、`subagent` がプロンプトを出力したとき）、CLI はリポジトリ直下の `.cross-review/` へ材料を保存します。  
+往復を記録できたとき（レビュアー CLI が終了コード 0 で終わったとき、`subagent` がプロンプトを出力したとき）、CLI は開始時のブランチ名から決めた `.cross-review/branch-<slug>-<hash>/` へ材料を保存します。  
+`slug` はブランチ名を ASCII へ置換した値を 64 文字まで残したもので、`hash` は元のブランチ名の UTF-8 SHA-256 先頭 16 桁です。置換後や大文字小文字が同じ名前でも、元名のハッシュで保存先を分けます。  
 `N` は状態ファイルの往復回数です（`--no-state` の実行では往復番号が決まらないので保存しません）。  
+レビュー開始時に取得したブランチ名を、非同期のレビュアー終了後も同じ保存先に使います。  
 保存に失敗してもレビューは失敗にせず、警告だけ出ます。
 
 | ファイル | 誰が書くか | 中身 |
@@ -716,6 +717,7 @@ node tools/cross-review.sync.js --check-manifest  # 配布物の取りこぼし�
 | `round-<N>-triage.md` | 主セッション | 指摘ごとの裏取りと対応（判断ファイル。後述） |
 | `round-<N>-comment.md` | CLI（`comment`） | 生成した PR コメント本文 |
 
+旧形式の `.cross-review/round-<N>-*.md/json` は自動で読みません。移行後に不要な平置きファイルを削除するときは、`node tools/cross-review.js artifacts --clean-legacy` を実行します。これは `.cross-review` 直下だけを走査し、ブランチ別サブディレクトリと無関係なファイルを残します。削除対象のパスを列挙し、一件でも削除に失敗した場合は終了コード 1 になります。  
 `.cross-review/` は生成物なので **`.gitignore` に追加**します（共有は PR コメントで行います）。
 
 ### 判断ファイル（`round-<N>-triage.md`）の書き方
@@ -731,8 +733,8 @@ node tools/cross-review.sync.js --check-manifest  # 配布物の取りこぼし�
 **対応**: 記録せず警告に留めるよう修正（abc1234）。
 ```
 
-判断ファイルが無いまま `comment` を実行すると、指摘の節を空にしたコメントを作り、同じパスに雛形を書き出します。  
-裏取りを書いてから実行し直します。
+判断ファイルが無いまま `comment` を実行すると、雛形だけを書き出して終了コード 1 で終わります。  
+本文は生成しないので、裏取りを書いてから実行し直します。
 
 ### PR コメント本文を生成する（`comment`）
 
@@ -740,7 +742,7 @@ node tools/cross-review.sync.js --check-manifest  # 配布物の取りこぼし�
 # 1. レビューを回す (レビュー出力とメタ情報が .cross-review/ に保存される)
 npm run review:codex
 
-# 2. 裏取りと対応を .cross-review/round-<N>-triage.md に書く
+# 2. 裏取りと対応を .cross-review/branch-<slug>-<hash>/round-<N>-triage.md に書く
 
 # 3. 検証コマンドの出力をファイルに残す
 npm test > verify.log 2>&1
@@ -749,7 +751,10 @@ npm test > verify.log 2>&1
 node tools/cross-review.js comment --round 1 --verify verify.log
 
 # 5. 生成された本文を投稿する (コマンド例は 4 の stderr に出る)
-gh pr comment <番号> --body-file .cross-review/round-1-comment.md
+gh pr comment <番号> --body-file .cross-review/branch-<slug>-<hash>/round-1-comment.md
+
+# 投稿まで自動化する場合は、生成本文を標準入力で渡す
+node tools/cross-review.js comment --round 1 --verify verify.log --post <番号>
 ```
 
 生成される本文の構成は次のとおりです。
@@ -758,7 +763,7 @@ gh pr comment <番号> --body-file .cross-review/round-1-comment.md
 - メタ情報の要約 1 行（実行経路、base とその解決方法、差分サイズ）
 - 判断ファイルの本文
 - `### 確認内容`（`--verify` を渡したときだけ。長い出力は末尾 200 行に切り、その旨を書きます）
-- レビュアーの出力はコメントに載せず、`.cross-review/round-<N>-<reviewer>.md` へローカル保存するだけです。
+- レビュアーの出力はコメントに載せず、ブランチ別ディレクトリの `round-<N>-<reviewer>.md` へローカル保存するだけです。
   指摘の内容は判断ファイルに引用として書くため、レビュアー出力の全文をコメントへ載せると、読む側とトークンのコストがかさみます。
 レビュアーの出力そのものが 4,194,304 文字（UTF-16 コード単位。バイト数ではない）を超えた場合は保存時に先頭を捨てて末尾だけを残し、保存ファイルの先頭にその注記を入れます。  
 生成した本文が 65,000 文字を超えたときは stderr で警告します（書き出しは行うので、判断ファイルや `--verify` の出力を削ってから投稿します）。
@@ -768,11 +773,14 @@ gh pr comment <番号> --body-file .cross-review/round-1-comment.md
 | オプション | 意味 |
 |---|---|
 | `--round <N>` | 対象の往復番号（必須） |
-| `--reviewer <name>` | 対象のレビュアー。省略時は `round-<N>-*.json` から自動で決め、複数あればエラーで列挙します |
+| `--reviewer <name>` | 対象のレビュアー。省略時はブランチ別ディレクトリのメタ情報から自動で決め、複数あればエラーで列挙します |
 | `--verify <path>` | 検証コマンドの出力ファイル |
-| `--out <path>` | 書き出し先（既定 `.cross-review/round-<N>-comment.md`） |
+| `--out <path>` | 書き出し先（既定はブランチ別ディレクトリの `round-<N>-comment.md`） |
+| `--post <N>` | PR #N へ生成本文を `gh pr comment N --body-file -` の標準入力で投稿（1 以上の整数） |
 
-投稿まで自動化しないのは、判断内容を書くのが主セッションであり、CLI が PR へ直接書くと誤投稿の取り消しが難しいためです。
+`comment` は入力検査の前に出力先の古い本文を削除します。メタ情報が無い、複数ある、検証出力を読めない、判断ファイルが無い、本文を書けない、投稿に失敗するといった場合は終了コード 1 で終わり、本文を残しません。`--post` を付けた場合は、本文を出力先へ保存してから同じメモリ本文を投稿し、投稿に失敗すると保存した本文を削除します。
+
+投稿しない既定動作では、stderr に手動投稿用のコマンド例を出します。`--post` は PR 番号を明示した実行でだけ使います。
 
 ## メンテナンス
 

@@ -60,6 +60,8 @@ node tools/cross-review.js state                    # この枝の往復回数�
 node tools/cross-review.js state --mark             # 往復を 1 回分記録する (CLI がレビューの成立を観測できない経路の後で使う)
 node tools/cross-review.js dismiss "<要約>"          # 非対応と判断した指摘を記録し、以降のレビューで再指摘させない
 node tools/cross-review.js comment --round 1        # 判断ファイルと検証出力から PR コメント本文を生成 (投稿はしない)
+node tools/cross-review.js comment --round 1 --post 42  # 生成本文を PR #42 へ標準入力経由で投稿
+node tools/cross-review.js artifacts --clean-legacy     # 旧形式の平置き出力を削除
 node tools/cross-review.js --help
 ```
 
@@ -110,22 +112,27 @@ CLI は起動できても、ネットワーク/API 接続が許可されずレ�
 | `--instructions <path>` | レビュアーへの申し送り、重点指摘ファイルをプロンプトに追加する（観点 `.cross-review.md` は置き換えず追加。`--fix` と併用すると、その指摘を直接修正させる） |
 | `--no-pr-check` | レビュー実行前の PR 存在確認（`gh pr view`）を省く（既定では PR が無いと分かったときだけ警告し、実行は止めません） |
 | `--round <N>` | `comment` 専用。対象の往復番号（必須） |
-| `--reviewer <name>` | `comment` 専用。対象のレビュアー（省略時は `.cross-review/round-<N>-*.json` から自動選択。複数あればエラー） |
+| `--reviewer <name>` | `comment` 専用。対象のレビュアー（省略時はブランチ別ディレクトリのメタ情報から自動選択。複数あればエラー） |
 | `--verify <path>` | `comment` 専用。検証コマンドの出力ファイルを「確認内容」節に入れる（長い出力は末尾 200 行） |
-| `--out <path>` | `comment` 専用。生成した本文の書き出し先（既定 `.cross-review/round-<N>-comment.md`） |
+| `--out <path>` | `comment` 専用。生成した本文の書き出し先（既定はブランチ別ディレクトリの `round-<N>-comment.md`） |
+| `--post <N>` | `comment` 専用。生成本文を PR #N へ `gh pr comment N --body-file -` の標準入力で投稿（1 以上の整数） |
+| `--clean-legacy` | `artifacts` 専用。`.cross-review` 直下に残る旧形式の `round-<正整数>-*.md/json` だけを削除 |
 | `-h`, `--help` | ヘルプを表示 |
 
 ### PR コメントを生成する（`comment`）
 
-往復を記録できたとき、レビュアーの出力とメタ情報が `.cross-review/round-<N>-*` に保存されます。  
-裏取りと対応を `.cross-review/round-<N>-triage.md` に書いてから `comment` を実行すると、`gh pr comment --body-file` へ渡す本文ができます（投稿はしません）。
+往復を記録できたとき、レビュアーの出力とメタ情報は、開始時のブランチ名を安全化した `.cross-review/branch-<slug>-<hash>/round-<N>-*` に保存されます。  
+旧形式の平置き出力は自動で読みません。必要なら `artifacts --clean-legacy` で `.cross-review` 直下の対象ファイルだけを削除できます。  
+ブランチ別ディレクトリの `round-<N>-triage.md` に裏取りと対応を書いてから `comment` を実行すると、`gh pr comment --body-file` へ渡す本文ができます。既定では投稿せず、`--post <PR番号>` を付けたときだけ本文を先に保存して同じメモリ本文を標準入力で投稿します。投稿に失敗した場合は保存本文を削除します。
 
 ```bash
 npm run review:codex                                        # レビュー (出力が .cross-review/ に保存される)
-# .cross-review/round-1-triage.md に裏取りと対応を書く (無ければ雛形が出ます)
+# .cross-review/branch-<slug>-<hash>/round-1-triage.md に裏取りと対応を書く (無ければ雛形が出ます)
 npm test > verify.log 2>&1
 node tools/cross-review.js comment --round 1 --verify verify.log
-gh pr comment <番号> --body-file .cross-review/round-1-comment.md
+gh pr comment <番号> --body-file .cross-review/branch-<slug>-<hash>/round-1-comment.md
+# 投稿まで自動化する場合
+node tools/cross-review.js comment --round 1 --verify verify.log --post <番号>
 ```
 
 `.cross-review/` は生成物なので `.gitignore` に追加します。  
