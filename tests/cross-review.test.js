@@ -3157,6 +3157,15 @@ describe('cross-review readPrInfo / normalizeGhResult', () => {
     expect(normalizeGhResult(null)).toBeNull();
   });
 
+  it('起動エラーは成功に変換せず、理由を保持する', () => {
+    expect(normalizeGhResult({ status: null, error: 'ETIMEDOUT: timeout' })).toEqual({
+      status: null,
+      stdout: '',
+      stderr: '',
+      error: 'ETIMEDOUT: timeout',
+    });
+  });
+
   it('PR 無しの非ゼロ終了だけを present:false と確定させる', () => {
     expect(readPrInfo(() => ({ status: 1, stdout: '', stderr: 'no pull requests found' }), false))
       .toMatchObject({ known: true, present: false });
@@ -3404,6 +3413,8 @@ describe('cross-review comment サブコマンド', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].args).toEqual(['pr', 'comment', '42', '--body-file', '-']);
     expect(calls[0].options.input).toBe(written[at(names.comment)]);
+    expect(calls[0].options.timeout).toBe(60000);
+    expect(calls[0].options.maxBuffer).toBe(4 * 1024 * 1024);
     expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
     expect(process.exitCode).toBe(0);
   });
@@ -3448,7 +3459,7 @@ describe('cross-review comment サブコマンド', () => {
     process.exitCode = 0;
   });
 
-  it('--out 指定時は指定した本文だけを開始時に削除する', () => {
+  it('--out 指定時は入力検査前に既存ファイルを削除せず、成功時に上書きする', () => {
     const files = {
       [at(names.meta)]: '{}',
       [at(names.triage)]: 'T',
@@ -3457,9 +3468,20 @@ describe('cross-review comment サブコマンド', () => {
     const { deps, written, removed } = commentDeps(files);
     process.exitCode = 0;
     expect(runCommentCommand({ round: 1, outPath: 'custom-comment.md' }, deps)).toBe('custom-comment.md');
-    expect(removed).toEqual(['custom-comment.md']);
+    expect(removed).toEqual([]);
     expect(written['custom-comment.md']).toContain('## クロスレビュー 1 往復目');
     expect(process.exitCode).toBe(0);
+  });
+
+  it('--out 指定時の入力エラーでは既存ファイルを残す', () => {
+    const files = { 'README.md': 'KEEP' };
+    const { deps, files: remaining, removed } = commentDeps(files);
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1, outPath: 'README.md' }, deps)).toBeNull();
+    expect(remaining['README.md']).toBe('KEEP');
+    expect(removed).toEqual([]);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
   });
 
   it('旧平置きのメタ情報は自動読取せず、ブランチ別ディレクトリを要求する', () => {

@@ -891,23 +891,33 @@ function defaultGitRunner(args, opts) {
   return res.stdout || '';
 }
 
-// gh CLI を実行して結果を返す。戻り値は { status, stdout, stderr }、起動自体ができないとき
-// (gh 不在、タイムアウト) は null。非ゼロ終了でも null にせず結果を返すのは、gh が
-// 「PR が無い」ことも非ゼロ終了で知らせるため。この 2 つは扱いが違う (readPrInfo 参照)。
-// git と同じく 10 秒でタイムアウトさせる。
+// gh CLI を実行して結果を返す。非ゼロ終了や起動エラーも結果に残すのは、PR 不在、
+// 認証エラー、タイムアウトを呼び出し側が区別し、書き込みの再実行を誤らないため。
+// 読み取りは既定 10 秒、投稿などの書き込みは呼び出し側が timeout を延長する。
 // Windows では gh が .cmd shim のことがあるため、レビュアー CLI と同じ解決を通す。
 function defaultGhRunner(args, options = {}) {
   const resolved = resolveReviewerCommandForSpawn('gh');
   const input = options.input == null ? options.stdin : options.input;
+  const timeout = Number.isFinite(options.timeout) && options.timeout > 0 ? options.timeout : 10000;
+  const maxBuffer = Number.isFinite(options.maxBuffer) && options.maxBuffer > 0
+    ? options.maxBuffer
+    : 1024 * 1024;
   const res = spawnSync(resolved.cmd, args, {
     encoding: 'utf8',
-    timeout: 10000,
-    maxBuffer: 1024 * 1024,
+    timeout,
+    maxBuffer,
     shell: resolved.shell,
     ...(input == null ? {} : { input: String(input) }),
   });
-  if (res.error || res.status == null) return null;
-  return { status: res.status, stdout: res.stdout || '', stderr: res.stderr || '' };
+  const error = res.error
+    ? `${res.error.code ? `${res.error.code}: ` : ''}${res.error.message || 'gh execution error'}`
+    : '';
+  return {
+    status: Number.isInteger(res.status) ? res.status : null,
+    stdout: res.stdout || '',
+    stderr: res.stderr || '',
+    error,
+  };
 }
 
 // ghRun の戻り値を { status, stdout, stderr } に正規化する純粋関数。
@@ -917,9 +927,10 @@ function normalizeGhResult(res) {
   if (typeof res === 'string') return { status: 0, stdout: res, stderr: '' };
   if (typeof res !== 'object') return null;
   return {
-    status: Number.isInteger(res.status) ? res.status : 0,
+    status: Number.isInteger(res.status) ? res.status : null,
     stdout: String(res.stdout == null ? '' : res.stdout),
     stderr: String(res.stderr == null ? '' : res.stderr),
+    error: String(res.error == null ? '' : res.error),
   };
 }
 
@@ -2565,9 +2576,9 @@ function runCommentCommand(opts, deps = {}) {
     return null;
   }
   const dir = resolveBranchReviewDir(branch, deps);
-  // 入力を検査する前に古い本文を削除する。失敗した実行の本文を再利用しないため、
-  // `--out` 指定時も既定出力とは別にそのパスだけを対象にする。
-  const outPath = opts.outPath || path.join(dir, `round-${round}-comment.md`);
+  const outPath = opts.outPath || path.join(dir, roundFileNames(round, '').comment);
+  const usesDefaultOut = !opts.outPath;
+  let outputWritten = false;
   const removeFile = deps.removeFile || deps.unlinkFile || deps.unlink || deps.rm || ((p) => fs.unlinkSync(p));
   const removeOutput = () => {
     try {
@@ -2578,14 +2589,16 @@ function runCommentCommand(opts, deps = {}) {
       return err;
     }
   };
-  const oldOutputError = removeOutput();
+  // 既定出力だけは入力検査前に消し、失敗した実行後に前回本文を再利用できないようにする。
+  // 明示された --out は任意の既存ファイルを指し得るため、本文を書ける段階まで変更しない。
+  const oldOutputError = usesDefaultOut ? removeOutput() : null;
   if (oldOutputError) {
     writeErr(`[cross-review] 以前の PR コメント本文を削除できません: ${outPath} (${oldOutputError.message || 'delete error'})\n`);
     process.exitCode = 1;
     return null;
   }
   const fail = (message) => {
-    const cleanupError = removeOutput();
+    const cleanupError = (usesDefaultOut || outputWritten) ? removeOutput() : null;
     writeErr(message);
     if (cleanupError) {
       writeErr(`[cross-review] 失敗後の PR コメント本文を削除できません: ${outPath} (${cleanupError.message || 'delete error'})\n`);
@@ -2681,6 +2694,7 @@ function runCommentCommand(opts, deps = {}) {
   // 保存ファイルを読み返さない。投稿に失敗した場合は fail がこの出力先を削除する。
   try {
     writeReviewFile(outPath, body);
+    outputWritten = true;
   } catch (err) {
     return fail(`[cross-review] PR コメント本文を書けません: ${outPath} (${(err && err.message) || 'write error'})\n`);
   }
@@ -2690,13 +2704,15 @@ function runCommentCommand(opts, deps = {}) {
     try {
       result = normalizeGhResult(ghRun(
         ['pr', 'comment', String(opts.postNumber), '--body-file', '-'],
-        { input: body },
+        { input: body, timeout: 60000, maxBuffer: 4 * 1024 * 1024 },
       ));
     } catch (err) {
       return fail(`[cross-review] PR コメントを投稿できません: ${err.message || 'gh error'}\n`);
     }
     if (!result || result.status !== 0) {
-      const detail = result ? (result.stderr || result.stdout || `exit ${result.status}`) : 'gh を起動できません';
+      const detail = result
+        ? (result.error || result.stderr || result.stdout || `exit ${result.status}`)
+        : 'gh の実行結果を取得できません';
       return fail(`[cross-review] PR コメントを投稿できません: ${detail}\n`);
     }
     writeErr(`[cross-review] PR #${opts.postNumber} へコメントを投稿しました: ${outPath}\n`);
