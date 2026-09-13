@@ -5,10 +5,10 @@
 
 基本フローは **実装 → レビュー → 指摘対応 → 妥当性確認** の 4 ステップを Claude / Codex を入れ替えて回す（Claude 実装 → Codex レビュー → Claude 対応 → Codex 妥当性確認 / およびその逆）。  
 **指摘、対応、妥当性確認は PR コメントに残す**（揮発させない。PR 未作成なら先に作り、`gh pr comment` で記録）。
-コメント本文は手で組み立てず、裏取りと対応を `.cross-review/round-<N>-triage.md` に書いて `node tools/cross-review.js comment --round <N>` で生成し、`--body-file` で投稿する。
+コメント本文は手で組み立てず、開始時のブランチ名から決まる `.cross-review/branch-<slug>-<hash>/round-<N>-triage.md` に裏取りと対応を書いて `node tools/cross-review.js comment --round <N>` で生成し、`--body-file` で投稿する。`--post <PR番号>` を付けると生成本文を標準入力で投稿できる。
 
 ### 実装完了後の起点（必須）
-**改修（実装、修正）を一区切りしたら、完了扱いにする前に必ず次の 3 択を提示する**（「コミット / PR で勝手に締めない」。反復改修時も区切りごとに確認し、最後の 1 回だけにしない）。Claude 主導なら `AskUserQuestion` で提示する（チャット本文の番号付きリストで代用しない）。Codex desktop では利用可能なツール一覧を確認し、`request_user_input_async` や `request_user_input` などのクリック可能な選択 UI を表示するユーザ入力ツールがあれば必ず使う。利用可能な場合は本文の番号付きリストで代用しない。現在の実行モードで利用できない場合も本文の 3 択へ自動的に切り替えず、そのモードでは選択 UI を使用できないことと、選択 UI を利用できるモードまたはセッションで再提示する必要があることを伝える。並び順は固定で、推奨はラベル末尾に「(推奨)」を付けるだけにする。
+**改修（実装、修正）を一区切りしたら、完了扱いにする前に必ず次の 3 択を提示する**（「コミット / PR で勝手に締めない」。反復改修時も区切りごとに確認し、最後の 1 回だけにしない）。Claude 主導なら `AskUserQuestion` で提示する（チャット本文の番号付きリストで代用しない）。Codex desktop では利用可能なツール一覧を確認し、`request_user_input_async` や `request_user_input` などのクリック可能な選択 UI が利用可能なら必ず優先する。現在の実行モードでユーザ入力ツールを利用できない場合でも、対話可能なら本文に同じ 3 択を同じ順序・意味で示し、推奨選択肢のラベル末尾に「(推奨)」を付けて返信を待つ。CLI、`codex exec`、非対話実行などユーザの返信を受け取れない環境では、選択 UI や本文でユーザの回答を待たず、起動元が指定したレビュー経路をそのまま実行する。並び順は固定で、推奨はラベル末尾に「(推奨)」を付けるだけにする。
 
 **用語**：**実装者**：今回の差分を書いたモデルのベンダー（主セッションが自分で書いたならそのベンダー、実装用サブエージェントへ委譲したなら委譲先のベンダー。混在時は主セッションと別のベンダーをレビュアーにする）。主セッションは 3 択を提示する直前に、報告へ「今回の実装者: Claude / Codex」を一言書く。
 
@@ -47,7 +47,7 @@ blocker の有無で分けるのは、実害のある指摘の判断をユーザ
 - CLI は `Get-Command <cli>` / `<cli> --version` で見えていても、API 接続だけサンドボックスで止まることがある。`claude -p "Reply with OK only."` 等の最小 API 呼び出しが通常環境で無応答 / `ConnectionRefused`、ネットワーク許可環境で成功するなら、CLI 不在ではなくネットワーク制限として扱う。
 - 既定のレビュー対象は **base とのコミット済み差分**（`--base <ref>` で変更）。`--base` 未指定時の base は **前回レビュー SHA（状態ファイル）→ PR の base（`gh pr view --json baseRefName`）→ `origin/main` → ローカル `main`** の順に解決し、決めた base と解決方法を差分サイズと同じ stderr 行に出す（`--base` 明示時、`--uncommitted` 時は解決をスキップ。`CROSS_REVIEW_NO_FETCH=1` で fetch と gh を省略）。未コミットの実装を見るなら `-- --uncommitted`（未追跡込み）。差分サイズは常に stderr 表示され、閾値（既定 256KB、`--max-diff-kb` / `CROSS_REVIEW_MAX_DIFF_KB`、`0` で無効）超過時はファイル要約の閾値を 32/16/8KB と下げて縮退を試し、収まらなければ中断（`--strict-diff-guard` で従来の即中断）。`--fix` は codex / subagent 対応（claude CLI 経路は未対応）。`--instructions <path>` でレビュアーの指摘ファイルを観点に加えて添付（置き換えない）。
 - トークン節約のため、ロックファイル、生成物（`package-lock.json` / `*.min.js` / `*.map` 等）は**既定で差分から除外**（`.cross-review-ignore` で追加、`CROSS_REVIEW_IGNORE` でパス指定、`--no-exclude` で無効化。除外ファイル名はプロンプトに残す）。巨大なファイル差分は **stat 要約に置換**（`--max-file-diff-kb` / `CROSS_REVIEW_MAX_FILE_DIFF_KB`、既定 64KB、`0` で無効）。妥当性確認は状態ファイルの前回レビュー SHA が自動で base になるので、2 回目以降は `--base` を付けずに実行すれば増分差分だけが送られる（手で指定するなら従来どおり `--base <レビュー時 SHA>`）。
-- 往復回数、直前レビュー SHA、非対応と判断した指摘は `.cross-review-state.json` にブランチ単位で持つ（`.gitignore` 済み、`--no-state` で無効化）。`node tools/cross-review.js state` で現在値、`state --reset` で初期化、`state --mark` でサブエージェント等の CLI 外レビュー後に往復を 1 進め、`dismiss "<要約>"` で非対応と判断した指摘を登録すると、以降のレビュープロンプトに「再指摘しない」節として添えられる。
+- 往復回数、直前レビュー SHA、非対応と判断した指摘は `.cross-review-state.json` にブランチ単位で持つ（`.gitignore` 済み、`--no-state` で無効化）。レビュー出力とコメント材料は開始時のブランチ名を安全化した `.cross-review/branch-<slug>-<hash>/` に分けて保存し、旧平置き出力は自動で読まない。`node tools/cross-review.js state` で現在値、`state --reset` で初期化、`state --mark` でサブエージェント等の CLI 外レビュー後に往復を 1 進め、`dismiss "<要約>"` で非対応と判断した指摘を登録すると、以降のレビュープロンプトに「再指摘しない」節として添えられる。不要な旧平置き出力は `node tools/cross-review.js artifacts --clean-legacy` で削除する。
 - レビュー観点は `.cross-review.md` を自動添付（解決順は env `CROSS_REVIEW_CHECKLIST` → `<cwd>/.cross-review.md`
   → `<スクリプト>/../.cross-review.md` → 汎用フォールバック）。
 

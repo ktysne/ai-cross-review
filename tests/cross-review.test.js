@@ -62,12 +62,15 @@ const {
   joinReviewerNotes,
   runStateCommand,
   runDismissCommand,
+  runArtifactsCommand,
   STATE_FILENAME,
   runCommentCommand,
   buildRoundComment,
   reviewerDisplayName,
   roundFileNames,
   resolveReviewDir,
+  safeBranchDirName,
+  resolveBranchReviewDir,
   detectRoundReviewers,
   normalizeGhResult,
   readPrInfo,
@@ -2889,7 +2892,8 @@ describe('cross-review buildRoundComment (PR コメントの定型)', () => {
 describe('cross-review レビュー出力の保存 (.cross-review/)', () => {
   const sha = 'e'.repeat(40);
   const scriptDir = path.join(path.sep, 'repo', 'tools');
-  const dir = resolveReviewDir({ scriptDir });
+  const branch = 'feat/save';
+  const dir = resolveBranchReviewDir(branch, { scriptDir });
   const settle = (onExit, result) => {
     process.exitCode = result.code == null ? 1 : result.code;
     onExit({ outputTail: '', output: '', error: null, ...result });
@@ -3028,6 +3032,31 @@ describe('cross-review レビュー出力の保存 (.cross-review/)', () => {
     expect(mem.store.files).toEqual({});
     process.exitCode = 0;
   });
+
+  it('レビュー開始時のブランチへ非同期完了後も保存する', () => {
+    const mem = memoryState();
+    let current = 'feat/save';
+    const startDir = resolveBranchReviewDir(current, { scriptDir });
+    const otherDir = resolveBranchReviewDir('feat/changed-after-start', { scriptDir });
+    process.exitCode = 0;
+    runReview(saveOpts(), saveDeps(mem, {
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return `${current}\n`;
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+        if (args[0] === 'diff') return 'SAVE_DIFF\n';
+        return '';
+      },
+      spawnFn: (cmd, args, stdin, onExit) => {
+        current = 'feat/changed-after-start';
+        settle(onExit, { code: 0, output: 'START_BRANCH_OUTPUT' });
+        return null;
+      },
+    }));
+    const names = roundFileNames(1, 'codex');
+    expect(mem.store.files[path.join(startDir, names.review)]).toBe('START_BRANCH_OUTPUT\n');
+    expect(mem.store.files[path.join(otherDir, names.review)]).toBeUndefined();
+    process.exitCode = 0;
+  });
 });
 
 describe('cross-review PR 未作成の警告', () => {
@@ -3124,8 +3153,32 @@ describe('cross-review PR 未作成の警告', () => {
 
 describe('cross-review readPrInfo / normalizeGhResult', () => {
   it('文字列を返すスタブは「成功して stdout を返した」とみなす', () => {
-    expect(normalizeGhResult('x')).toEqual({ status: 0, stdout: 'x', stderr: '' });
+    expect(normalizeGhResult('x')).toEqual({ status: 0, stdout: 'x', stderr: '', error: '' });
     expect(normalizeGhResult(null)).toBeNull();
+  });
+
+  it('起動エラーは成功に変換せず、理由を保持する', () => {
+    expect(normalizeGhResult({ status: null, error: 'ETIMEDOUT: timeout' })).toEqual({
+      status: null,
+      stdout: '',
+      stderr: '',
+      error: 'ETIMEDOUT: timeout',
+    });
+  });
+
+  it('error の無い status 省略オブジェクトは従来どおり成功とみなす', () => {
+    expect(normalizeGhResult({ stdout: 'x' })).toEqual({
+      status: 0,
+      stdout: 'x',
+      stderr: '',
+      error: '',
+    });
+    expect(normalizeGhResult({ status: null, stderr: 'signal exit' })).toEqual({
+      status: null,
+      stdout: '',
+      stderr: 'signal exit',
+      error: '',
+    });
   });
 
   it('PR 無しの非ゼロ終了だけを present:false と確定させる', () => {
@@ -3146,17 +3199,22 @@ describe('cross-review readPrInfo / normalizeGhResult', () => {
 
 describe('cross-review comment サブコマンド', () => {
   const scriptDir = path.join(path.sep, 'repo', 'tools');
-  const dir = resolveReviewDir({ scriptDir });
+  const branch = 'feat/comment';
+  const dir = resolveBranchReviewDir(branch, { scriptDir });
   const at = (name) => path.join(dir, name);
   const commentDeps = (files, extra = {}) => {
     const written = {};
+    const removed = [];
     const logs = { err: '' };
     return {
+      files,
       written,
+      removed,
       logs,
       deps: {
         scriptDir,
         env: {},
+        gitRun: (args) => (args[0] === 'rev-parse' && args[1] === '--abbrev-ref' ? `${branch}\n` : ''),
         ghRun: () => null,
         exists: (p) => Object.prototype.hasOwnProperty.call(files, p),
         readFile: (p) => {
@@ -3164,7 +3222,8 @@ describe('cross-review comment サブコマンド', () => {
           return files[p];
         },
         readdir: () => Object.keys(files).map((p) => path.basename(p)),
-        writeReviewFile: (p, body) => { written[p] = body; },
+        removeFile: (p) => { removed.push(p); delete files[p]; },
+        writeReviewFile: (p, body) => { written[p] = body; files[p] = body; },
         err: (s) => { logs.err += s; },
         ...extra,
       },
@@ -3251,28 +3310,32 @@ describe('cross-review comment サブコマンド', () => {
     process.exitCode = 0;
   });
 
-  it('判断ファイルが無ければ雛形を書き出し、指摘の節を空にして続行する', () => {
+  it('判断ファイルが無ければ雛形だけを書き出して失敗する', () => {
     const files = {
       [at(names.meta)]: '{}',
     };
     const { deps, written, logs } = commentDeps(files);
     process.exitCode = 0;
-    runCommentCommand({ round: 1 }, deps);
+    expect(runCommentCommand({ round: 1 }, deps)).toBeNull();
     expect(written[at(names.triage)]).toBe(`${TRIAGE_TEMPLATE}\n`);
-    expect(written[at(names.comment)]).toContain('判断ファイルが未記入');
+    expect(written[at(names.comment)]).toBeUndefined();
     expect(logs.err).toMatch(/判断ファイルがありません/);
-    expect(process.exitCode).toBe(0);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
   });
 
-  it('メタ情報が壊れていても警告して本文は作る', () => {
+  it('メタ情報が壊れていれば本文を作らず失敗する', () => {
     const files = {
       [at(names.meta)]: '{ broken',
       [at(names.triage)]: 'T',
     };
     const { deps, written, logs } = commentDeps(files);
-    runCommentCommand({ round: 1 }, deps);
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1 }, deps)).toBeNull();
     expect(logs.err).toMatch(/メタ情報を読めません/);
-    expect(written[at(names.comment)]).toContain('実行経路: 不明');
+    expect(written[at(names.comment)]).toBeUndefined();
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
   });
 
   it('--verify の検証出力を「確認内容」節に入れる', () => {
@@ -3332,6 +3395,137 @@ describe('cross-review comment サブコマンド', () => {
     expect(logs.err).not.toMatch(/GitHub のコメント上限/);
   });
 
+  it('開始時の本文を削除し、--post は保存後に生成本文を gh の stdin へ渡す', () => {
+    const files = {
+      [at(names.meta)]: '{}',
+      [at(names.triage)]: 'T',
+      [at(names.comment)]: 'OLD_COMMENT',
+    };
+    const calls = [];
+    const events = [];
+    const { deps, written, removed } = commentDeps(files, {
+      removeFile: (p) => { events.push('remove'); removed.push(p); delete files[p]; },
+      writeReviewFile: (p, body) => {
+        if (p === at(names.comment)) events.push('write');
+        written[p] = body;
+        files[p] = body;
+      },
+      ghRun: (args, options) => {
+        events.push('gh');
+        calls.push({ args, options });
+        return { status: 0, stdout: '', stderr: '' };
+      },
+      readFile: (p) => {
+        if (p === at(names.comment)) throw new Error('生成先を読み返してはいけない');
+        if (!Object.prototype.hasOwnProperty.call(files, p)) throw new Error(`ENOENT: ${p}`);
+        return files[p];
+      },
+    });
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1, postNumber: 42 }, deps)).toBe(at(names.comment));
+    expect(events).toEqual(['remove', 'write', 'gh']);
+    expect(removed).toEqual([at(names.comment)]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toEqual(['pr', 'comment', '42', '--body-file', '-']);
+    expect(calls[0].options.input).toBe(written[at(names.comment)]);
+    expect(calls[0].options.timeout).toBe(60000);
+    expect(calls[0].options.maxBuffer).toBe(4 * 1024 * 1024);
+    expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('--post が失敗したら保存済みの生成本文を削除し、既存本文も残さない', () => {
+    const files = {
+      [at(names.meta)]: '{}',
+      [at(names.triage)]: 'T',
+      [at(names.comment)]: 'OLD_COMMENT',
+    };
+    const { deps, files: remaining, written, removed, logs } = commentDeps(files, {
+      ghRun: () => ({ status: 1, stdout: '', stderr: 'post failed' }),
+    });
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1, postNumber: 42 }, deps)).toBeNull();
+    expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
+    expect(remaining[at(names.comment)]).toBeUndefined();
+    expect(removed).toEqual([at(names.comment), at(names.comment)]);
+    expect(logs.err).toContain('post failed');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('--post は本文保存に失敗したら gh を呼ばない', () => {
+    const files = {
+      [at(names.meta)]: '{}',
+      [at(names.triage)]: 'T',
+    };
+    let postCalls = 0;
+    const { deps, written, logs } = commentDeps(files, {
+      ghRun: () => { postCalls += 1; return { status: 0, stdout: '', stderr: '' }; },
+      writeReviewFile: (p) => {
+        if (p === at(names.comment)) throw new Error('disk full');
+      },
+    });
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1, postNumber: 42 }, deps)).toBeNull();
+    expect(postCalls).toBe(0);
+    expect(written[at(names.comment)]).toBeUndefined();
+    expect(logs.err).toMatch(/PR コメント本文を書けません/);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('--out 指定時は入力検査前に既存ファイルを削除せず、成功時に上書きする', () => {
+    const files = {
+      [at(names.meta)]: '{}',
+      [at(names.triage)]: 'T',
+      'custom-comment.md': 'OLD_CUSTOM',
+    };
+    const { deps, written, removed } = commentDeps(files);
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1, outPath: 'custom-comment.md' }, deps)).toBe('custom-comment.md');
+    expect(removed).toEqual([]);
+    expect(written['custom-comment.md']).toContain('## クロスレビュー 1 往復目');
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('--out 指定時の入力エラーでは既存ファイルを残す', () => {
+    const files = { 'README.md': 'KEEP' };
+    const { deps, files: remaining, removed } = commentDeps(files);
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1, outPath: 'README.md' }, deps)).toBeNull();
+    expect(remaining['README.md']).toBe('KEEP');
+    expect(removed).toEqual([]);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('旧平置きのメタ情報は自動読取せず、ブランチ別ディレクトリを要求する', () => {
+    const files = {
+      [path.join(resolveReviewDir({ scriptDir }), names.meta)]: '{}',
+      [path.join(resolveReviewDir({ scriptDir }), names.triage)]: 'T',
+    };
+    const { deps, written, logs } = commentDeps(files);
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1 }, deps)).toBeNull();
+    expect(written).toEqual({});
+    expect(logs.err).toMatch(/メタ情報がありません/);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('ブランチ名を取得できなければ平置きへ戻らず失敗する', () => {
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
+    const { deps, written, logs } = commentDeps(files, {
+      gitRun: () => null,
+    });
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1 }, deps)).toBeNull();
+    expect(written).toEqual({});
+    expect(logs.err).toMatch(/ブランチ名を取得できません/);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
   it('detectRoundReviewers は同じ往復のメタ情報だけを拾う', () => {
     const entries = ['round-1-codex.json', 'round-10-codex.json', 'round-1-claude.json', 'round-1-triage.md', 'round-1-codex.md'];
     expect(detectRoundReviewers(dir, 1, { readdir: () => entries })).toEqual(['claude', 'codex']);
@@ -3341,6 +3535,30 @@ describe('cross-review comment サブコマンド', () => {
 
   it('保存先はスクリプト位置から解決する (cwd に依存しない)', () => {
     expect(resolveReviewDir({ scriptDir })).toBe(path.join(path.sep, 'repo', REVIEW_DIR_NAME));
+  });
+
+  it('ブランチ別ディレクトリ名は安全な slug、元名ハッシュ、branch-接頭辞を持つ', () => {
+    const name = safeBranchDirName('feature/foo_日本語');
+    expect(name).toMatch(/^branch-[A-Za-z0-9._-]+-[0-9a-f]{16}$/);
+    expect(name).not.toContain('/');
+    expect(name).not.toContain('日本語');
+    expect(name).toBe(safeBranchDirName('feature/foo_日本語'));
+    expect(name).not.toBe(safeBranchDirName('feature-foo_日本語'));
+    expect(name).not.toBe(safeBranchDirName('Feature/foo_日本語'));
+  });
+
+  it('slug は空なら branch になり、64 文字を超えない', () => {
+    expect(safeBranchDirName('///')).toMatch(/^branch-branch-[0-9a-f]{16}$/);
+    const name = safeBranchDirName(`x${'a'.repeat(100)}`);
+    expect(name).toHaveLength('branch-'.length + 64 + 1 + 16);
+    expect(name).toMatch(/^branch-xa{63}-[0-9a-f]{16}$/);
+  });
+
+  it('ブランチ別の保存先は resolveReviewDir の配下に分かれる', () => {
+    const first = resolveBranchReviewDir('feature/a', { scriptDir });
+    const second = resolveBranchReviewDir('feature/b', { scriptDir });
+    expect(first.startsWith(resolveReviewDir({ scriptDir }) + path.sep)).toBe(true);
+    expect(first).not.toBe(second);
   });
 });
 
@@ -3365,6 +3583,39 @@ describe('cross-review parseArgs (comment サブコマンドと PR 確認)', () 
     expect(parseArgs(['comment', '--round', 'x']).error).toMatch(/--round/);
   });
 
+  it('--post は 1 以上の整数を (= 形式も含めて) 受ける', () => {
+    expect(parseArgs(['comment', '--round', '1', '--post', '42'])).toMatchObject({
+      command: 'comment', postNumber: 42, error: null,
+    });
+    expect(parseArgs(['comment', '--round=1', '--post=7'])).toMatchObject({
+      command: 'comment', postNumber: 7, error: null,
+    });
+    expect(parseArgs(['comment', '--round', '1', '--post', '0']).error).toMatch(/--post/);
+    expect(parseArgs(['comment', '--round', '1', '--post', '-1']).error).toMatch(/--post/);
+    expect(parseArgs(['comment', '--round', '1', '--post', '1.5']).error).toMatch(/--post/);
+  });
+
+  it('--post は comment 専用で、artifacts は --clean-legacy を要求する', () => {
+    expect(parseArgs(['codex', '--post', '42']).error).toMatch(/comment サブコマンドでのみ/);
+    expect(parseArgs(['artifacts', '--clean-legacy'])).toMatchObject({
+      command: 'artifacts', cleanLegacy: true, error: null,
+    });
+    expect(parseArgs(['artifacts']).error).toMatch(/--clean-legacy/);
+  });
+
+  it('artifacts --clean-legacy では comment 専用オプションを併用できない', () => {
+    for (const args of [
+      ['--post', '42'],
+      ['--out', 'comment.md'],
+      ['--round', '1'],
+      ['--reviewer', 'codex'],
+      ['--verify', 'verify.log'],
+    ]) {
+      expect(parseArgs(['artifacts', '--clean-legacy', ...args]).error)
+        .toMatch(/comment サブコマンドでのみ/);
+    }
+  });
+
   it('--reviewer はファイル名に化ける値を弾く', () => {
     expect(parseArgs(['comment', '--round', '1', '--reviewer', '../evil']).error).toMatch(/--reviewer/);
     expect(parseArgs(['comment', '--round', '1', '--reviewer', 'a/b']).error).toMatch(/--reviewer/);
@@ -3382,5 +3633,80 @@ describe('cross-review parseArgs (comment サブコマンドと PR 確認)', () 
   it('--no-pr-check を受ける', () => {
     expect(parseArgs(['codex', '--no-pr-check'])).toMatchObject({ reviewer: 'codex', noPrCheck: true, error: null });
     expect(parseArgs(['codex'])).toMatchObject({ noPrCheck: false });
+  });
+});
+
+describe('cross-review artifacts --clean-legacy', () => {
+  const scriptDir = path.join(path.sep, 'repo', 'tools');
+  const dir = resolveReviewDir({ scriptDir });
+
+  it('ルート直下の正の往復番号を持つ md/json だけを削除し、パスを列挙する', () => {
+    const entries = [
+      'round-1-codex.md',
+      'round-2-codex.json',
+      'round-0-codex.md',
+      'round-a-codex.md',
+      'round-1',
+      'notes.md',
+      { name: 'round-3-subdir.md', isFile: () => false },
+    ];
+    const removed = [];
+    let out = '';
+    process.exitCode = 0;
+    expect(runArtifactsCommand({ cleanLegacy: true }, {
+      scriptDir,
+      readdir: () => entries,
+      removeFile: (p) => removed.push(p),
+      out: (s) => { out += s; },
+      err: () => {},
+    })).toEqual([path.join(dir, 'round-1-codex.md'), path.join(dir, 'round-2-codex.json')]);
+    expect(removed).toEqual([path.join(dir, 'round-1-codex.md'), path.join(dir, 'round-2-codex.json')]);
+    expect(out).toContain(path.join(dir, 'round-1-codex.md'));
+    expect(out).toContain(path.join(dir, 'round-2-codex.json'));
+    expect(out).not.toContain('round-0-codex.md');
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('削除対象が無ければ成功する', () => {
+    process.exitCode = 0;
+    expect(runArtifactsCommand({ cleanLegacy: true }, {
+      scriptDir,
+      readdir: () => ['notes.md', 'branch-feat-abc'],
+      removeFile: () => { throw new Error('呼ばない'); },
+      out: () => {},
+      err: () => {},
+    })).toEqual([]);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('一件でも削除に失敗したら他の対象を処理して exitCode 1 にする', () => {
+    const removed = [];
+    let err = '';
+    process.exitCode = 0;
+    expect(runArtifactsCommand({ cleanLegacy: true }, {
+      scriptDir,
+      readdir: () => ['round-1-codex.md', 'round-2-codex.json'],
+      removeFile: (p) => {
+        if (p.endsWith('round-1-codex.md')) throw new Error('permission denied');
+        removed.push(p);
+      },
+      out: () => {},
+      err: (s) => { err += s; },
+    })).toEqual([path.join(dir, 'round-2-codex.json')]);
+    expect(removed).toEqual([path.join(dir, 'round-2-codex.json')]);
+    expect(err).toMatch(/round-1-codex\.md/);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('ルートが無ければ対象なしとして成功する', () => {
+    process.exitCode = 0;
+    expect(runArtifactsCommand({ cleanLegacy: true }, {
+      scriptDir,
+      readdir: () => { const error = new Error('missing'); error.code = 'ENOENT'; throw error; },
+      out: () => {},
+      err: () => {},
+    })).toEqual([]);
+    expect(process.exitCode).toBe(0);
   });
 });
