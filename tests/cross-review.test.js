@@ -3153,7 +3153,7 @@ describe('cross-review PR 未作成の警告', () => {
 
 describe('cross-review readPrInfo / normalizeGhResult', () => {
   it('文字列を返すスタブは「成功して stdout を返した」とみなす', () => {
-    expect(normalizeGhResult('x')).toEqual({ status: 0, stdout: 'x', stderr: '' });
+    expect(normalizeGhResult('x')).toEqual({ status: 0, stdout: 'x', stderr: '', error: '' });
     expect(normalizeGhResult(null)).toBeNull();
   });
 
@@ -3171,6 +3171,12 @@ describe('cross-review readPrInfo / normalizeGhResult', () => {
       status: 0,
       stdout: 'x',
       stderr: '',
+      error: '',
+    });
+    expect(normalizeGhResult({ status: null, stderr: 'signal exit' })).toEqual({
+      status: null,
+      stdout: '',
+      stderr: 'signal exit',
       error: '',
     });
   });

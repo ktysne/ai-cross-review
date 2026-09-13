@@ -925,11 +925,12 @@ function defaultGhRunner(args, options = {}) {
 // 起動エラーやシグナル終了では status を null のまま残し、成功へ変換しない。
 function normalizeGhResult(res) {
   if (res == null) return null;
-  if (typeof res === 'string') return { status: 0, stdout: res, stderr: '' };
+  if (typeof res === 'string') return { status: 0, stdout: res, stderr: '', error: '' };
   if (typeof res !== 'object') return null;
   const error = String(res.error == null ? '' : res.error);
+  const hasStatus = Object.prototype.hasOwnProperty.call(res, 'status');
   return {
-    status: Number.isInteger(res.status) ? res.status : (error ? null : 0),
+    status: Number.isInteger(res.status) ? res.status : (!hasStatus && !error ? 0 : null),
     stdout: String(res.stdout == null ? '' : res.stdout),
     stderr: String(res.stderr == null ? '' : res.stderr),
     error,
