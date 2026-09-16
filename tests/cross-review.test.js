@@ -1199,6 +1199,23 @@ describe('cross-review buildReviewPrompt', () => {
     expect(GENERIC_CHECKLIST).toContain('反例');
   });
 
+  it('モード別指示は観点によらず推奨の対応方法を求める', () => {
+    expect(REVIEW_ONLY_INSTRUCTION).toContain('推奨の対応方法');
+    expect(REVIEW_ONLY_INSTRUCTION).toContain('推奨案とその理由');
+    expect(FIX_INSTRUCTION).toContain('未修正で残した指摘と推奨の対応方法');
+    // 取り込み先の観点ファイルが対応方法に触れていなくても、プロンプトには必ず入る。
+    const prompt = buildReviewPrompt('diff', { mode: 'base', baseRef: 'main' }, '独自の観点だけ');
+    expect(prompt).toContain('推奨の対応方法');
+  });
+
+  it('判断ファイルの雛形は推奨対応を裏取り、対応と別の行に持つ', () => {
+    const lines = TRIAGE_TEMPLATE.split('\n');
+    const at = (prefix) => lines.findIndex((l) => l.startsWith(prefix));
+    expect(at('**推奨対応**')).toBeGreaterThan(at('> '));
+    expect(at('**裏取り**')).toBeGreaterThan(at('**推奨対応**'));
+    expect(at('**対応**')).toBeGreaterThan(at('**裏取り**'));
+  });
+
   it('既定 (fix なし) はレビューのみ指示を含み、修正指示は含めない', () => {
     const prompt = buildReviewPrompt('diff', { mode: 'base', baseRef: 'main', fix: false }, 'CL');
     expect(prompt).toContain(REVIEW_ONLY_INSTRUCTION);
