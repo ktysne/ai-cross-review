@@ -17,6 +17,7 @@ const {
   codexAgentSandboxOf,
   checkCodexAgentSandbox,
   scriptPinsApprovalNever,
+  classifyReviewerExit,
   isUsageLimitExit,
   resolveFallbackPromptPath,
   collectReviewDiff,
@@ -746,6 +747,77 @@ describe('cross-review isUsageLimitExit', () => {
 
   it('429 は単語境界で照合する (桁の一致で誤検出しない)', () => {
     expect(isUsageLimitExit({ via: 'direct', code: 1, outputTail: 'id=14290 failed' })).toBe(false);
+  });
+});
+
+describe('cross-review classifyReviewerExit', () => {
+  it('bridge 経由の終了コード 75 を result 行の原因へ分類する', () => {
+    expect(classifyReviewerExit({
+      via: 'agent',
+      code: USAGE_LIMIT_EXIT_CODE,
+      outputTail: 'codex-agent: result=rate-limited\n',
+    })).toEqual({ fallback: true, cause: 'rate-limited' });
+    expect(classifyReviewerExit({
+      via: 'agent',
+      code: USAGE_LIMIT_EXIT_CODE,
+      outputTail: 'codex-agent: result=unavailable\n',
+    })).toEqual({ fallback: true, cause: 'unavailable' });
+    expect(classifyReviewerExit({
+      via: 'agent',
+      code: USAGE_LIMIT_EXIT_CODE,
+      outputTail: 'codex-agent: result=rate-limited (simulated)\n',
+    })).toEqual({ fallback: true, cause: 'rate-limited' });
+  });
+
+  it('bridge 経由で result 行が無い、または未知の値なら unknown に分類する', () => {
+    expect(classifyReviewerExit({ via: 'agent', code: USAGE_LIMIT_EXIT_CODE, outputTail: '' }))
+      .toEqual({ fallback: true, cause: 'unknown' });
+    expect(classifyReviewerExit({
+      via: 'agent',
+      code: USAGE_LIMIT_EXIT_CODE,
+      outputTail: 'codex-agent: result=failed exit=75',
+    })).toEqual({ fallback: true, cause: 'unknown' });
+  });
+
+  it('bridge 経由は行頭の result 行だけを見て、最後の行を採用する', () => {
+    const outputTail = [
+      'codex-agent: result=rate-limited',
+      '最終報告の本文に codex-agent: result=rate-limited を引用する',
+      'codex-agent: result=unavailable',
+    ].join('\n');
+    expect(classifyReviewerExit({ via: 'agent', code: USAGE_LIMIT_EXIT_CODE, outputTail }))
+      .toEqual({ fallback: true, cause: 'unavailable' });
+    expect(classifyReviewerExit({
+      via: 'agent',
+      code: USAGE_LIMIT_EXIT_CODE,
+      outputTail: '本文中の codex-agent: result=rate-limited',
+    })).toEqual({ fallback: true, cause: 'unknown' });
+  });
+
+  it('bridge 経由の CRLF 出力を扱う', () => {
+    expect(classifyReviewerExit({
+      via: 'agent',
+      code: USAGE_LIMIT_EXIT_CODE,
+      outputTail: 'codex-agent: result=unavailable\r\n',
+    })).toEqual({ fallback: true, cause: 'unavailable' });
+  });
+
+  it('bridge 経由は終了コード 75 以外をフォールバック対象にしない', () => {
+    expect(classifyReviewerExit({ via: 'agent', code: 1, outputTail: 'usage limit reached' }))
+      .toEqual({ fallback: false, cause: null });
+    expect(classifyReviewerExit({ via: 'agent', code: 0, outputTail: 'usage limit reached' }))
+      .toEqual({ fallback: false, cause: null });
+  });
+
+  it('直接起動は既存の上限判定を rate-limited として返す', () => {
+    expect(classifyReviewerExit({ via: 'direct', code: 1, outputTail: 'Rate Limit exceeded' }))
+      .toEqual({ fallback: true, cause: 'rate-limited' });
+    expect(classifyReviewerExit({ via: 'direct', code: 1, outputTail: 'syntax error' }))
+      .toEqual({ fallback: false, cause: null });
+    expect(classifyReviewerExit({ via: 'direct', code: 0, outputTail: 'usage limit' }))
+      .toEqual({ fallback: false, cause: null });
+    expect(classifyReviewerExit({ via: 'direct', code: null, outputTail: 'usage limit' }))
+      .toEqual({ fallback: false, cause: null });
   });
 });
 
@@ -2302,7 +2374,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     process.exitCode = 0;
   });
 
-  // 利用上限のフォールバックと bridge 未導入時の再起動は spawnFn の onExit を差し替えて検証する。
+  // GPT 側使用不能のフォールバックと bridge 未導入時の再起動は spawnFn の onExit を差し替えて検証する。
   // 共通の配線: bridge を「有る」ことにし、差分・観点・書き出し先をすべて注入する。
   const bridgeScriptPath = path.join('/home/u', '.claude', 'tools', 'codex-agent.sh');
   // bridge 経由はスクリプトが approval_policy=never を明示している場合に限るので、既定では明示済みにする。
@@ -2351,7 +2423,10 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     let err = '';
     const spawnFn = (cmd, args, stdin, onExit) => {
       calls.push({ cmd, args, stdin });
-      settle(onExit, { code: USAGE_LIMIT_EXIT_CODE });
+      settle(onExit, {
+        code: USAGE_LIMIT_EXIT_CODE,
+        outputTail: 'codex-agent: result=rate-limited\n',
+      });
       return null;
     };
     process.exitCode = 0;
@@ -2368,6 +2443,70 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     expect(written[fallbackPath]).toContain('CL');
     expect(err).toMatch(/利用上限/);
     expect(err).toContain(fallbackPath);
+    process.exitCode = 0;
+  });
+
+  it('bridge 経由の一時的な使用不能は原因別の通知と PR コメント案内を出す', () => {
+    const written = {};
+    let err = '';
+    const spawnFn = (cmd, args, stdin, onExit) => {
+      settle(onExit, {
+        code: USAGE_LIMIT_EXIT_CODE,
+        outputTail: 'codex-agent: result=unavailable\n',
+      });
+      return null;
+    };
+    process.exitCode = 0;
+    runReview(limitOpts(), bridgeDeps({
+      spawnFn,
+      err: (s) => { err += s; },
+      writeFile: (p, body) => { written[p] = body; },
+    }));
+    expect(err).toContain('[cross-review] GPT 側が一時的に使えないため (モデルの混雑など) subagent 代替に切り替えます。プロンプト:');
+    expect(err).toContain('PR コメントには「Codex を直接実行できないため (GPT 側の一時的な使用不能) subagent 代替で確認した」と残してください。');
+    expect(err).not.toContain('利用上限');
+    expect(written[fallbackPath]).toContain('LIMIT_DIFF');
+    expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+    process.exitCode = 0;
+  });
+
+  it('bridge 経由で result 行が無ければ理由不明の通知と PR コメント案内を出す', () => {
+    const written = {};
+    let err = '';
+    const spawnFn = (cmd, args, stdin, onExit) => {
+      settle(onExit, { code: USAGE_LIMIT_EXIT_CODE, outputTail: '' });
+      return null;
+    };
+    process.exitCode = 0;
+    runReview(limitOpts(), bridgeDeps({
+      spawnFn,
+      err: (s) => { err += s; },
+      writeFile: (p, body) => { written[p] = body; },
+    }));
+    expect(err).toContain('[cross-review] GPT 側が使えないため (理由不明、終了コード 75) subagent 代替に切り替えます。プロンプト:');
+    expect(err).toContain('PR コメントには「Codex を直接実行できないため (理由不明の GPT 側使用不能) subagent 代替で確認した」と残してください。');
+    expect(err).not.toContain('利用上限');
+    expect(written[fallbackPath]).toContain('LIMIT_DIFF');
+    expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+    process.exitCode = 0;
+  });
+
+  it('--no-fallback なら bridge 経由の unavailable でも代替しない', () => {
+    let wrote = false;
+    const spawnFn = (cmd, args, stdin, onExit) => {
+      settle(onExit, {
+        code: USAGE_LIMIT_EXIT_CODE,
+        outputTail: 'codex-agent: result=unavailable\n',
+      });
+      return null;
+    };
+    process.exitCode = 0;
+    runReview(limitOpts({ noFallback: true }), bridgeDeps({
+      spawnFn,
+      writeFile: () => { wrote = true; },
+    }));
+    expect(wrote).toBe(false);
+    expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
     process.exitCode = 0;
   });
 
