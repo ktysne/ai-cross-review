@@ -21,7 +21,7 @@
 | Claude | `npm run review:codex`（codex は read-only） | `node tools/cross-review.js subagent` の出力を Claude の客観サブエージェント（Agent ツール、読み取り専用）へ渡す |
 | Codex | `node tools/cross-review.js subagent` の出力を Claude の客観サブエージェントへ渡す（Codex が主セッションなら `npm run review:claude`） | `npm run review:codex` |
 
-どの選択肢でも、レビュー結果を読んで修正を適用するのは主セッション。妥当性確認は同じ経路でもう一度回す。
+どの選択肢でも、レビュー結果を読んで修正を適用するのは主セッション（ユーザ判断が要る内容は、推奨の対応方法を添えて確認してから着手）。妥当性確認は同じ経路でもう一度回す。
 
 **ブランチ、PR 運用（必須、レビューを回すなら先にここを満たす）**：改修は main へ直接ではなく **feature ブランチ**で行う（main 上にいるなら着手時に切る）。選択肢 1 か 2 でレビューを回す前に **PR を作成**し（未作成なら先に作る）、以降は PR を共有ログにする。**各往復で出た指摘、対応、妥当性確認は、その都度 `gh pr comment` で PR に記録する**（チャットだけに残さない＝揮発させない）。リモートが無い等で PR を作れない場合のみ省略し、その旨を明記する。詳細は [docs/cross-review.md](docs/cross-review.md)。
 
