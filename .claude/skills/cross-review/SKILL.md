@@ -46,7 +46,7 @@ CLI、`codex exec`、非対話実行などユーザの返信を受け取れな�
 | Claude | `npm run review:codex` (codex は read-only) | `node tools/cross-review.js subagent` の出力を Claude の客観サブエージェント (Agent ツール、読み取り専用) へ渡す |
 | Codex | `node tools/cross-review.js subagent` の出力を Claude の客観サブエージェントへ渡す（Codex が主セッションなら `npm run review:claude`） | `npm run review:codex` |
 
-どの選択肢でも、レビュー結果を読んで修正を適用するのは主セッション（ユーザ判断が要る内容は確認してから着手）。
+どの選択肢でも、レビュー結果を読んで修正を適用するのは主セッション（ユーザ判断が要る内容は、推奨の対応方法を添えて確認してから着手）。
 修正が終わったら、同じ経路でもう一度レビューを回して妥当性確認する。
 レビューを回す前に feature ブランチと PR を用意する。詳細は `docs/cross-review.md`。
 
