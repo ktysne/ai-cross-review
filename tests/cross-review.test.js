@@ -137,7 +137,7 @@ describe('cross-review parseArgs', () => {
     expect(parseArgs(['claude', '--fix']).error).toMatch(/--fix/);
   });
 
-  it('subagent を受け付ける (リモートコントロール用のプロンプト出力経路)', () => {
+  it('subagent を受け付ける (CLI を起動できない環境用のプロンプト出力経路)', () => {
     expect(parseArgs(['subagent'])).toMatchObject({
       reviewer: 'subagent',
       mode: 'base',

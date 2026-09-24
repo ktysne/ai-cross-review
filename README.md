@@ -16,7 +16,7 @@ git の差分をそのままレビュアー CLI（`codex` / `claude`）へ渡し
   チャットの中身を手でコピーする必要はありません。  
 - **既定は安全側**：レビューだけのときは `codex` を read-only で起動し、ファイルを書き換えさせません。  
   `--fix` を付けたときだけ workspace-write で起動し、見つかった問題を直接修正させます。  
-- **CLI を起動できない環境にも対応**：クラウド / リモート実行で `codex` / `claude` CLI を起動できない（または API 接続が通らない）ときは、`subagent` モードがレビュー用プロンプトを stdout に出力します。  
+- **CLI を起動できない環境にも対応**：クラウド実行環境などで `codex` / `claude` CLI を起動できない（または API 接続が通らない）ときは、`subagent` モードがレビュー用プロンプトを stdout に出力します。  
   それを Claude の客観サブエージェントへ渡せば、外部 CLI 無しで同じ観点のレビューを回せます（後述「CLI を起動できない環境（`subagent` モード）」）。  
 - **トークンを節約**：ロックファイル、生成物（`package-lock.json` / `*.min.js` / `*.map` など）を既定で差分から除外し、巨大なファイル差分は stat 要約に置換します。  
   既定の比較先は「前回レビュー SHA → PR の base → `origin/main` → ローカル `main`」の順に解決し、差分サイズが閾値を超えたらファイル要約で縮退を試みたうえで、収まらなければレビュアーを起動せず中断します（stale なローカル `main` による差分の肥大を防ぎます）。  
@@ -89,7 +89,7 @@ node tools/cross-review.js codex --fix --uncommitted --instructions ../review-no
 
 ### CLI を起動できない環境（`subagent` モード）
 
-クラウド実行やリモートコントロール環境では、`codex` / `claude` の CLI を起動できないことがあります。  
+クラウド実行環境などでは、`codex` / `claude` の CLI を起動できないことがあります。  
 CLI は起動できても、ネットワーク/API 接続が許可されずレビュー結果が返らないこともあります。  
 切り分けるときは、まず `Get-Command claude` / `claude --version`（または `codex --version`）で CLI 可視性を確認し、次に `claude -p "Reply with OK only."` のような最小 API 呼び出しを通常環境とネットワーク許可環境で比較します。  
 このときは対象レビュアー CLI の代わりに `subagent` を指定します。  
