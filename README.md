@@ -89,7 +89,7 @@ node tools/cross-review.js codex --fix --uncommitted --instructions ../review-no
 
 ### CLI を起動できない環境（`subagent` モード）
 
-クラウド実行やリモートコントロール環境では、`codex` / `claude` の CLI を起動できないことがあります。  
+クラウド実行環境などでは、`codex` / `claude` の CLI を起動できないことがあります。  
 CLI は起動できても、ネットワーク/API 接続が許可されずレビュー結果が返らないこともあります。  
 切り分けるときは、まず `Get-Command claude` / `claude --version`（または `codex --version`）で CLI 可視性を確認し、次に `claude -p "Reply with OK only."` のような最小 API 呼び出しを通常環境とネットワーク許可環境で比較します。  
 このときは対象レビュアー CLI の代わりに `subagent` を指定します。  
