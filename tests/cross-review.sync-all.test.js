@@ -473,29 +473,33 @@ describe('planGlobalSkill', () => {
   // (path.resolve するとドライブレターが付き、Windows で一致しなくなる)。
   const CLAUDE = path.join(HOME, '.claude', 'skills', 'cross-review', 'SKILL.md');
   const CODEX = path.join(HOME, '.codex', 'skills', 'cross-review', 'SKILL.md');
+  const CODEX_SUBAGENT = path.join(HOME, '.codex-subagent', 'skills', 'cross-review', 'SKILL.md');
 
   it('未配置は create、内容が古ければ update、一致すれば unchanged', () => {
     const fsx = makeHomeFs({
       '/home/u/.codex/skills': '',
       '/home/u/.codex/skills/cross-review/SKILL.md': '古い SKILL',
+      '/home/u/.codex-subagent/skills': '',
     });
     const plans = planGlobalSkill({ home: HOME, targets: GLOBAL_SKILL_TARGETS, exists: fsx.exists, readFile: fsx.readFile, skillText: '新しい SKILL' });
     expect(plans).toEqual([
       { path: CLAUDE, status: 'create', reason: expect.any(String) },
       { path: CODEX, status: 'update', reason: expect.any(String) },
+      { path: CODEX_SUBAGENT, status: 'create', reason: expect.any(String) },
     ]);
 
     fsx.store.set(path.resolve(CLAUDE), '新しい SKILL');
     fsx.store.set(path.resolve(CODEX), '新しい SKILL');
+    fsx.store.set(path.resolve(CODEX_SUBAGENT), '新しい SKILL');
     const same = planGlobalSkill({ home: HOME, targets: GLOBAL_SKILL_TARGETS, exists: fsx.exists, readFile: fsx.readFile, skillText: '新しい SKILL' });
-    expect(same.map((p) => p.status)).toEqual(['unchanged', 'unchanged']);
+    expect(same.map((p) => p.status)).toEqual(['unchanged', 'unchanged', 'unchanged']);
   });
 
-  it('.codex/skills が無ければ Codex 側は skip (Claude 側は配る)', () => {
+  it('Codex の skills ディレクトリが無ければ各 Codex 側は skip (Claude 側は配る)', () => {
     const fsx = makeHomeFs({});
     const plans = planGlobalSkill({ home: HOME, targets: GLOBAL_SKILL_TARGETS, exists: fsx.exists, readFile: fsx.readFile, skillText: 'S' });
-    expect(plans.map((p) => p.status)).toEqual(['create', 'skip']);
-    expect(plans[1].reason).toMatch(/配布しない/);
+    expect(plans.map((p) => p.status)).toEqual(['create', 'skip', 'skip']);
+    expect(plans.slice(1).every((p) => /配布しない/.test(p.reason))).toBe(true);
   });
 
   it('配置済みだが読めない配布先は update (古い写しを残さない)', () => {
@@ -541,25 +545,35 @@ describe('runAll の --global-skill', () => {
   afterAll(() => { process.exitCode = 0; });
 
   it('--global-skill 単独 (--root 無し) は走査せずグローバル配布だけを行う', () => {
-    const h = globalDeps({ '/home/u/.codex/skills': '' });
+    const h = globalDeps({
+      '/home/u/.codex/skills': '',
+      '/home/u/.codex-subagent/skills': '',
+    });
     const r = runAll({ root: null, depth: 4, mode: 'sync', dryRun: false, globalSkill: true }, h.deps);
     expect(r.exitCode).toBe(0);
     expect(r.items).toHaveLength(1);
-    expect(r.items[0]).toMatchObject({ kind: 'global', status: 'updated', changed: 2 });
-    // 2 つの配布先へ SKILL 本文をそのまま書き、親ディレクトリを作る。
-    expect(h.fsx.writes.map((w) => w.content)).toEqual([SKILL, SKILL]);
-    expect(h.fsx.mkdirs).toHaveLength(2);
+    expect(r.items[0]).toMatchObject({ kind: 'global', status: 'updated', changed: 3 });
+    expect(h.fsx.writes.map((w) => w.path)).toEqual([
+      path.resolve('/home/u/.claude/skills/cross-review/SKILL.md'),
+      path.resolve('/home/u/.codex/skills/cross-review/SKILL.md'),
+      path.resolve('/home/u/.codex-subagent/skills/cross-review/SKILL.md'),
+    ]);
+    expect(h.fsx.writes.map((w) => w.content)).toEqual([SKILL, SKILL, SKILL]);
+    expect(h.fsx.mkdirs).toHaveLength(3);
     // 走査していないので「走査ルート」の見出しは出さない。
     expect(h.sink.out.join('')).not.toMatch(/走査ルート/);
-    expect(h.sink.out.join('')).toMatch(/\[更新\] \(2 件\) global:/);
+    expect(h.sink.out.join('')).toMatch(/\[更新\] \(3 件\) global:/);
   });
 
-  it('.codex/skills が無ければ Codex 側へは配らない (ディレクトリを作らない)', () => {
+  it('Codex 用の skills ディレクトリが無ければ配らず作らない', () => {
     const h = globalDeps();
     const r = runAll({ root: null, depth: 4, mode: 'sync', dryRun: false, globalSkill: true }, h.deps);
     expect(r.items[0]).toMatchObject({ status: 'updated', changed: 1 });
     expect(h.fsx.writes).toHaveLength(1);
     expect(h.fsx.writes[0].path).toBe(path.resolve('/home/u/.claude/skills/cross-review/SKILL.md'));
+    expect(h.fsx.mkdirs).toEqual([path.resolve('/home/u/.claude/skills/cross-review')]);
+    expect(h.fsx.exists('/home/u/.codex/skills/cross-review/SKILL.md')).toBe(false);
+    expect(h.fsx.exists('/home/u/.codex-subagent/skills/cross-review/SKILL.md')).toBe(false);
     expect(h.sink.err.join('')).toMatch(/配布しません/);
   });
 
@@ -612,7 +626,8 @@ describe('runAll の --global-skill', () => {
     expect(r.exitCode).toBe(0);
     expect(h.sink.out.join('')).toMatch(/グローバル SKILL の配布先:/);
     expect(h.sink.out.join('')).toMatch(/\.claude/);
-    expect(h.sink.out.join('')).toMatch(/対象外/); // .codex/skills が無い
+    expect(h.sink.out.join('')).toMatch(/\.codex-subagent/);
+    expect(h.sink.out.join('')).toMatch(/対象外/);
     expect(h.fsx.writes).toEqual([]);
   });
 

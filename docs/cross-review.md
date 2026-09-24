@@ -620,17 +620,18 @@ node tools/cross-review.sync-all.js --global-skill             # グローバル
 ### グローバル SKILL の配布（`--global-skill`）
 
 相互レビューの汎用ルール（3 択、サーキットブレーカー、PR 運用）を各リポジトリの `CLAUDE.md` へ写して回ると、改訂のたびに全プロジェクトを書き換えることになります。  
-`--global-skill` は、この checkout の `.claude/skills/cross-review/SKILL.md` を**ホームの共通配置 1 箇所**へ配り、各リポジトリにはそのプロジェクト固有の事情だけを残せるようにします（残す内容は次節のテンプレート）。
+`--global-skill` は、この checkout の `.claude/skills/cross-review/SKILL.md` をホームの共通配置へ配り、各リポジトリにはそのプロジェクト固有の事情だけを残せるようにします（残す内容は次節のテンプレート）。
 
-配布先は次の 2 つです。
+配布先は次の 3 つです。
 
 | 配布先 | 条件 |
 |---|---|
 | `~/.claude/skills/cross-review/SKILL.md` | 常に配る（ディレクトリが無ければ作る） |
 | `~/.codex/skills/cross-review/SKILL.md` | `~/.codex/skills/` が既にあるときだけ配る |
+| `~/.codex-subagent/skills/cross-review/SKILL.md` | `~/.codex-subagent/skills/` が既にあるときだけ配る |
 
-Codex はレビュー時にこの写しを読むので、古いままだと旧ルールで動きます。  
-一方で Codex を入れていない環境に `~/.codex/` を作るのは筋が悪いので、**親ディレクトリが既にあるときだけ**配ります（無いときは「対象外」として stderr に理由を出します）。
+Codex と Codex のサブエージェントは、それぞれのホームにある写しをレビュー時に読むので、古いままだと旧ルールで動きます。  
+Codex 用のディレクトリが無い環境では新たに作らず、「対象外」として stderr に理由を出します。
 
 - `--check` と併用すると書き込まず、古ければ **ドリフト扱いで exit 1** にします（グローバル SKILL が古いのは取り込み先のドリフトと同じ扱い）。
 - `--dry-run` は書き込まず、何が変わるかだけ表示します。
