@@ -630,7 +630,7 @@ node tools/cross-review.sync-all.js --global-skill             # グローバル
 | `~/.codex/skills/cross-review/SKILL.md` | `~/.codex/skills/` が既にあるときだけ配る |
 | `~/.codex-subagent/skills/cross-review/SKILL.md` | `~/.codex-subagent/skills/` が既にあるときだけ配る |
 
-Codex と Codex のサブエージェントは、それぞれのホームにある写しをレビュー時に読むので、古いままだと旧ルールで動きます。  
+Codex はレビュー時に、Codex のサブエージェントは修正適用や実装委譲の際に、それぞれのホームにある写しを読むので、古いままだと旧ルールで動きます。  
 Codex 用のディレクトリが無い環境では新たに作らず、「対象外」として stderr に理由を出します。
 
 - `--check` と併用すると書き込まず、古ければ **ドリフト扱いで exit 1** にします（グローバル SKILL が古いのは取り込み先のドリフトと同じ扱い）。

@@ -32,8 +32,8 @@
 //   出し、未登録 0 件の正常な検査と見分けられるようにする。
 // - --global-skill は、相互レビューの汎用ルールを各リポジトリの CLAUDE.md へ写す運用をやめ、ホームの
 //   グローバル SKILL へ配るための配布口。配布元はこの checkout の SKILL で、配布先は GLOBAL_SKILL_TARGETS
-//   に持つ。Codex と Codex サブエージェントはそれぞれ ~/.codex/skills/ と ~/.codex-subagent/skills/ の写しを
-//   レビュー時に読むため、古いままだと旧ルールで動く。requireDir がある配布先は、Codex を使わない環境に
+//   に持つ。Codex はレビュー時に ~/.codex/skills/ の、Codex サブエージェントは修正適用や実装委譲の際に
+//   ~/.codex-subagent/skills/ の写しを読むため、古いままだと旧ルールで動く。requireDir がある配布先は、Codex を使わない環境に
 //   ディレクトリを作らないよう、その親ディレクトリが既にあるときだけ配る。
 // - 1 プロジェクトの失敗 (マニフェスト不正、上流取得失敗等) で全体を止めない。各プロジェクトを独立に回し、
 //   最後に集計を出す。終了コードは「いずれかが失敗」または「--check でいずれかにドリフト」で 1。
@@ -56,6 +56,7 @@ const SKIP_DIRS = new Set(['node_modules', '.git']);
 const SKILL_SOURCE = ['.claude', 'skills', 'cross-review', 'SKILL.md'];
 // --global-skill の配布先 (ホームからの相対)。requireDir が非 null の配布先は、そのディレクトリが
 // 既にあるときだけ配る (そのツールを入れていない環境に配布先ディレクトリを作らないため)。
+// .codex と .codex-subagent は claude-codex-bridge の既定の codex_home。定義側で別名にした環境は対象外として配らない。
 const GLOBAL_SKILL_TARGETS = [
   { to: ['.claude', 'skills', 'cross-review', 'SKILL.md'], requireDir: null },
   { to: ['.codex', 'skills', 'cross-review', 'SKILL.md'], requireDir: ['.codex', 'skills'] },

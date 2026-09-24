@@ -502,6 +502,13 @@ describe('planGlobalSkill', () => {
     expect(plans.slice(1).every((p) => /配布しない/.test(p.reason))).toBe(true);
   });
 
+  it('~/.codex/skills だけがあれば Codex 側へ配り、サブエージェント側は skip', () => {
+    const fsx = makeHomeFs({ '/home/u/.codex/skills': '' });
+    const plans = planGlobalSkill({ home: HOME, targets: GLOBAL_SKILL_TARGETS, exists: fsx.exists, readFile: fsx.readFile, skillText: 'S' });
+    expect(plans.map((p) => p.status)).toEqual(['create', 'create', 'skip']);
+    expect(plans[2].reason).toMatch(/配布しない/);
+  });
+
   it('配置済みだが読めない配布先は update (古い写しを残さない)', () => {
     const fsx = makeHomeFs({ '/home/u/.claude/skills/cross-review/SKILL.md': 'x' });
     const plans = planGlobalSkill({
