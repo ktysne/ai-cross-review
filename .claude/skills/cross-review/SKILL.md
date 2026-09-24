@@ -138,6 +138,6 @@ vendored ファイル (`tools/cross-review.js` / `tools/cross-review.sync.js` / 
 
 複数の導入プロジェクトへまとめて反映するときは、`/Develop` 等の作業ルート配下を走査して一括同期する `tools/cross-review.sync-all.js` を使う（詳細は `docs/cross-review.md`「複数プロジェクトへ一括反映」）。app-owned / vendored の区分は `docs/cross-review.md` と各リポの doc を参照。
 
-この SKILL 自体をホームの共通配置（`~/.claude/skills/cross-review/`、`~/.codex/skills/` があれば Codex 側にも）へ配るときは `node tools/cross-review.sync-all.js --global-skill`（`--check` で古さの検査、`--dry-run` で確認）。Codex はレビュー時にこの写しを読むので、古いままだと旧ルールで動く。
+この SKILL 自体をホームの共通配置（`~/.claude/skills/cross-review/`。`~/.codex/skills/`、`~/.codex-subagent/skills/` があればそれぞれの Codex 側にも）へ配るときは `node tools/cross-review.sync-all.js --global-skill`（`--check` で古さの検査、`--dry-run` で確認）。Codex はレビュー時に、Codex のサブエージェントは修正適用や実装委譲の際に、それぞれのホームの写しを読むので、古いままだと旧ルールで動く。
 
 上流が配り始めたファイルを取り込み先が取りこぼしていないかは `node tools/cross-review.sync.js --check-manifest`（上流の雛形にあって `files[]` に無いエントリを列挙するだけ。`--check` を含意するので書き込みは起きない）。
