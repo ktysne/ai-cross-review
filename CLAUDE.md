@@ -5,7 +5,7 @@
 
 基本フローは **実装 → レビュー → 指摘対応 → 妥当性確認** の 4 ステップを Claude / Codex を入れ替えて回す（Claude 実装 → Codex レビュー → Claude 対応 → Codex 妥当性確認 / およびその逆）。  
 **指摘、対応、妥当性確認は PR コメントに残す**（揮発させない。PR 未作成なら先に作り、`gh pr comment` で記録）。
-コメント本文は手で組み立てず、裏取りと対応を `.cross-review/round-<N>-triage.md` に書いて `node tools/cross-review.js comment --round <N>` で生成し、`--body-file` で投稿する。
+コメント本文は手で組み立てず、裏取りと対応を `.cross-review/round-<N>-triage.md` に書いて `node tools/cross-review.js comment --round <N>` で生成し、`--body-file` で投稿する。判断を終えた往復は `--outcome <fixing|converged|halted>` を付けて、結論を状態ファイルに記録する（値の意味は docs の「状態ファイル」の節）。
 
 ### 実装完了後の起点（必須）
 **改修（実装、修正）を一区切りしたら、完了扱いにする前に必ず次の 3 択を提示する**（「コミット / PR で勝手に締めない」。反復改修時も区切りごとに確認し、最後の 1 回だけにしない。開発者の指定があるときと自走中は、下の「推奨と指定」に従って提示を省く）。Claude 主導なら `AskUserQuestion` で提示する（チャット本文の番号付きリストで代用しない）。Codex 主導では Plan mode 等の選択 UI があればそれを使い、無ければ本文に 3 択を明記して返信を待つ。並び順は固定で、推奨はラベル末尾に「(推奨)」を付けるだけにする。

@@ -56,10 +56,10 @@ node tools/cross-review.js codex --base origin/main
 node tools/cross-review.js subagent --uncommitted   # CLI を起動せずレビュー用プロンプトを stdout に出力 (CLI を使えない環境用)
 node tools/cross-review.js codex --no-codex-agent   # claude-codex-bridge (codex-agent.sh) を経由せず codex を直接起動
 node tools/cross-review.js codex --no-fallback      # GPT 側が使えなくても subagent 代替へ切り替えず失敗終了する
-node tools/cross-review.js state                    # この枝の往復回数・直前レビュー SHA・非対応指摘を表示 (--reset で消去)
+node tools/cross-review.js state                    # この枝の往復回数・直前レビュー SHA・非対応指摘・最後の結論を表示 (--reset で消去)
 node tools/cross-review.js state --mark             # 往復を 1 回分記録する (CLI がレビューの成立を観測できない経路の後で使う)
 node tools/cross-review.js dismiss "<要約>"          # 非対応と判断した指摘を記録し、以降のレビューで再指摘させない
-node tools/cross-review.js comment --round 1        # 判断ファイルと検証出力から PR コメント本文を生成 (投稿はしない)
+node tools/cross-review.js comment --round 1 --outcome fixing  # 本文を生成し、対応中の結論を記録 (投稿はしない)
 node tools/cross-review.js comment --round 1 --post 42  # 生成本文を PR #42 へ標準入力経由で投稿
 node tools/cross-review.js artifacts --clean-legacy     # 旧形式の平置き出力を削除
 node tools/cross-review.js --help
@@ -129,10 +129,11 @@ CLI は起動できても、ネットワーク/API 接続が許可されずレ�
 npm run review:codex                                        # レビュー (出力が .cross-review/ に保存される)
 # .cross-review/branch-<slug>-<hash>/round-1-triage.md に裏取りと対応を書く (無ければ雛形が出ます)
 npm test > verify.log 2>&1
-node tools/cross-review.js comment --round 1 --verify verify.log
+# 収束した場合は、指摘対応をコミットしてから --outcome converged を付ける
+node tools/cross-review.js comment --round 1 --verify verify.log --outcome converged
 gh pr comment <番号> --body-file .cross-review/branch-<slug>-<hash>/round-1-comment.md
 # 投稿まで自動化する場合
-node tools/cross-review.js comment --round 1 --verify verify.log --post <番号>
+node tools/cross-review.js comment --round 1 --verify verify.log --post <番号> --outcome converged
 ```
 
 `.cross-review/` は生成物なので `.gitignore` に追加します。  
