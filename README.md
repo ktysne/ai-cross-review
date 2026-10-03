@@ -25,6 +25,7 @@ git の差分をそのままレビュアー CLI（`codex` / `claude`）へ渡し
   導入するときは、決まったファイル一式をコピーし、`.cross-review.md` だけを自分のプロジェクト向けに編集します。  
 - **配布と更新を仕組み化**：同期スクリプト（`tools/cross-review.sync.js`）と一括同期ツール（`tools/cross-review.sync-all.js`）で、上流の更新を導入先へまとめて反映できます。  
   Claude Code 用の実行手順スキル（`.claude/skills/cross-review/SKILL.md`）も同梱します。
+- **agent-cockpit と連携**：`node tools/cross-review.js route` で agent-cockpit の `routing.json` にあるレビュアー設定を読み取れます（設定は任意です）。
 
 ## 前提
 

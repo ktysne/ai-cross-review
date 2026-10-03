@@ -3,8 +3,10 @@
 // 注入して stdin 本文まで検証する。純粋関数と注入可能な配線のみを対象とする。
 
 import { describe, it, expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const {
@@ -48,6 +50,9 @@ const {
   REVIEWER_NOTES_HEADER,
   DISMISSED_HEADER,
   resolveBaseSelection,
+  resolveRoutingPath,
+  readReviewRoute,
+  runRouteCommand,
   shrinkDiffToFit,
   emptyBranchState,
   normalizeState,
@@ -345,6 +350,112 @@ describe('cross-review parseArgs', () => {
     const out = parseArgs(['--help']);
     expect(out.help).toBe(true);
     expect(out.error).toBeNull();
+  });
+});
+
+describe('cross-review route', () => {
+  it('parseArgs は route を独立したサブコマンドとして解釈する', () => {
+    expect(parseArgs(['route'])).toMatchObject({ command: 'route', error: null });
+    expect(parseArgs(['route', '--help'])).toMatchObject({ help: true, error: null });
+  });
+
+  it('route は route で使えないオプションと余分な位置引数を拒否する', () => {
+    for (const args of [
+      ['route', '--instructions', 'notes.md'],
+      ['route', '--uncommitted'],
+      ['route', '--reset'],
+      ['route', '--mark'],
+      ['route', '--round', '1'],
+      ['route', '--no-state'],
+      ['route', '--fix'],
+      ['route', '--base', 'main'],
+      ['route', '--clean-legacy'],
+      ['route', 'codex'],
+    ]) {
+      expect(parseArgs(args).error, args.join(' ')).toBeTruthy();
+    }
+  });
+
+  it('routing.json の欠落・読取失敗・不正な内容は default にする', () => {
+    const invalidFiles = [
+      ['ファイルが無い', () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); }],
+      ['読めない', () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); }],
+      ['JSON が壊れている', () => '{'],
+      ['review が無い', () => JSON.stringify({ agents: 'default' })],
+      ['文字列の不正な値', () => JSON.stringify({ review: 'gpt' })],
+      ['数値の値', () => JSON.stringify({ review: 1 })],
+      ['トップレベルが配列', () => '[]'],
+      ['トップレベルが null', () => 'null'],
+    ];
+
+    for (const [name, readFile] of invalidFiles) {
+      const output = [];
+      const errors = [];
+      const exitCode = process.exitCode;
+      runRouteCommand(parseArgs(['route']), {
+        readFile,
+        out: (text) => output.push(text),
+        err: (text) => errors.push(text),
+      });
+      expect(output, name).toEqual(['default\n']);
+      expect(errors, name).toEqual([]);
+      expect(process.exitCode, name).toBe(exitCode);
+    }
+  });
+
+  it('routing.json の有効な review 値を返す', () => {
+    for (const review of ['codex', 'claude', 'default']) {
+      expect(readReviewRoute({ readFile: () => JSON.stringify({ review }) })).toBe(review);
+    }
+    expect(readReviewRoute({ readFile: () => '\uFEFF{"review":"codex"}' })).toBe('codex');
+  });
+
+  it('AGENT_COCKPIT_HOME があればその routing.json を解決する', () => {
+    expect(resolveRoutingPath({ env: { AGENT_COCKPIT_HOME: 'D:/cockpit' }, homedir: 'D:/home' }))
+      .toBe(path.join('D:/cockpit', 'routing.json'));
+  });
+
+  it('AGENT_COCKPIT_HOME が空ならホームの .agent-cockpit を解決する', () => {
+    expect(resolveRoutingPath({ env: { AGENT_COCKPIT_HOME: '' }, homedir: 'D:/home' }))
+      .toBe(path.join('D:/home', '.agent-cockpit', 'routing.json'));
+    expect(resolveRoutingPath({ env: {}, homedir: 'D:/home' }))
+      .toBe(path.join('D:/home', '.agent-cockpit', 'routing.json'));
+  });
+
+  it('route は値と改行だけを出力し、状態や外部コマンドへ触れない', () => {
+    const output = [];
+    let stateReads = 0;
+    let stateWrites = 0;
+    runRouteCommand(parseArgs(['route']), {
+      env: { AGENT_COCKPIT_HOME: '/cockpit' },
+      readFile: (filePath) => {
+        expect(filePath).toBe(path.join('/cockpit', 'routing.json'));
+        return JSON.stringify({ review: 'claude' });
+      },
+      out: (text) => output.push(text),
+      readState: () => { stateReads += 1; throw new Error('state read'); },
+      writeState: () => { stateWrites += 1; throw new Error('state write'); },
+      gitRun: () => { throw new Error('git'); },
+      ghRun: () => { throw new Error('gh'); },
+      spawnFn: () => { throw new Error('spawn'); },
+    });
+
+    expect(output).toEqual(['claude\n']);
+    expect(stateReads).toBe(0);
+    expect(stateWrites).toBe(0);
+  });
+
+  it('routing.json が無い実プロセスは default と終了コード 0 を返し stderr は空にする', () => {
+    const scriptPath = fileURLToPath(new URL('../tools/cross-review.js', import.meta.url));
+    const missingHome = fileURLToPath(new URL('../.cross-review/route-config-missing', import.meta.url));
+    const result = spawnSync(process.execPath, [scriptPath, 'route'], {
+      encoding: 'utf8',
+      env: { ...process.env, AGENT_COCKPIT_HOME: missingHome },
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('default\n');
+    expect(result.stderr).toBe('');
   });
 });
 
