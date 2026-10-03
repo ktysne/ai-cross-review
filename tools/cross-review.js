@@ -2281,6 +2281,8 @@ function emitFallbackPrompt(prompt, opts, deps = {}) {
 // 中核なので、その配線を結合テストで固定できるようにする。
 function runReview(opts, deps = {}) {
   const writeErr = deps.err || ((s) => process.stderr.write(s));
+  // deps.env は差分閾値などの注入口で AGENT_COCKPIT_HOME を含まないため、経路設定の場所は process.env で解決する。
+  // 経路設定を差し替えるときは deps.reviewRoute か deps.routingReadFile を使う。
   const reviewRoute = typeof deps.reviewRoute === 'function'
     ? deps.reviewRoute()
     : readReviewRoute({ homedir: deps.homedir, readFile: deps.routingReadFile });
