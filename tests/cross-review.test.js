@@ -3486,6 +3486,30 @@ describe('cross-review comment サブコマンド', () => {
     expect(writes).toBe(0);
   });
 
+  it('投稿を待つあいだに HEAD が変わったら結論を記録せずエラー終了する', () => {
+    let sha = 'b'.repeat(40);
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
+    let writes = 0;
+    const { deps, written, logs } = commentDeps(files, {
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return `${branch}\n`;
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+        return '';
+      },
+      ghRun: () => { sha = 'c'.repeat(40); return { status: 0, stdout: '', stderr: '' }; },
+      readState: () => ({ path: '/repo/.cross-review-state.json', state: { branches: {} }, corrupt: false }),
+      writeState: () => { writes += 1; return true; },
+    });
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1, postNumber: 42, outcome: 'converged' }, deps)).toBeNull();
+    expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
+    expect(files[at(names.comment)]).toBe(written[at(names.comment)]);
+    expect(writes).toBe(0);
+    expect(logs.err).toContain('実行中にブランチか HEAD が変わりました');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
   it('状態ファイルが壊れていれば本文を残して結論を記録しない', () => {
     const sha = 'f'.repeat(40);
     const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };

@@ -2679,6 +2679,14 @@ function runCommentCommand(opts, deps = {}) {
     process.exitCode = 1;
     return null;
   }
+  const safeGitValue = (read) => {
+    try {
+      return read(gitRun);
+    } catch {
+      return null;
+    }
+  };
+  const startHeadSha = opts.outcome == null ? null : safeGitValue(currentHeadSha);
   const dir = resolveBranchReviewDir(branch, deps);
   const outPath = opts.outPath || path.join(dir, roundFileNames(round, '').comment);
   const usesDefaultOut = !opts.outPath;
@@ -2726,17 +2734,18 @@ function runCommentCommand(opts, deps = {}) {
       process.exitCode = 1;
       return false;
     }
-    let headSha;
-    try {
-      headSha = currentHeadSha(gitRun);
-    } catch {
-      headSha = null;
-    }
-    if (!headSha) {
+    if (!startHeadSha) {
       writeErr(`[cross-review] ${context}結論は記録していません: HEAD の SHA を取得できません (${statePath})\n`);
       process.exitCode = 1;
       return false;
     }
+    // 投稿を待つあいだにコミットやブランチ切替があると、確かめていない SHA を結論に残すため。
+    if (safeGitValue(currentBranchName) !== branch || safeGitValue(currentHeadSha) !== startHeadSha) {
+      writeErr(`[cross-review] ${context}結論は記録していません: 実行中にブランチか HEAD が変わりました (${statePath})\n`);
+      process.exitCode = 1;
+      return false;
+    }
+    const headSha = startHeadSha;
     const updated = withTriage(loaded.state, branch, { round, sha: headSha, outcome: opts.outcome });
     try {
       if (writeStateFn(updated, stateDeps) === false) {
