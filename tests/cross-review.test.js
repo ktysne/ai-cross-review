@@ -8,6 +8,8 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+process.env.AGENT_COCKPIT_HOME = path.join(path.dirname(fileURLToPath(import.meta.url)), '.cross-review', 'route-config-missing');
+
 const require = createRequire(import.meta.url);
 const {
   parseArgs,
@@ -227,6 +229,42 @@ describe('cross-review parseArgs', () => {
     expect(parseArgs(['codex', '--instructions', '--fix']).error).toMatch(/--instructions/);
     expect(parseArgs(['codex', '--instructions=']).error).toMatch(/--instructions/);
     expect(parseArgs(['codex', '--instructions=']).instructionsPath).toBeNull();
+  });
+
+  it('--override-route は理由を引数形式と等号形式で受ける', () => {
+    expect(parseArgs(['subagent', '--override-route', '会話での指定'])).toMatchObject({
+      reviewer: 'subagent',
+      routeOverrideReason: '会話での指定',
+      error: null,
+    });
+    expect(parseArgs(['codex', '--override-route=会話での指定'])).toMatchObject({
+      routeOverrideReason: '会話での指定',
+      error: null,
+    });
+  });
+
+  it('--override-route の空値やオプション風の値はエラー', () => {
+    for (const args of [
+      ['codex', '--override-route'],
+      ['codex', '--override-route', '--fix'],
+      ['codex', '--override-route='],
+      ['codex', '--override-route=-理由'],
+    ]) {
+      expect(parseArgs(args).error, args.join(' ')).toMatch(/--override-route/);
+    }
+  });
+
+  it('--override-route はレビュアーのサブコマンドでのみ使える', () => {
+    const invalidCommands = [
+      ['route', '--override-route', '理由'],
+      ['state', '--override-route', '理由'],
+      ['dismiss', '指摘の要約', '--override-route', '理由'],
+      ['comment', '--round', '1', '--override-route', '理由'],
+      ['artifacts', '--clean-legacy', '--override-route', '理由'],
+    ];
+    for (const args of invalidCommands) {
+      expect(parseArgs(args).error, args.join(' ')).toMatch(/レビュアーのサブコマンドでのみ|route サブコマンドでは使えません/);
+    }
   });
 
   it('既定では instructionsPath は null', () => {
@@ -2046,6 +2084,204 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     onExit({ outputTail: '', error: null, ...result });
   };
 
+  describe('agent-cockpit の経路設定', () => {
+    const routeCases = [
+      { name: 'codex', review: 'codex', read: () => JSON.stringify({ review: 'codex' }), allowed: ['codex'] },
+      { name: 'claude', review: 'claude', read: () => JSON.stringify({ review: 'claude' }), allowed: ['claude', 'subagent'] },
+      { name: 'default', review: 'default', read: () => JSON.stringify({ review: 'default' }), allowed: ['codex', 'claude', 'subagent'] },
+      { name: 'routing.json の読取失敗', review: 'default', read: () => { throw new Error('read failed'); }, allowed: ['codex', 'claude', 'subagent'] },
+      { name: '壊れた JSON', review: 'default', read: () => '{', allowed: ['codex', 'claude', 'subagent'] },
+    ];
+
+    for (const routeCase of routeCases) {
+      for (const reviewer of ['codex', 'claude', 'subagent']) {
+        const rejected = !routeCase.allowed.includes(reviewer);
+        it(`${routeCase.name} 設定で ${reviewer} を${rejected ? '拒否' : '実行'}する`, () => {
+          let routingReads = 0;
+          let gitCalls = 0;
+          let spawnCalls = 0;
+          let stateReads = 0;
+          let stateWrites = 0;
+          let ghCalls = 0;
+          let out = '';
+          let err = '';
+          const deps = {
+            homedir: '/test-home',
+            env: { AGENT_COCKPIT_HOME: '/ignored-cockpit', CROSS_REVIEW_NO_FETCH: '1' },
+            routingReadFile: (filePath) => {
+              routingReads++;
+              expect(filePath).toBe(path.join(process.env.AGENT_COCKPIT_HOME, 'routing.json'));
+              return routeCase.read();
+            },
+            gitRun: (args) => {
+              gitCalls++;
+              if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/route\n';
+              if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${'a'.repeat(40)}\n`;
+              if (args[0] === 'diff') return 'ROUTE_DIFF\n';
+              return '';
+            },
+            spawnFn: () => { spawnCalls++; return null; },
+            readState: () => {
+              stateReads++;
+              return { path: '<test-state>', state: { branches: {} }, corrupt: false };
+            },
+            writeState: () => { stateWrites++; return true; },
+            writeReviewFile: () => {},
+            ghRun: () => { ghCalls++; return null; },
+            checklist: 'CHECKLIST',
+            noPrCheck: true,
+            exists: () => false,
+            out: (value) => { out += value; },
+            err: (value) => { err += value; },
+          };
+
+          process.exitCode = 0;
+          const result = runReview({
+            reviewer,
+            mode: 'base',
+            baseRef: 'main',
+            baseExplicit: true,
+            fix: false,
+            maxDiffKb: 0,
+            maxFileDiffKb: 0,
+          }, deps);
+
+          expect(routingReads).toBe(1);
+          if (rejected) {
+            const suggestedReviewer = routeCase.review === 'codex' ? 'codex' : 'claude';
+            expect(process.exitCode).toBe(2);
+            expect(result).toBeNull();
+            expect(err).toContain(`経路設定 ${routeCase.review}`);
+            expect(err).toContain(`node tools/cross-review.js ${suggestedReviewer}`);
+            expect(err).toContain('--override-route <理由>');
+            expect(err.trimEnd().split(/\r?\n/)).toHaveLength(1);
+            expect(gitCalls).toBe(0);
+            expect(spawnCalls).toBe(0);
+            expect(ghCalls).toBe(0);
+            expect(stateReads).toBe(0);
+            expect(stateWrites).toBe(0);
+            expect(out).toBe('');
+          } else {
+            expect(process.exitCode).toBe(0);
+            expect(gitCalls).toBeGreaterThan(0);
+            expect(err).not.toContain('起動を拒否します');
+          }
+          process.exitCode = 0;
+        });
+      }
+    }
+
+    it('--fix と --uncommitted を拒否時の推奨コマンドへ引き継ぐ', () => {
+      const cases = [
+        { route: 'codex', reviewer: 'claude', expected: 'node tools/cross-review.js codex --fix --uncommitted' },
+        { route: 'claude', reviewer: 'codex', expected: 'node tools/cross-review.js subagent --fix --uncommitted' },
+      ];
+      for (const testCase of cases) {
+        let err = '';
+        process.exitCode = 0;
+        runReview({
+          reviewer: testCase.reviewer,
+          mode: 'uncommitted',
+          fix: true,
+        }, {
+          reviewRoute: () => testCase.route,
+          gitRun: () => { throw new Error('拒否時に git を呼んではいけない'); },
+          spawnFn: () => { throw new Error('拒否時に起動してはいけない'); },
+          err: (value) => { err += value; },
+        });
+        expect(err).toContain(testCase.expected);
+        process.exitCode = 0;
+      }
+    });
+
+    it('claude 設定では --fix 無しの拒否案内に subagent の代替を添える', () => {
+      let err = '';
+      process.exitCode = 0;
+      runReview({ reviewer: 'codex', mode: 'uncommitted', fix: false }, {
+        reviewRoute: () => 'claude',
+        gitRun: () => { throw new Error('拒否時に git を呼んではいけない'); },
+        spawnFn: () => { throw new Error('拒否時に起動してはいけない'); },
+        err: (value) => { err += value; },
+      });
+      expect(err).toContain('node tools/cross-review.js claude --uncommitted');
+      expect(err).toContain('CLI を使えないときは subagent');
+      process.exitCode = 0;
+    });
+
+    it('--override-route で codex 設定を上書きした subagent の理由をメタ情報へ記録する', () => {
+      const mem = memoryState();
+      let err = '';
+      let out = '';
+      process.exitCode = 0;
+      runReview({
+        reviewer: 'subagent',
+        mode: 'uncommitted',
+        baseRef: 'HEAD',
+        baseExplicit: true,
+        fix: true,
+        maxDiffKb: 0,
+        maxFileDiffKb: 0,
+        routeOverrideReason: '開発者が別のレビュアーを指定した',
+      }, {
+        ...mem,
+        reviewRoute: () => 'codex',
+        gitRun: (args) => {
+          if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/route\n';
+          if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${'a'.repeat(40)}\n`;
+          if (args[0] === 'diff') return 'OVERRIDE_DIFF\n';
+          return '';
+        },
+        spawnFn: () => { throw new Error('subagent は外部プロセスを起動してはいけない'); },
+        checklist: 'CHECKLIST',
+        scriptDir: path.join(path.sep, 'repo', 'tools'),
+        exists: () => false,
+        out: (value) => { out += value; },
+        err: (value) => { err += value; },
+      });
+      const metaPath = Object.keys(mem.store.files).find((filePath) => filePath.endsWith('round-1-subagent.json'));
+      expect(JSON.parse(mem.store.files[metaPath]).routeOverride).toEqual({
+        route: 'codex',
+        reason: '開発者が別のレビュアーを指定した',
+      });
+      expect(err).toContain('経路設定 codex を上書きして subagent で実行します');
+      expect(err).toContain('理由: 開発者が別のレビュアーを指定した');
+      expect(out).toContain('OVERRIDE_DIFF');
+      process.exitCode = 0;
+    });
+
+    it('上書き理由があっても経路設定に反しない場合はメタ情報へ記録しない', () => {
+      const mem = memoryState();
+      process.exitCode = 0;
+      runReview({
+        reviewer: 'codex',
+        mode: 'base',
+        baseRef: 'main',
+        baseExplicit: true,
+        fix: false,
+        maxDiffKb: 0,
+        maxFileDiffKb: 0,
+        routeOverrideReason: '経路設定と同じレビュアー',
+      }, {
+        ...mem,
+        reviewRoute: () => 'codex',
+        gitRun: (args) => {
+          if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/route\n';
+          if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${'a'.repeat(40)}\n`;
+          if (args[0] === 'diff') return 'SAME_ROUTE_DIFF\n';
+          return '';
+        },
+        spawnFn: (cmd, args, stdin, onExit) => { settle(onExit, { code: 0, output: 'REVIEW' }); return null; },
+        checklist: 'CHECKLIST',
+        scriptDir: path.join(path.sep, 'repo', 'tools'),
+        exists: () => false,
+        noPrCheck: true,
+      });
+      const metaPath = Object.keys(mem.store.files).find((filePath) => filePath.endsWith('round-1-codex.json'));
+      expect(JSON.parse(mem.store.files[metaPath])).not.toHaveProperty('routeOverride');
+      process.exitCode = 0;
+    });
+  });
+
   // codex 経路でも「観点 + 差分本文 + モード指示」を stdin に渡す配線を固定する。
   // 旧挙動 (codex に観点だけ渡す) への退行を検知するための結合テスト。
   it('codex レビューのみ: read-only + 差分本文 + 観点 + レビューのみ指示を stdin に渡す', () => {
@@ -2630,6 +2866,25 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     process.exitCode = 0;
   });
 
+  it('経路設定 codex の codex 起動では終了コード 75 の代替プロンプトを出す', () => {
+    const written = {};
+    process.exitCode = 0;
+    runReview(limitOpts(), bridgeDeps({
+      reviewRoute: () => 'codex',
+      spawnFn: (cmd, args, stdin, onExit) => {
+        settle(onExit, {
+          code: USAGE_LIMIT_EXIT_CODE,
+          outputTail: 'codex-agent: result=rate-limited\n',
+        });
+        return null;
+      },
+      writeFile: (filePath, body) => { written[filePath] = body; },
+    }));
+    expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+    expect(written[fallbackPath]).toContain('LIMIT_DIFF');
+    process.exitCode = 0;
+  });
+
   it('bridge 経由の一時的な使用不能は原因別の通知と PR コメント案内を出す', () => {
     const written = {};
     let err = '';
@@ -3154,6 +3409,23 @@ describe('cross-review buildRoundComment (PR コメントの定型)', () => {
     expect(body).toContain('実行経路: bridge 経由 / base: origin/main (origin/main 優先解決) / 差分サイズ: 12.3KB');
     expect(body).toContain('### 指摘 1（要修正）: X');
     expect(body).not.toContain('### 確認内容'); // 検証出力が無ければ節ごと出さない
+  });
+
+  it('経路設定を上書きした理由はメタ要約行の直後に出す', () => {
+    const body = buildRoundComment({
+      round: 1,
+      reviewer: 'subagent',
+      meta: { ...meta, routeOverride: { route: 'codex', reason: '会話で Claude が指定された' } },
+      triage: 'T',
+    });
+    const summary = '実行経路: bridge 経由 / base: origin/main (origin/main 優先解決) / 差分サイズ: 12.3KB';
+    const override = '経路設定の上書き: 設定 codex を上書きした (理由: 会話で Claude が指定された)';
+    expect(body.indexOf(override)).toBe(body.indexOf(summary) + summary.length + 1);
+  });
+
+  it('経路設定の上書きメタ情報が無ければ上書き行を出さない', () => {
+    const body = buildRoundComment({ round: 1, reviewer: 'codex', meta, triage: 'T' });
+    expect(body).not.toContain('経路設定の上書き:');
   });
 
   it('レビュー出力を渡してもコメント本文に載せない', () => {
