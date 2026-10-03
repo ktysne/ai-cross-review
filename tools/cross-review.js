@@ -1088,7 +1088,8 @@ function readReviewRoute(deps = {}) {
   const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
   let routing;
   try {
-    routing = JSON.parse(readFile(resolveRoutingPath(deps)));
+    // 手で編集したときに BOM が付くことがあり、JSON.parse は BOM を受け付けない。
+    routing = JSON.parse(String(readFile(resolveRoutingPath(deps))).replace(/^\uFEFF/, ''));
   } catch {
     return 'default';
   }

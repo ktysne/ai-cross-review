@@ -6,6 +6,7 @@ import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const {
@@ -406,6 +407,7 @@ describe('cross-review route', () => {
     for (const review of ['codex', 'claude', 'default']) {
       expect(readReviewRoute({ readFile: () => JSON.stringify({ review }) })).toBe(review);
     }
+    expect(readReviewRoute({ readFile: () => '\uFEFF{"review":"codex"}' })).toBe('codex');
   });
 
   it('AGENT_COCKPIT_HOME があればその routing.json を解決する', () => {
@@ -444,9 +446,9 @@ describe('cross-review route', () => {
   });
 
   it('routing.json が無い実プロセスは default と終了コード 0 を返し stderr は空にする', () => {
-    const missingHome = path.join(process.cwd(), '.cross-review', 'route-config-missing');
-    const result = spawnSync(process.execPath, ['tools/cross-review.js', 'route'], {
-      cwd: process.cwd(),
+    const scriptPath = fileURLToPath(new URL('../tools/cross-review.js', import.meta.url));
+    const missingHome = fileURLToPath(new URL('../.cross-review/route-config-missing', import.meta.url));
+    const result = spawnSync(process.execPath, [scriptPath, 'route'], {
       encoding: 'utf8',
       env: { ...process.env, AGENT_COCKPIT_HOME: missingHome },
     });
