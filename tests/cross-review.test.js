@@ -1624,6 +1624,19 @@ describe('cross-review 状態ファイルの純粋関数', () => {
     expect(out.branches['feat/x'].lastTriage).toEqual({ round: 3, sha, outcome: 'converged' });
   });
 
+  it('withTriage は古い往復の結論で新しい結論を戻さず、同じ往復の記録し直しは受ける', () => {
+    const before = withTriage({ branches: {} }, 'feat/x', { round: 2, sha, outcome: 'converged' });
+    expect(withTriage(before, 'feat/x', { round: 1, sha, outcome: 'fixing' }).branches['feat/x'].lastTriage)
+      .toEqual({ round: 2, sha, outcome: 'converged' });
+    expect(withTriage(before, 'feat/x', { round: 2, sha, outcome: 'halted' }).branches['feat/x'].lastTriage)
+      .toEqual({ round: 2, sha, outcome: 'halted' });
+  });
+
+  it('withTriage は SHA を小文字に揃えて記録する', () => {
+    const out = withTriage({ branches: {} }, 'feat/x', { round: 1, sha: 'ABCDEF'.repeat(6) + 'ABCD', outcome: 'fixing' });
+    expect(out.branches['feat/x'].lastTriage.sha).toBe('abcdef'.repeat(6) + 'abcd');
+  });
+
   it('withoutBranch: 指定した枝だけを消す', () => {
     const before = {
       branches: {
@@ -1651,12 +1664,13 @@ describe('cross-review 状態ファイルの純粋関数', () => {
       zeroRound: { lastTriage: { ...valid, round: 0 } },
       badSha: { lastTriage: { ...valid, sha: 'g'.repeat(40) } },
       shortSha: { lastTriage: { ...valid, sha: 'abc123' } },
+      abbreviatedSha: { lastTriage: { ...valid, sha: 'c'.repeat(12) } },
       badOutcome: { lastTriage: { ...valid, outcome: 'done' } },
       wrongType: { lastTriage: 'fixing' },
       oldFormat: { round: 2, lastReviewedSha: sha, dismissed: [] },
     } });
     expect(out.branches.valid.lastTriage).toEqual(valid);
-    for (const name of ['badRound', 'zeroRound', 'badSha', 'shortSha', 'badOutcome', 'wrongType', 'oldFormat']) {
+    for (const name of ['badRound', 'zeroRound', 'badSha', 'shortSha', 'abbreviatedSha', 'badOutcome', 'wrongType', 'oldFormat']) {
       expect(out.branches[name].lastTriage).toBeNull();
     }
   });
@@ -3506,6 +3520,32 @@ describe('cross-review comment サブコマンド', () => {
     expect(files[at(names.comment)]).toBe(written[at(names.comment)]);
     expect(writes).toBe(0);
     expect(logs.err).toContain('実行中にブランチか HEAD が変わりました');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('新しい往復の結論があれば古い往復の結論を記録せずエラー終了する', () => {
+    const sha = 'd'.repeat(40);
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
+    let writes = 0;
+    const { deps, written, logs } = commentDeps(files, {
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return `${branch}\n`;
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+        return '';
+      },
+      readState: () => ({
+        path: '/repo/.cross-review-state.json',
+        state: { branches: { [branch]: { round: 2, lastReviewedSha: sha, dismissed: [], lastTriage: { round: 2, sha, outcome: 'converged' } } } },
+        corrupt: false,
+      }),
+      writeState: () => { writes += 1; return true; },
+    });
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1, outcome: 'fixing' }, deps)).toBeNull();
+    expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
+    expect(writes).toBe(0);
+    expect(logs.err).toContain('2 往復目の結論が既にあります');
     expect(process.exitCode).toBe(1);
     process.exitCode = 0;
   });

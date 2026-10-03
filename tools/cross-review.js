@@ -1053,9 +1053,10 @@ const TRIAGE_OUTCOMES = new Set(['fixing', 'converged', 'halted']);
 function normalizeLastTriage(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   if (!Number.isSafeInteger(value.round) || value.round < 1) return null;
-  if (typeof value.sha !== 'string' || !/^[0-9a-f]{7,64}$/i.test(value.sha)) return null;
+  // 読み手は PR の head と完全一致で比べるので、短縮 SHA は受けない (SHA-1 は 40 桁、SHA-256 は 64 桁)。
+  if (typeof value.sha !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value.sha)) return null;
   if (!TRIAGE_OUTCOMES.has(value.outcome)) return null;
-  return { round: value.round, sha: value.sha, outcome: value.outcome };
+  return { round: value.round, sha: value.sha.toLowerCase(), outcome: value.outcome };
 }
 
 // 読み込んだ JSON を既知の形へ正規化する純粋関数。型が違う値は初期値へ落とす
@@ -1129,6 +1130,8 @@ function withTriage(state, branch, triage) {
   const lastTriage = normalizeLastTriage(triage);
   if (!branch || !lastTriage) return base;
   const prev = branchStateOf(base, branch);
+  // 古い往復の結論で新しい往復の結論を戻さない。同じ往復の記録し直しは受ける。
+  if (prev.lastTriage && lastTriage.round < prev.lastTriage.round) return base;
   const branches = { ...base.branches };
   branches[branch] = { ...prev, lastTriage };
   return { branches };
@@ -2746,6 +2749,12 @@ function runCommentCommand(opts, deps = {}) {
       return false;
     }
     const headSha = startHeadSha;
+    const recorded = branchStateOf(loaded.state, branch).lastTriage;
+    if (recorded && round < recorded.round) {
+      writeErr(`[cross-review] ${context}結論は記録していません: ${recorded.round} 往復目の結論が既にあります (${statePath})\n`);
+      process.exitCode = 1;
+      return false;
+    }
     const updated = withTriage(loaded.state, branch, { round, sha: headSha, outcome: opts.outcome });
     try {
       if (writeStateFn(updated, stateDeps) === false) {
