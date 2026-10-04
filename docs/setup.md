@@ -55,7 +55,7 @@ cp <ai-cross-review の checkout>/tools/cross-review.sync.example.json tools/cro
 `tools/cross-review.sync.json` の `files` を、導入先に合わせて直します。
 
 - テストの 3 件（`tests/cross-review*.test.js`）は、導入先のテストランナーが vitest のときだけ残します。残すときは、`to` と `replace` を導入先のテストの置き場に合わせます。vitest でなければ、3 件とも消します。
-- 一括同期ツール（`tools/cross-review.sync-all.js`）は、複数の導入先をまとめて更新する人だけが使います。要らなければ消して構いません。
+- 一括同期ツール（`tools/cross-review.sync-all.js`）は、複数の導入先をまとめて更新する人だけが使います。要らなければ消して構いません。テストを残しているときは、そのテスト（`tests/cross-review.sync-all.test.js`）のエントリも一緒に消します。残すと、テストが消したツールを読み込めずに失敗します。
 - 意図して消したファイルは、更新のときの `--check-manifest` で毎回「未登録」と出ます。消したと分かっているものは足し戻さずに無視します。
 - `.cross-review.md`、`CLAUDE.md`、`AGENTS.md` など、導入先で編集するファイルは `files` に入れません。同期で上書きされて消えます。
 
@@ -133,9 +133,10 @@ Claude Code は、導入先の `.claude/skills/cross-review/SKILL.md` をスキ�
 cd <ai-cross-review の checkout>
 node tools/cross-review.sync-all.js --global-skill --dry-run
 node tools/cross-review.sync-all.js --global-skill
+cd <導入先のルート>
 ```
 
-`~/.claude/skills/cross-review/SKILL.md` に配ります。`~/.codex/skills/` と `~/.codex-subagent/skills/` が既にあるときは、そちらにも配ります。
+`~/.claude/skills/cross-review/SKILL.md` に配ります。続く確認は、導入先のルートに戻ってから行います。`~/.codex/skills/` と `~/.codex-subagent/skills/` が既にあるときは、そちらにも配ります。
 クラウド実行など、ホームに置けない環境では行いません。導入先の `.claude/skills/cross-review/SKILL.md` がそのまま使われます。
 
 ### 確認
