@@ -56,7 +56,14 @@ cp <ai-cross-review の checkout>/tools/cross-review.sync.example.json tools/cro
 
 - テストの 3 件（`tests/cross-review*.test.js`）は、導入先のテストランナーが vitest のときだけ残します。残すときは、`to` と `replace` を導入先のテストの置き場に合わせます。vitest でなければ、3 件とも消します。
 - 一括同期ツール（`tools/cross-review.sync-all.js`）は、複数の導入先をまとめて更新する人だけが使います。要らなければ消して構いません。
+- 意図して消したファイルは、更新のときの `--check-manifest` で毎回「未登録」と出ます。消したと分かっているものは足し戻さずに無視します。
 - `.cross-review.md`、`CLAUDE.md`、`AGENTS.md` など、導入先で編集するファイルは `files` に入れません。同期で上書きされて消えます。
+
+導入先のルートの `package.json` が `"type": "module"` のときは、同期の前に `tools/package.json` に次の内容を置きます。`tools/*.js`(同期スクリプトを含む)は CommonJS なので、これが無いと `require is not defined` で止まります。
+
+```json
+{ "type": "commonjs" }
+```
 
 ### 2. 上流から取り込む
 
@@ -64,14 +71,8 @@ cp <ai-cross-review の checkout>/tools/cross-review.sync.example.json tools/cro
 node tools/cross-review.sync.js
 ```
 
-`files` に書いたファイルが「[新規]」として取り込まれ、最後に「同期しました」と出ます。取り込んだ上流のコミットが、マニフェストの `lastSyncedCommit` に記録されます。
+`files` に書いたファイルが「[新規]」として取り込まれ(手順 1 で手で置いた `tools/cross-review.sync.js` は「[一致]」)、最後に「同期しました」と出ます。取り込んだ上流のコミットが、マニフェストの `lastSyncedCommit` に記録されます。
 初回の同期では、過去の移行ノートは表示せずに既読として記録します。新しく導入する場合は、過去の移行作業は要りません。
-
-導入先のルートの `package.json` が `"type": "module"` のときは、`tools/package.json` に次の内容を置きます。`tools/*.js` は CommonJS なので、これが無いと `require is not defined` で止まります。
-
-```json
-{ "type": "commonjs" }
-```
 
 ### 3. レビュー観点を書く
 
@@ -139,6 +140,8 @@ node tools/cross-review.sync-all.js --global-skill
 
 ### 確認
 
+agent-cockpit を導入していて、レビュアーの経路を選んでいるときは、確認 2 と 5 が経路設定に反する起動として拒否されます(終了コード 2)。先に `node tools/cross-review.js route` を実行し、`default` 以外が返るときは、確認 2 と 5 のコマンドに `--override-route "導入の確認"` を付けます。
+
 1. 取り込んだファイルが上流と一致していることを確かめます。
 
    ```bash
@@ -156,7 +159,13 @@ node tools/cross-review.sync-all.js --global-skill
    PowerShell では `> $null` にします。stderr に「対象: 未コミットの作業ツリー差分 / レビュー差分サイズ: ...」と「CLI を起動できない環境用: レビュープロンプトを stdout に出力します」が出れば成功です。差分が無いときは「レビュー対象の差分がありません。」と出ます。
    観点のファイルが見つからないという警告が出るときは、手順 3 の `.cross-review.md` の置き場を確かめます。
 
-3. `git status --short` に `.cross-review-state.json` と `.cross-review/` が出ないことを確かめます。出るときは手順 5 を確かめます。
+3. 状態ファイルと生成物が git の追跡から外れていることを確かめます。
+
+   ```bash
+   git check-ignore -v .cross-review-state.json .cross-review/
+   ```
+
+   2 行が返り、終了コードが 0 なら成功です。何も返らないときは手順 5 を確かめます。
 4. Claude Code を使うときは、導入先で新しいセッションを開き、利用できるスキルに `cross-review` があることを確かめます。
 5. レビュアーの CLI でも確かめるときは、次を実行します。実際にモデルを呼ぶので、利用枠を消費します。
 
@@ -180,7 +189,7 @@ ai-cross-review 側で追加する設定はありません。ai-cross-review は
 - 同じ呼び出しで PR が無いと分かったときは、stderr に警告を出します。レビューは止めません。
 - `comment --post <PR 番号>` で、生成した PR コメントを投稿します。
 
-`gh` が無い、ログインしていない、ネットワークにつながらないときは、何も言わずに `origin/main` を比較先にします。オフラインで作業するときは、環境変数 `CROSS_REVIEW_NO_FETCH=1` で fetch と `gh` の呼び出しを省けます。
+`gh` が無い、ログインしていない、ネットワークにつながらないときは、レビューを止めずに `origin/main`(取得できなければローカルの `main`)を比較先にし、stderr にその旨を出します。オフラインで作業するときは、環境変数 `CROSS_REVIEW_NO_FETCH=1` で fetch と `gh` の呼び出しを省けます。
 
 ### 確認
 
@@ -191,7 +200,7 @@ ai-cross-review 側で追加する設定はありません。ai-cross-review は
    node tools/cross-review.js subagent --no-state > /dev/null
    ```
 
-   stderr に `base: origin/<base ブランチ> (PR の base)` の行が出れば成功です。`(origin/main 優先解決)` と出るときは、`gh` が PR を読めていません。1 のログイン状態を確かめます。
+   stderr に `base: origin/<base ブランチ> (PR の base)` の行が出れば成功です。`(origin/main 優先解決)` や `(ローカル main)` と出るときは、PR の base を使えていません。1 のログイン状態、`CROSS_REVIEW_NO_FETCH` が設定されていないか、`origin/<base ブランチ>` を fetch できるかを確かめます。経路設定で拒否されるときは、パターン A の確認の前置きに従います。
 
 ## パターン C: + claude-codex-bridge
 
@@ -225,7 +234,7 @@ bridge を経由せずに起動したいときは、`--no-codex-agent` を付け
    npm run review:codex -- --uncommitted --no-state
    ```
 
-2. stderr に「Codex でレビューを実行します: codex-agent.sh 経由 (定義: codex-review)」と出て、続く `codex-agent: agent=codex-review` の監査行に `sandbox=read-only` が出れば成功です。監査行の `codex_home=` で、bridge の定義どおりの認証ホームを使っていることも確かめます。
+2. 出力(stdout)に「Codex でレビューを実行します: codex-agent.sh 経由 (定義: codex-review)」と出て、続く `codex-agent: agent=codex-review` の監査行に `sandbox=read-only` が出れば成功です。監査行の `codex_home=` で、bridge の定義どおりの認証ホームを使っていることも確かめます。
 3. 「bridge が未導入のため直接起動へ切り替えます。」と出るときは、bridge の `codex-review` の定義が配置されていないか、`codex` コマンドが見つかっていません。bridge の導入手順の確認を行います。
 4. 「approval_policy=never を明示していないため直接起動へ切り替えます」と出るときは、bridge を更新して `codex-agent.sh` を配置し直します。
 
@@ -285,6 +294,6 @@ node tools/cross-review.sync-all.js --global-skill
 - 終了コード 75 で止まる：Codex が利用上限などで使えませんでした。stderr の案内に従い、書き出されたプロンプトを Claude の客観サブエージェントへ渡します。代替に切り替えずに失敗させたいときは `--no-fallback` を付けます。
 - 「経路設定 ... に反する ... の起動を拒否します」と出る：agent-cockpit の経路の設定に従ったレビュアーで回すか、`--override-route <理由>` を付けます（パターン D）。
 - 「レビュー差分サイズ」が閾値を超えて止まる：`--base <ref>` で比較先を近づけるか、`.cross-review-ignore` で生成物を除きます（[usage.md](usage.md) の「差分の除外」）。
-- `require is not defined` で止まる：導入先が ES modules です。手順 2 の `tools/package.json` を置きます。
+- `require is not defined` で止まる：導入先が ES modules です。手順 1 の `tools/package.json` を置きます。
 - 同期で「ドリフト」が出る：取り込んだファイルを導入先で編集しています。変更は上流に入れ、導入先では同期し直します。
 - 同期で上流の取得に失敗する：GitHub への git のネットワーク接続を確かめます。サンドボックスで fetch が止まることがあります。

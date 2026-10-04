@@ -148,7 +148,7 @@ docs/generated/*.md
 ### claude-codex-bridge
 
 `~/.claude/tools/codex-agent.sh`（または環境変数 `CROSS_REVIEW_CODEX_AGENT`）があれば、`codex` をその起動スクリプト経由で起動します。レビューだけなら定義 `codex-review`（read-only）、`--fix` なら `codex-subagent`（workspace-write）を使い、モデル、effort、認証ホームは bridge の定義ファイルで決まります。  
-実際にどちらで起動したかは、実行時の stderr と、`.cross-review/` に残るメタ情報の `via` で分かります。詳しくは [cross-review.md](cross-review.md) の「codex の起動は bridge（codex-agent.sh）を経由する」を参照してください。
+実際にどちらで起動したかは、実行時の出力と、`.cross-review/` に残るメタ情報の `via` で分かります。詳しくは [cross-review.md](cross-review.md) の「codex の起動は bridge（codex-agent.sh）を経由する」を参照してください。
 
 ### agent-cockpit
 

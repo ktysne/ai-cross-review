@@ -55,6 +55,16 @@ npm run lint       # ESLint
 - 本体は Node 標準 API だけで動かします。依存を足すのは devDependencies（テスト、lint）だけです。
 - git の実行、子プロセスの起動、ファイルの読み込みは `deps` 引数で差し替えられるようにします。テストはこの差し替えで外部に触れずに流れます。
 
+## 一括同期と SKILL の配布
+
+このリポジトリの scripts で、作業ルートの配下の導入先をまとめて同期し、グローバル SKILL を配れます。
+
+```bash
+npm run sync:all -- --root /Develop          # 一括同期
+npm run sync:all:check -- --root /Develop    # 一括のドリフト検査（CI 向け）
+npm run sync:global                          # グローバル SKILL の配布
+```
+
 ## 移行ノートを書くとき
 
 導入先が自分で持つファイル（`.gitignore`、`package.json` の scripts、`CLAUDE.md` / `AGENTS.md` の節、`.cross-review.md`）に作業が要る変更を入れたら、`docs/migrations/<日付>-<内容>.md` に移行ノートを 1 件 1 ファイルで置きます。

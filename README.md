@@ -11,7 +11,7 @@
 - **差分をそのまま渡す**：ブランチと base の差分、または未コミットの差分（未追跡ファイルを含む）を、レビュアー CLI（`codex` / `claude`）へ 1 コマンドで渡します。
 - **既定は安全側**：レビューだけのときは `codex` を read-only で起動します。`--fix` を付けたときだけ workspace-write で起動します。
 - **CLI を起動できない環境にも対応**：クラウド実行などでは `subagent` モードがレビュー用プロンプトを stdout に出し、Claude の客観サブエージェントへ渡して同じ観点でレビューできます。
-- **往復を記録する**：往復回数、直前にレビューした SHA、非対応と判断した指摘、結論をブランチ単位で記録し、PR コメントの本文を生成します。往復は最大 3 回までに制限します。
+- **往復を記録する**：往復回数、直前にレビューした SHA、非対応と判断した指摘、結論をブランチ単位で記録し、PR コメントの本文を生成します。往復が 3 回目に達すると警告し、扱いは運用の規則(往復の上限)で決めます。
 - **観点を分ける**：プロジェクト固有のレビュー観点は `.cross-review.md` に書きます。本体は汎用で、上書き更新できます。
 - **配布と更新**：同期スクリプトで、上流の更新を導入先へ反映します。複数の導入先をまとめて更新するツールもあります。
 
@@ -44,9 +44,9 @@ ai-cross-review は単独で使えます。次のツールを導入済みなら�
 
 | パターン | 確かめること |
 |---|---|
-| ai-cross-review だけ | `node tools/cross-review.sync.js --check` がドリフト無しで終わる。`node tools/cross-review.js subagent --uncommitted --no-state` がレビュー用プロンプトを出す。`.cross-review-state.json` と `.cross-review/` が `git status` に出ない。 |
+| ai-cross-review だけ | `node tools/cross-review.sync.js --check` がドリフト無しで終わる。`node tools/cross-review.js subagent --uncommitted --no-state` がレビュー用プロンプトを出す。`git check-ignore` で `.cross-review-state.json` と `.cross-review/` が無視の対象になっている。 |
 | + GitHub CLI | PR のあるブランチで `node tools/cross-review.js subagent --no-state` を実行すると、stderr の `base:` の行に `(PR の base)` と出る。 |
-| + claude-codex-bridge | `npm run review:codex` の stderr に「codex-agent.sh 経由 (定義: codex-review)」と出る。 |
+| + claude-codex-bridge | `npm run review:codex` の出力に「codex-agent.sh 経由 (定義: codex-review)」と出る。 |
 | + agent-cockpit | ダッシュボードの「経路の設定」で選んだレビュアーを、`node tools/cross-review.js route` が返す。 |
 
 ## 開発者向けドキュメント
