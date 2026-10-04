@@ -59,7 +59,7 @@ cp <ai-cross-review の checkout>/tools/cross-review.sync.example.json tools/cro
 - 意図して消したファイルは、更新のときの `--check-manifest` で毎回「未登録」と出ます。消したと分かっているものは足し戻さずに無視します。
 - `.cross-review.md`、`CLAUDE.md`、`AGENTS.md` など、導入先で編集するファイルは `files` に入れません。同期で上書きされて消えます。
 
-導入先のルートの `package.json` が `"type": "module"` のときは、同期の前に `tools/package.json` に次の内容を置きます。`tools/*.js`(同期スクリプトを含む)は CommonJS なので、これが無いと `require is not defined` で止まります。
+導入先のルートの `package.json` が `"type": "module"` のときは、同期の前に `tools/package.json` に次の内容を置きます。`tools/*.js`（同期スクリプトを含む）は CommonJS なので、これが無いと `require is not defined` で止まります。
 
 ```json
 { "type": "commonjs" }
@@ -71,7 +71,7 @@ cp <ai-cross-review の checkout>/tools/cross-review.sync.example.json tools/cro
 node tools/cross-review.sync.js
 ```
 
-`files` に書いたファイルが「[新規]」として取り込まれ(手順 1 で手で置いた `tools/cross-review.sync.js` は「[一致]」)、最後に「同期しました」と出ます。取り込んだ上流のコミットが、マニフェストの `lastSyncedCommit` に記録されます。
+`files` に書いたファイルが「[新規]」として取り込まれ（手順 1 で手で置いた `tools/cross-review.sync.js` は「[一致]」）、最後に「同期しました」と出ます。取り込んだ上流のコミットが、マニフェストの `lastSyncedCommit` に記録されます。
 初回の同期では、過去の移行ノートは表示せずに既読として記録します。新しく導入する場合は、過去の移行作業は要りません。
 
 ### 3. レビュー観点を書く
@@ -140,7 +140,7 @@ node tools/cross-review.sync-all.js --global-skill
 
 ### 確認
 
-agent-cockpit を導入していて、レビュアーの経路を選んでいるときは、確認 2 と 5 が経路設定に反する起動として拒否されます(終了コード 2)。先に `node tools/cross-review.js route` を実行し、`default` 以外が返るときは、確認 2 と 5 のコマンドに `--override-route "導入の確認"` を付けます。
+agent-cockpit を導入していて、レビュアーの経路を選んでいるときは、経路設定に反する起動が拒否されます（終了コード 2）。経路が `codex` なら確認 2 が、`claude` なら確認 5 とパターン C の確認 1 が当たります。先に `node tools/cross-review.js route` を実行し、`default` 以外が返るときは、これらのコマンドに `--override-route "導入の確認"` を付けます（食い違いが無いときに付けても害はありません）。
 
 1. 取り込んだファイルが上流と一致していることを確かめます。
 
@@ -189,7 +189,7 @@ ai-cross-review 側で追加する設定はありません。ai-cross-review は
 - 同じ呼び出しで PR が無いと分かったときは、stderr に警告を出します。レビューは止めません。
 - `comment --post <PR 番号>` で、生成した PR コメントを投稿します。
 
-`gh` が無い、ログインしていない、ネットワークにつながらないときは、レビューを止めずに `origin/main`(取得できなければローカルの `main`)を比較先にし、stderr にその旨を出します。オフラインで作業するときは、環境変数 `CROSS_REVIEW_NO_FETCH=1` で fetch と `gh` の呼び出しを省けます。
+`gh` が無い、ログインしていない、ネットワークにつながらないときは、レビューを止めずに `origin/main`（取得できなければローカルの `main`）を比較先にし、stderr にその旨を出します。オフラインで作業するときは、環境変数 `CROSS_REVIEW_NO_FETCH=1` で fetch と `gh` の呼び出しを省けます。
 
 ### 確認
 
@@ -234,7 +234,9 @@ bridge を経由せずに起動したいときは、`--no-codex-agent` を付け
    npm run review:codex -- --uncommitted --no-state
    ```
 
-2. 出力(stdout)に「Codex でレビューを実行します: codex-agent.sh 経由 (定義: codex-review)」と出て、続く `codex-agent: agent=codex-review` の監査行に `sandbox=read-only` が出れば成功です。監査行の `codex_home=` で、bridge の定義どおりの認証ホームを使っていることも確かめます。
+   経路設定で拒否されるときは、パターン A の確認の前置きに従います。
+
+2. 出力（stdout）に「Codex でレビューを実行します: codex-agent.sh 経由 (定義: codex-review)」と出て、続く `codex-agent: agent=codex-review` の監査行に `sandbox=read-only` が出れば成功です。監査行の `codex_home=` で、bridge の定義どおりの認証ホームを使っていることも確かめます。
 3. 「bridge が未導入のため直接起動へ切り替えます。」と出るときは、bridge の `codex-review` の定義が配置されていないか、`codex` コマンドが見つかっていません。bridge の導入手順の確認を行います。
 4. 「approval_policy=never を明示していないため直接起動へ切り替えます」と出るときは、bridge を更新して `codex-agent.sh` を配置し直します。
 
