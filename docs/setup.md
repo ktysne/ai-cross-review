@@ -201,7 +201,7 @@ ai-cross-review 側で追加する設定はありません。ai-cross-review は
    node tools/cross-review.js subagent --no-state > /dev/null
    ```
 
-   stderr に `base: origin/<base ブランチ> (PR の base)` の行が出れば成功です。`(origin/main 優先解決)` や `(ローカル main)` と出るときは、PR の base を使えていません。1 のログイン状態、`CROSS_REVIEW_NO_FETCH` が設定されていないか、`origin/<base ブランチ>` を fetch できるかを確かめます。経路設定で拒否されるときは、パターン A の確認の前置きに従います。
+   stderr に `base: origin/<base ブランチ> (PR の base)` の行が出れば成功です。`(origin/main 優先解決)` や `(ローカル main)` と出るときは、PR の base を使えていません。1 のログイン状態、ローカルのブランチ名が PR の head のブランチ名と同じか（`gh pr view` は現在のブランチ名で PR を探します）、`CROSS_REVIEW_NO_FETCH` が設定されていないか、`origin/<base ブランチ>` を fetch できるかを確かめます。経路設定で拒否されるときは、パターン A の確認の前置きに従います。
 
 ## パターン C: + claude-codex-bridge
 

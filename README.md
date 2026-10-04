@@ -15,7 +15,7 @@
 - **観点を分ける**：プロジェクト固有のレビュー観点は `.cross-review.md` に書きます。本体は汎用で、上書き更新できます。
 - **配布と更新**：同期スクリプトで、上流の更新を導入先へ反映します。複数の導入先をまとめて更新するツールもあります。
 
-画面やコマンドの使い方は [docs/usage.md](docs/usage.md)、往復の回し方（3 択、往復の上限、PR への記録）は [docs/cross-review.md](docs/cross-review.md) にあります。
+コマンドとオプションの使い方は [docs/usage.md](docs/usage.md)、往復の回し方（3 択、往復の上限、PR への記録）は [docs/cross-review.md](docs/cross-review.md) にあります。
 
 ## 連携できるツール
 

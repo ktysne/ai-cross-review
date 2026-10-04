@@ -80,6 +80,8 @@ node tools/cross-review.js codex --fix --uncommitted --instructions ../review-no
 | `--out <path>` | `comment` 専用。生成した本文の書き出し先（既定はブランチ別ディレクトリの `round-<N>-comment.md`） |
 | `--post <N>` | `comment` 専用。生成本文を PR #N へ `gh pr comment N --body-file -` の標準入力で投稿（1 以上の整数） |
 | `--outcome <fixing\|converged\|halted>` | `comment` 専用。往復の結論を状態ファイルに記録する（値の意味は [cross-review.md](cross-review.md) の「状態ファイル」） |
+| `--reset` | `state` 専用。この枝の記録を消す |
+| `--mark` | `state` 専用。往復を 1 回分記録し、直前レビュー SHA を現在の HEAD にする。`--uncommitted` を併用すると SHA は据え置く（`--uncommitted` のレビューの後に使う） |
 | `--clean-legacy` | `artifacts` 専用。`.cross-review` 直下に残る旧形式の `round-<正整数>-*.md/json` だけを削除 |
 | `-h`, `--help` | ヘルプを表示 |
 
