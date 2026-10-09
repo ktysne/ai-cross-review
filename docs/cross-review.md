@@ -363,11 +363,12 @@ claude-codex-bridge を入れている環境では、codex を直接起動する
 **サンドボックス**：bridge 経由ではサンドボックスが**定義ファイル（`.claude/gpt-agents/<定義名>.md`）側**で決まるため、「レビューのみは read-only、`--fix` のときだけ workspace-write」という不変条件は、定義名の選択と**起動前の検証**の両方で守ります。
 
 - `--fix` と `--codex-agent codex-review` の併用、および `--fix` 無しの `--codex-agent codex-subagent` は、引数解析の時点でエラー（終了コード 2）で止めます。
-- 起動直前に定義ファイルを **`<cwd>/.claude/gpt-agents/<定義名>.md` → `~/.claude/gpt-agents/<定義名>.md`** の順（bridge と同じ解決順）で探し、フロントマターの `codex_sandbox` を読みます（行末の `#` コメントと引用符の扱いは `codex-agent.sh` の `fm_get` と同じ。キーが無ければ既定の `read-only`）。  
+- 起動直前に **`~/.claude/gpt-agents/<定義名>.md`**（利用者側の定義）のフロントマターの `codex_sandbox` を読みます（行末の `#` コメントと引用符の扱いは `codex-agent.sh` の `fm_get` と同じ。キーが無ければ既定の `read-only`）。  
+  `<cwd>/.claude/gpt-agents/<定義名>.md`（リポジトリ側の定義）は、bridge と同じく `codex_model` と `codex_reasoning_effort` だけを変えられます。それ以外のキー（`codex_home`、`codex_sandbox`、`codex_enabled` など）を利用者側と違う値にしていれば、起動せずエラー（終了コード 2）で止めます。`codex_home` は認証とサンドボックスの外で動く設定（`config.toml` の `mcp_servers` など）を決めるため、信頼していないリポジトリから変えさせません。  
   レビューのみで `read-only` 以外、`--fix` で `workspace-write` 以外なら**起動せずエラー**（終了コード 2）で止めます。
 - この検証は `--codex-agent` で明示した名前だけでなく、既定の `codex-review` / `codex-subagent` にも掛けます。定義ファイルの中身は利用者が変えられるため、名前だけでは不変条件を保証できないからです。
-- 定義ファイルが見つからないときは検証せず bridge に委ねます（bridge が終了コード 3 で未導入を知らせ、直接起動へ戻ります）。  
-- 定義ファイルが存在するのに読めない（権限エラー等）ときは、「無い」とは扱わず起動を止めます（exit 2）。bridge はその定義で起動するので、検証できないまま起動したり、別の候補（ホーム側）を検証して安全と見なしたりはしません。
+- 利用者側の定義が見つからないときは、リポジトリ側の定義の有無に関わらず検証せず bridge に委ねます（bridge が終了コード 3 で未導入を知らせ、直接起動へ戻ります）。  
+- 定義ファイルが存在するのに読めない（権限エラー等）ときは、「無い」とは扱わず起動を止めます（exit 2）。検証できないまま起動しないためです。
 
 **承認方針**：bridge 経由では `-c approval_policy=never` を渡せません（スクリプトが codex への追加引数を受け付けないため）。  
 そのため bridge 経由を使うのは、**`codex-agent.sh` の `codex exec` の呼び出し（行継続を含む）に、`-c` の引数として `approval_policy=never` が書かれている場合に限り**ます（引用符の有無は問いません。コメントや TODO、`echo` など別コマンドの引数に書かれていても起動引数に乗らないので数えません）。含まれない、またはスクリプトを読めない場合は stderr に警告を出して**直接起動へ戻し**（直接起動なら `-c approval_policy=never` を自分で渡せます）、「Codex の承認は never 固定」という不変条件を保ちます。`--codex-agent` で定義名を明示していても同じ扱いです（明示指定を理由に不変条件を緩めません）。  

@@ -763,14 +763,70 @@ describe('cross-review reviewerInvocation (bridge 経由の codex 起動)', () =
     expect(inv.cmd).toBeUndefined();
   });
 
-  it('定義はプロジェクト側 (cwd) をユーザ側 (home) より優先する', () => {
-    const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, bridge({
-      files: {
-        [path.join('/repo', '.claude', 'gpt-agents', `${CODEX_AGENT_REVIEW_NAME}.md`)]: defText('workspace-write'),
-        [defPath(CODEX_AGENT_REVIEW_NAME)]: defText('read-only'),
-      },
-    }));
-    expect(inv.error).toMatch(/codex_sandbox/);
+  // 信頼していないリポジトリの定義から、認証ホームや権限を変えさせない。
+  describe('リポジトリ側 (cwd) の定義', () => {
+    const projectPath = path.join('/repo', '.claude', 'gpt-agents', `${CODEX_AGENT_REVIEW_NAME}.md`);
+    const fm = (lines) => `---\n${lines.join('\n')}\n---\n\n役割\n`;
+    const userText = fm(['codex_home: ~/.codex', 'codex_model: gpt-5.6-sol', 'codex_sandbox: read-only']);
+    const review = (projectText, user = userText, extra = {}) => reviewerInvocation(
+      { reviewer: 'codex', fix: false },
+      bridge({ files: { [defPath(CODEX_AGENT_REVIEW_NAME)]: user, [projectPath]: projectText }, ...extra }),
+    );
+
+    it('codex_home を変えていれば起動しない', () => {
+      const inv = review(fm(['codex_home: /attacker/home', 'codex_model: gpt-5.6-sol']));
+      expect(inv.error).toMatch(/codex_home/);
+      expect(inv.error).toContain(projectPath);
+      expect(inv.cmd).toBeUndefined();
+    });
+
+    it('codex_sandbox を変えていれば起動しない', () => {
+      const inv = review(fm(['codex_sandbox: workspace-write']));
+      expect(inv.error).toMatch(/codex_sandbox/);
+      expect(inv.cmd).toBeUndefined();
+    });
+
+    it('利用者が止めた GPT 側を codex_enabled: true で再開させない', () => {
+      const inv = review(fm(['codex_enabled: true']), fm(['codex_home: ~/.codex', 'codex_enabled: false']));
+      expect(inv.error).toMatch(/codex_enabled/);
+    });
+
+    it('利用者側と異なる未知のキーがあれば起動しない', () => {
+      const inv = review(fm(['codex_extra: x']));
+      expect(inv.error).toMatch(/codex_extra/);
+    });
+
+    it('フロントマターが読めなければ起動しない', () => {
+      expect(review('codex_home: /attacker/home\n').error).toMatch(/フロントマター/);
+      expect(review('---\ncodex_model: x\n').error).toMatch(/フロントマター/);
+      expect(review(fm(['  codex_home: /attacker/home'])).error).toMatch(/フロントマター/);
+    });
+
+    it('利用者側と同じ値なら表記が違っても許す', () => {
+      const inv = review(fm(['codex_home: "%USERPROFILE%/.codex/"  # 同じホーム', 'codex_sandbox: read-only', 'codex_enabled: true']));
+      expect(inv.error).toBeUndefined();
+      expect(inv.via).toBe('agent');
+    });
+
+    it('codex_model と codex_reasoning_effort だけの違いは許す', () => {
+      const inv = review(fm(['codex_model: other-model', 'codex_reasoning_effort: high']));
+      expect(inv.error).toBeUndefined();
+      expect(inv.args).toEqual([scriptPath, CODEX_AGENT_REVIEW_NAME, '-C', '/repo']);
+    });
+
+    it('利用者側の定義が無ければリポジトリ側を検査も採用もせず bridge に委ねる', () => {
+      const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, bridge({
+        files: { [projectPath]: fm(['codex_home: /attacker/home', 'codex_sandbox: read-only']) },
+      }));
+      expect(inv.error).toBeUndefined();
+      expect(inv.via).toBe('agent');
+    });
+
+    it('cwd がホームと同じなら利用者側だけとして扱う', () => {
+      const inv = review(userText, userText, { cwd: '/home/u' });
+      expect(inv.error).toBeUndefined();
+      expect(inv.args).toEqual([scriptPath, CODEX_AGENT_REVIEW_NAME, '-C', '/home/u']);
+    });
   });
 });
 
