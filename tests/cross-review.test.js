@@ -826,6 +826,17 @@ describe('cross-review reviewerInvocation (bridge 経由の codex 起動)', () =
       expect(warned).toContain(projectPath);
     });
 
+    it('利用者側の定義が無く、リポジトリ側の定義が読めなければエラーを返す', () => {
+      const deps = bridge({ files: { [projectPath]: userText } });
+      deps.readFile = ((readFile) => (p) => {
+        if (p === projectPath) throw new Error('EACCES');
+        return readFile(p);
+      })(deps.readFile);
+      const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, deps);
+      expect(inv.error).toMatch(/EACCES/);
+      expect(inv.cmd).toBeUndefined();
+    });
+
     it('cwd がホームと同じなら利用者側だけとして扱う', () => {
       const inv = review(userText, userText, { cwd: '/home/u' });
       expect(inv.error).toBeUndefined();

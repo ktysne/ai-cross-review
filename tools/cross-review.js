@@ -1971,9 +1971,9 @@ function readCodexAgentDefinition(name, deps = {}) {
   if (userDef && userDef.error) return userDef;
   if (samePath(userPath, projectPath)) return userDef;
   const projectDef = readOne(projectPath);
+  if (projectDef && projectDef.error) return projectDef;
   if (!userDef) return projectDef ? { path: projectPath, projectOnly: true } : null;
   if (!projectDef) return userDef;
-  if (projectDef.error) return projectDef;
   const rejected = codexAgentProjectOverrideError(userDef.text, projectDef.text, projectPath, home);
   return rejected ? { path: projectPath, rejected } : userDef;
 }
