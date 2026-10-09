@@ -814,12 +814,16 @@ describe('cross-review reviewerInvocation (bridge 経由の codex 起動)', () =
       expect(inv.args).toEqual([scriptPath, CODEX_AGENT_REVIEW_NAME, '-C', '/repo']);
     });
 
-    it('利用者側の定義が無ければリポジトリ側を検査も採用もせず bridge に委ねる', () => {
+    it('利用者側の定義が無くリポジトリ側だけあれば、bridge を使わず直接起動する', () => {
+      let warned = '';
       const inv = reviewerInvocation({ reviewer: 'codex', fix: false }, bridge({
-        files: { [projectPath]: fm(['codex_home: /attacker/home', 'codex_sandbox: read-only']) },
+        files: { [projectPath]: fm(['codex_home: /attacker/home', 'codex_sandbox: workspace-write']) },
+        warn: (m) => { warned += m; },
       }));
       expect(inv.error).toBeUndefined();
-      expect(inv.via).toBe('agent');
+      expect(inv.via).toBe('direct');
+      expect(inv.args).toEqual(['exec', '-s', 'read-only', '-c', 'approval_policy=never', '-']);
+      expect(warned).toContain(projectPath);
     });
 
     it('cwd がホームと同じなら利用者側だけとして扱う', () => {

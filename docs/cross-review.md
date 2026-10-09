@@ -367,7 +367,8 @@ claude-codex-bridge を入れている環境では、codex を直接起動する
   `<cwd>/.claude/gpt-agents/<定義名>.md`（リポジトリ側の定義）は、bridge と同じく `codex_model` と `codex_reasoning_effort` だけを変えられます。それ以外のキー（`codex_home`、`codex_sandbox`、`codex_enabled` など）を利用者側と違う値にしていれば、起動せずエラー（終了コード 2）で止めます。`codex_home` は認証とサンドボックスの外で動く設定（`config.toml` の `mcp_servers` など）を決めるため、信頼していないリポジトリから変えさせません。  
   レビューのみで `read-only` 以外、`--fix` で `workspace-write` 以外なら**起動せずエラー**（終了コード 2）で止めます。
 - この検証は `--codex-agent` で明示した名前だけでなく、既定の `codex-review` / `codex-subagent` にも掛けます。定義ファイルの中身は利用者が変えられるため、名前だけでは不変条件を保証できないからです。
-- 利用者側の定義が見つからないときは、リポジトリ側の定義の有無に関わらず検証せず bridge に委ねます（bridge が終了コード 3 で未導入を知らせ、直接起動へ戻ります）。  
+- どちらの定義も見つからないときは検証せず bridge に委ねます（bridge が終了コード 3 で未導入を知らせ、直接起動へ戻ります）。  
+- 利用者側の定義が無く、リポジトリ側の定義だけがあるときは、bridge を使わずに直接起動します。リポジトリ側を優先して読む旧版の bridge が、その定義の `codex_home` と `codex_sandbox` で起動しないようにするためです。  
 - 定義ファイルが存在するのに読めない（権限エラー等）ときは、「無い」とは扱わず起動を止めます（exit 2）。検証できないまま起動しないためです。
 
 **承認方針**：bridge 経由では `-c approval_policy=never` を渡せません（スクリプトが codex への追加引数を受け付けないため）。  

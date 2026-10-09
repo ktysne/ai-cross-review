@@ -1938,8 +1938,8 @@ function codexAgentProjectOverrideError(userText, projectText, projectPath, home
 }
 
 // 定義ファイル (.claude/gpt-agents/<name>.md) を bridge と同じ規則で解決し、ホーム側の本文を返す。
-// ホーム側が無ければ <cwd> 側の有無に関わらず null (呼び出し側は検査せず bridge に委ねる)。
-// 読めない定義は { error }、<cwd> 側が変えてはいけないキーを変えていれば { rejected } を返す。
+// どちらも無ければ null (呼び出し側は検査せず bridge に委ねる)。ホーム側が無く <cwd> 側だけがあれば
+// { projectOnly }、読めない定義は { error }、<cwd> 側が変えてはいけないキーを変えていれば { rejected } を返す。
 function readCodexAgentDefinition(name, deps = {}) {
   const cwd = deps.cwd || process.cwd();
   const home = deps.homedir || os.homedir();
@@ -1963,14 +1963,15 @@ function readCodexAgentDefinition(name, deps = {}) {
   };
   const userPath = path.join(home, ...CODEX_AGENT_DEF_SUBDIR, `${name}.md`);
   const projectPath = path.join(cwd, ...CODEX_AGENT_DEF_SUBDIR, `${name}.md`);
-  const userDef = readOne(userPath);
-  if (!userDef || userDef.error) return userDef;
   const samePath = (a, b) => {
     const norm = (p) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
     return norm(a) === norm(b);
   };
+  const userDef = readOne(userPath);
+  if (userDef && userDef.error) return userDef;
   if (samePath(userPath, projectPath)) return userDef;
   const projectDef = readOne(projectPath);
+  if (!userDef) return projectDef ? { path: projectPath, projectOnly: true } : null;
   if (!projectDef) return userDef;
   if (projectDef.error) return projectDef;
   const rejected = codexAgentProjectOverrideError(userDef.text, projectDef.text, projectPath, home);
@@ -2045,6 +2046,11 @@ function codexAgentInvocation(script, opts, deps = {}) {
   const def = readCodexAgentDefinition(agentName, deps);
   if (def && def.error) {
     return { error: `定義 ${agentName} を読めないため起動しません (${def.error}): ${def.path}` };
+  }
+  // <cwd> 側を優先して読む旧版の bridge は、この定義の codex_home と codex_sandbox で起動するため渡さない。
+  if (def && def.projectOnly) {
+    warn(`[cross-review] ホーム側に定義 ${agentName} が無く、作業ディレクトリ側の定義だけがあるため直接起動へ切り替えます: ${def.path}\n`);
+    return null;
   }
   if (def && def.rejected) {
     return { error: `定義 ${agentName} を使えないため起動しません。${def.rejected}` };
