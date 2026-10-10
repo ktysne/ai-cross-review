@@ -24,7 +24,7 @@
 | Claude | `npm run review:codex`（codex は read-only） | `node tools/cross-review.js subagent` の出力を Claude の客観サブエージェント（Agent ツール、読み取り専用）へ渡す |
 | Codex | `node tools/cross-review.js subagent` の出力を Claude の客観サブエージェントへ渡す（Codex が主セッションなら `npm run review:claude`） | `npm run review:codex` |
 
-Claude の客観サブエージェントには、依頼を別ベンダーへ転送しないエージェント定義を使う。claude-codex-bridge を導入している環境では読み取り専用のレビュー用定義 `review-claude` を使い、依頼を Codex へ転送する実装用の `impl-*` には渡さない（実装者が Codex のときに同じベンダーのレビューになるため）。道具が読み取りだけの定義には、`subagent` の出力と前の往復の判断ファイルをパスで渡す。
+Claude の客観サブエージェントには、依頼を別ベンダーへ転送しないエージェント定義を使う。claude-codex-bridge を導入している環境では、レビューだけなら読み取り専用のレビュー用定義 `review-claude` を使い(`subagent --fix` で修正まで任せるなら、Codex へ転送しない書き込み権限のある Claude のサブエージェントを使う)、依頼を Codex へ転送する実装用の `impl-*` には渡さない（実装者が Codex のときに同じベンダーのレビューになるため）。道具が読み取りだけの定義には、`subagent` の出力と前の往復の判断ファイルをパスで渡す。
 
 どの選択肢でも、レビュー結果を読んで修正を適用するのは主セッション（ユーザ判断が要る内容は、推奨の対応方法を添えて確認してから着手。自走中は推奨を適用して進め、最後の報告に判断待ちの事項として載せる）。妥当性確認は同じ経路でもう一度回す。
 
