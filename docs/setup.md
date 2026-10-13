@@ -26,6 +26,7 @@
 
 ai-cross-review、[claude-codex-bridge](https://github.com/ktysne/claude-codex-bridge)、[agent-cockpit](https://github.com/ktysne/agent-cockpit) をまとめて入れるときは、次の順に進めます。
 どのツールも、ほかのツールの有無を実行時に調べるので、順番を変えても動きます。この順にすると、各ツールの連携の確認を、導入した時点でそのまま行えます。
+agent-cockpit の導入手順は、最初に claude-codex-bridge と ai-cross-review の導入状況を確かめ、未導入なら導入するかと claude-codex-bridge のパターンを尋ねてから、この順で進めます。3 つをまとめて入れるときは、agent-cockpit の依頼文から始めてもかまいません。
 
 1. claude-codex-bridge を、そのドキュメントに従って導入します。ai-cross-review と連携するなら、`codex-review` と `codex-subagent` を配置するパターン（パターン 2 か 3）を選びます。
 2. agent-cockpit を、そのドキュメントに従って導入します（パターン A、B、C）。
@@ -245,7 +246,7 @@ bridge を経由せずに起動したいときは、`--no-codex-agent` を付け
 
 ### 前提
 
-[agent-cockpit](https://github.com/ktysne/agent-cockpit) を、そのドキュメントに従って導入しておきます。PR のカードにクロスレビューの状態を出すには、agent-cockpit 側で GitHub CLI との連携（agent-cockpit のパターン B）も要ります。
+[agent-cockpit](https://github.com/ktysne/agent-cockpit) を、そのドキュメントに従って導入しておきます。agent-cockpit は Claude Code と Codex のセッションの状態を 1 画面にまとめるローカルのダッシュボードで、紹介は https://ktysne.info/agent-cockpit/ 、画面の使い方は https://ktysne.info/agent-cockpit/manual/ にあります。導入されていなければ、開発者にこの概要を伝え、導入するなら agent-cockpit の依頼文（`agent-cockpit を導入して。手順は https://raw.githubusercontent.com/ktysne/agent-cockpit/main/docs/setup.md にある。`）で導入します。PR のカードにクロスレビューの状態を出すには、agent-cockpit 側で GitHub CLI との連携（agent-cockpit のパターン B）も要ります。
 
 ### ai-cross-review 側の設定
 

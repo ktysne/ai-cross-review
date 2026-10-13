@@ -25,7 +25,7 @@ ai-cross-review は単独で使えます。次のツールを導入済みなら�
 |---|---|---|
 | [GitHub CLI（`gh`）](https://cli.github.com/) | GitHub の公式 CLI | 比較先（base）を PR の base ブランチから決めます。PR が無いときに警告します。生成した PR コメントを `--post` でそのまま投稿します。 |
 | [claude-codex-bridge](https://github.com/ktysne/claude-codex-bridge) | Claude Code から Codex CLI を、用途別のサブエージェントとして呼び出す定義一式 | `codex` を bridge の起動スクリプト経由で起動し、モデル、effort、認証ホーム（`CODEX_HOME`）を bridge の定義ファイルにそろえます。 |
-| [agent-cockpit](https://github.com/ktysne/agent-cockpit) | Claude Code のセッションの状態を表示するローカルのダッシュボード | ダッシュボードの「経路の設定」で選んだレビュアーを、`node tools/cross-review.js route` で読みます。往復と結論が PR のカードに表示され、レビューの収束を待ってマージする予約に使われます。 |
+| [agent-cockpit](https://github.com/ktysne/agent-cockpit)（[紹介ページ](https://ktysne.info/agent-cockpit/)） | Claude Code と Codex のセッションの状態を 1 画面にまとめるローカルのダッシュボード | ダッシュボードの「経路の設定」で選んだレビュアーを、`node tools/cross-review.js route` で読みます。往復と結論が PR のカードに表示され、レビューの収束を待ってマージする予約に使われます。 |
 
 ## 導入
 
@@ -36,6 +36,7 @@ ai-cross-review は単独で使えます。次のツールを導入済みなら�
 
 手順書は、ai-cross-review だけを導入する手順と、連携ツールごとに必要な設定の手順に分かれています。
 連携ツールそのものの導入は、それぞれのドキュメントに従ってください。
+claude-codex-bridge と agent-cockpit もまとめて入れるときは、agent-cockpit の依頼文（`agent-cockpit を導入して。手順は https://raw.githubusercontent.com/ktysne/agent-cockpit/main/docs/setup.md にある。`）から始めると、AI が claude-codex-bridge と ai-cross-review の導入状況を確かめ、導入するかを尋ねながら 3 つを順に入れます。
 `package.json`、`.gitignore`、`CLAUDE.md` / `AGENTS.md` など、導入先のリポジトリで既にあるファイルを変えるときは、AI が変更内容を示して確認を求めます。
 
 ## 導入できたかの確認
