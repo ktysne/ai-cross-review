@@ -156,6 +156,7 @@ docs/generated/*.md
 
 レビューを回す直前に `node tools/cross-review.js route` を実行し、agent-cockpit の「経路の設定」で選んだレビュアーを読みます。`codex` か `claude` が返るときは、会話でのレビュアーの指定と同じに扱います。  
 経路の設定に反するレビュアーのサブコマンドは起動を拒否します。会話での指定を優先するときは `--override-route <理由>` を付けます。詳しくは [cross-review.md](cross-review.md) の「agent-cockpit の経路設定（`route`）」を参照してください。
+画面での操作は、agent-cockpit のマニュアルの[経路の設定](https://ktysne.info/agent-cockpit/manual/routing.html)と[クロスレビューの行](https://ktysne.info/agent-cockpit/manual/pull-requests.html#pr-cross-review)にあります。
 
 ## 課金メモ（Claude サブスクプラン）
 
