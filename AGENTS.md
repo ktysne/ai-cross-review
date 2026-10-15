@@ -32,7 +32,7 @@ Claude の客観サブエージェントには、依頼を別ベンダーへ転�
 
 **クラウド実行環境など（対象レビュアー CLI を spawn できない / ネットワーク、API 接続できない）では、レビュアー CLI を客観レビュー用サブエージェントに切り替える**（3 択の意味は不変）。判定は `codex` / `claude` が PATH で解決できない（`Get-Command <cli>` 等が失敗）か、クラウド実行と分かっているとき（`npm run review:codex*` / `npm run review:claude` が CLI 不在、接続不可で失敗したときも切替）。`node tools/cross-review.js subagent`（`--uncommitted` / `--fix` 可）で**外部 CLI を起動せず**レビュープロンプトを stdout に出し、それを `Agent` ツール等の客観レビュー用サブエージェント（実装意図に引きずられない第三者として枠付け）へ渡してレビューさせる。`subagent --fix` は 3 択には現れず、Claude 主導で主セッションがレビュアーに修正まで任せると決めたときだけ使う。対象レビュアー CLI が使える環境では従来どおり CLI を優先。この代替を使った場合は、PR コメントに「対象レビュアー CLI を直接実行できないため（CLI 不在 / 接続不可）subagent 代替で確認した」ことを残す。詳細は [docs/cross-review.md](docs/cross-review.md)。
 
-**省略してよい軽微な例外**（Claude / Codex どちらの起点にも適用。省略時は一言添える）：誤字、コメントのみ、ドキュメント文言調整 / フォーマット、lint 整形のみ / 既にレビュー済みパターンの 1 箇所踏襲（1〜数行）/ 直前のレビュー済み状態への単純 revert。規模、影響で迷ったら省略しない。
+**省略してよい軽微な例外**（Claude / Codex どちらの起点にも適用。省略時は一言添える）：誤字、コメントのみ、ドキュメント文言調整 / フォーマット、lint 整形のみ / 既にレビュー済みパターンの 1 箇所踏襲（1〜数行）/ 直前のレビュー済み状態への単純 revert。規模、影響で迷ったら省略しない。PR があるときに省略し、agent-cockpit の `cockpit_skip_review` が使えるなら、head SHA と理由を渡して記録する。
 
 **確定した指摘を Codex に直させる**のは 3 択の外の道具で、主セッションがレビュー結果を裏取りし、直す指摘を確定させたうえで適用だけ任せたいときに使う。指摘をファイルに書いて `node tools/cross-review.js codex --fix --uncommitted --instructions <path>`。`--instructions` は観点 `.cross-review.md` を置き換えず重点指摘として追加で添える（この用途で `CROSS_REVIEW_CHECKLIST` を流用しない）。詳細は [docs/cross-review.md](docs/cross-review.md)。
 
