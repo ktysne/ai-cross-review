@@ -2353,11 +2353,9 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     });
   });
 
-  // codex 経路でも「観点 + 差分本文 + モード指示」を stdin に渡す配線を固定する。
-  // 旧挙動 (codex に観点だけ渡す) への退行を検知するための結合テスト。
   it('codex レビューのみ: read-only + 差分本文 + 観点 + レビューのみ指示を stdin に渡す', () => {
     const captured = {};
-    const spawnFn = (cmd, args, stdin) => { Object.assign(captured, { cmd, args, stdin }); return null; };
+    const spawnFn = (cmd, args, stdin, onExit, env) => { Object.assign(captured, { cmd, args, stdin, env }); return null; };
     const gitRun = (args) => (args[0] === 'diff' ? 'diff --git a/x b/x\n+changed\n' : '');
     runReview(
       { reviewer: 'codex', mode: 'base', baseRef: 'main', fix: false },
@@ -2369,6 +2367,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     expect(captured.stdin).toContain('CHECKLIST_MARKER');     // 注入した観点が stdin に乗る
     expect(captured.stdin).toContain(REVIEW_ONLY_INSTRUCTION);
     expect(captured.stdin).not.toContain(FIX_INSTRUCTION);
+    expect(captured.env).toBe(process.env);
   });
 
   it('codex --fix: workspace-write + 差分本文 + 修正指示を stdin に渡す', () => {

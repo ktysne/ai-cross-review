@@ -295,7 +295,8 @@ node tools/cross-review.js subagent      # CLI を起動せずレビュー用プ
 Claude の単発レビューでは、子プロセスに `AGENT_COCKPIT_NONINTERACTIVE=1` を渡します。
 対応する Agent Cockpit の Stop フックは、到着済みの通知を確認して終了し、対話セッション向けの長時間待機に入りません。
 親プロセスの環境と通常の Claude 設定は変更しません。
-この印に対応していない Agent Cockpit を使っている場合は、先に Cockpit 側を更新してください。
+未対応の Agent Cockpit では印が無視され、従来どおり Stop フックで待機します。
+待機を解消するには Cockpit 側も更新してください。
 
 ### 指摘対応
 
