@@ -2388,9 +2388,10 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     expect(captured.stdin).toContain(FIX_INSTRUCTION);
   });
 
-  it('claude 経路は claude -p に差分本文入りプロンプトを渡す', () => {
+  it('claude 経路は親環境を変えず単発実行の印と差分本文を渡す', () => {
     const captured = {};
-    const spawnFn = (cmd, args, stdin) => { Object.assign(captured, { cmd, args, stdin }); return null; };
+    const parentMarker = process.env.AGENT_COCKPIT_NONINTERACTIVE;
+    const spawnFn = (cmd, args, stdin, onExit, env) => { Object.assign(captured, { cmd, args, stdin, env }); return null; };
     const gitRun = (args) => (args[0] === 'diff' ? 'CLAUDE_DIFF\n' : '');
     runReview(
       { reviewer: 'claude', mode: 'base', baseRef: 'main', fix: false },
@@ -2399,6 +2400,8 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     expect(captured.cmd).toBe('claude');
     expect(captured.args).toEqual(['-p']);
     expect(captured.stdin).toContain('CLAUDE_DIFF');
+    expect(captured.env).toEqual({ ...process.env, AGENT_COCKPIT_NONINTERACTIVE: '1' });
+    expect(process.env.AGENT_COCKPIT_NONINTERACTIVE).toBe(parentMarker);
   });
 
   it('codex --fix + instructions: 申し送り本文を stdin に乗せる (指摘の受け渡し)', () => {
