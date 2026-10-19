@@ -146,7 +146,7 @@ node tools/cross-review.js artifacts --clean-legacy  # 旧形式の平置き出�
 - 判断ファイルから PR コメントを作るときは、往復ごとに `comment --round <N> --outcome <fixing|converged|halted>` を付けて結論を記録する。省くと前の往復の結論が残り、読み手はその往復を結論待ちと見続ける。
   修正する指摘が残って対応中なら `fixing`、収束したら `converged`、blocker などが残って開発者の判断を待つなら `halted` を選ぶ。
   3 往復到達後に局所的な要修正だけを主セッションの判断で収束させた場合も `converged` とする。
-  `converged` は修正をコミットしてから記録する。
+  `converged` は未コミット変更があると記録を中断する。意図して記録する場合は `--allow-dirty` を付ける。
   `--outcome` を省くのは、結論を記録しない例外 (下書きの本文だけを作り直すときなど) に限る。
   値と状態ファイルの規則は `docs/cross-review.md`「状態ファイル」を正本とする。
 - PR コメントは手で組み立てず、ブランチ別ディレクトリの `round-<N>-triage.md` に書いてから `node tools/cross-review.js comment --round <N> [--verify <検証出力>] [--outcome <値>]` で本文を生成し、`gh pr comment <番号> --body-file <生成物>` で投稿する。`--post <番号>` を付けると生成本文を先に保存し、同じメモリ本文を標準入力で投稿する。投稿に失敗した場合は保存本文を削除する (レビュー出力は往復ごとに同じブランチ別ディレクトリへ自動保存される。`subagent` 経路で出力を `round-<N>-subagent.md` へ貼るのは任意で、記録用。`comment` は読みません。詳細は `docs/cross-review.md`)。

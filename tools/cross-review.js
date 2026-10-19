@@ -453,6 +453,7 @@ const USAGE = [
   '                        ファイルを書き出す (既定では投稿しない。コマンド例は stderr に出る)',
   '                        --post <PR番号> を付けると生成本文を gh pr comment へ直接投稿する',
   '                        --outcome <fixing|converged|halted> を付けると結論も状態ファイルへ記録する',
+  '                        --outcome converged は追跡ファイルが clean のときだけ記録できる (--allow-dirty で許可)',
   '  artifacts --clean-legacy  .cross-review 直下に残る旧形式の出力だけを削除する',
   '',
   'options:',
@@ -483,6 +484,7 @@ const USAGE = [
   '  --out <path>          comment: 生成した本文の書き出し先 (既定はブランチ別ディレクトリの round-<N>-comment.md)',
   '  --post <N>            comment: 生成本文を gh pr comment <N> --body-file - で投稿する (1 以上の整数)',
   '  --outcome <value>     comment: fixing / converged / halted の結論を本文生成後に状態へ記録する',
+  '  --allow-dirty         comment: converged を未コミット変更がある状態でも記録する',
   '  --clean-legacy        artifacts: .cross-review 直下の旧形式出力を削除する',
   '  --fallback-prompt <path> GPT 側使用不能時に出力する代替プロンプトの書き出し先',
   '                        (既定: OS の一時ディレクトリ/cross-review-fallback-<pid>.md)',
@@ -596,6 +598,7 @@ function parseArgs(argv) {
     // (省略時はブランチ別ディレクトリのメタ情報から自動で選ぶ)。
     round: null,
     outcome: null,
+    allowDirty: false,
     reviewerName: null,
     verifyPath: null, // --verify の検証出力ファイル
     outPath: null, // --out の書き出し先 (未指定はブランチ別ディレクトリの round-<N>-comment.md)
@@ -627,6 +630,8 @@ function parseArgs(argv) {
       out.noFallback = true;
     } else if (a === '--no-pr-check') {
       out.noPrCheck = true;
+    } else if (a === '--allow-dirty') {
+      out.allowDirty = true;
     } else if (a === '--override-route' || a.startsWith('--override-route=')) {
       const v = a === '--override-route' ? args[i + 1] : a.slice('--override-route='.length);
       if (!v || v.startsWith('-')) {
@@ -835,6 +840,7 @@ function parseArgs(argv) {
       out.noPrCheck && '--no-pr-check',
       out.round != null && '--round',
       out.outcome != null && '--outcome',
+      out.allowDirty && '--allow-dirty',
       out.reviewerName != null && '--reviewer',
       out.verifyPath != null && '--verify',
       out.outPath != null && '--out',
@@ -877,6 +883,7 @@ function parseArgs(argv) {
         out.outPath != null ? '--out' : null,
         out.postNumber != null ? '--post' : null,
         out.outcome != null ? '--outcome' : null,
+        out.allowDirty && '--allow-dirty',
       ].filter(Boolean);
       if (commentOnly.length > 0) {
         out.error = `${commentOnly.join(' / ')} は comment サブコマンドでのみ使えます`;
@@ -923,6 +930,7 @@ function parseArgs(argv) {
       out.outPath != null ? '--out' : null,
       out.postNumber != null ? '--post' : null,
       out.outcome != null ? '--outcome' : null,
+      out.allowDirty && '--allow-dirty',
     ].filter(Boolean);
     if (given.length > 0) {
       out.error = `${given.join(' / ')} は comment サブコマンドでのみ使えます`;
@@ -3026,7 +3034,14 @@ function runCommentCommand(opts, deps = {}) {
       return null;
     }
   };
-  const startHeadSha = opts.outcome == null ? null : safeGitValue(currentHeadSha);
+  let startHeadSha = null;
+  const trackedStatus = () => {
+    try {
+      return gitRun(['status', '--porcelain', '--untracked-files=no'], { allowFailure: true });
+    } catch {
+      return null;
+    }
+  };
   const dir = resolveBranchReviewDir(branch, deps);
   const outPath = opts.outPath || path.join(dir, roundFileNames(round, '').comment);
   const usesDefaultOut = !opts.outPath;
@@ -3058,6 +3073,16 @@ function runCommentCommand(opts, deps = {}) {
     process.exitCode = 1;
     return null;
   };
+  if (opts.outcome === 'converged' && !opts.allowDirty) {
+    const status = trackedStatus();
+    if (status == null) {
+      return fail('[cross-review] git status を取得できないため結論を記録しません。\n');
+    }
+    if (String(status).trim()) {
+      return fail(`[cross-review] ${branch} に追跡ファイルの未コミット変更があります。変更をコミットしてから実行し直してください。\n`);
+    }
+  }
+  if (opts.outcome != null) startHeadSha = safeGitValue(currentHeadSha);
   const recordTriage = (posted) => {
     if (opts.outcome == null) return true;
     const stateDeps = deps.warn ? deps : { ...deps, warn: writeErr };
@@ -3092,6 +3117,17 @@ function runCommentCommand(opts, deps = {}) {
       process.exitCode = 1;
       return false;
     }
+    if (opts.outcome === 'converged' && !opts.allowDirty) {
+      const status = trackedStatus();
+      const reason = status == null
+        ? 'git status を取得できません'
+        : String(status).trim() ? '追跡ファイルに未コミット変更があります' : null;
+      if (reason) {
+        writeErr(`[cross-review] ${context}結論は記録していません: ${reason}\n`);
+        process.exitCode = 1;
+        return false;
+      }
+    }
     const updated = withTriage(loaded.state, branch, { round, sha: headSha, outcome: opts.outcome });
     try {
       if (writeStateFn(updated, stateDeps) === false) {
@@ -3104,13 +3140,8 @@ function runCommentCommand(opts, deps = {}) {
       process.exitCode = 1;
       return false;
     }
-    if (opts.outcome === 'converged') {
-      let status = null;
-      try {
-        status = gitRun(['status', '--porcelain', '--untracked-files=no'], { allowFailure: true });
-      } catch {
-        status = null;
-      }
+    if (opts.outcome === 'converged' && opts.allowDirty) {
+      const status = trackedStatus();
       if (status != null && String(status).trim()) {
         writeErr(`[cross-review] ${branch} に追跡ファイルの未コミット変更があります。結論に記録した SHA ${shortSha(headSha)} には含まれていません。\n`);
       }
