@@ -3067,7 +3067,10 @@ function runCommentCommand(opts, deps = {}) {
   };
   if (opts.outcome === 'converged' && !opts.allowDirty) {
     const status = trackedStatus();
-    if (status != null && String(status).trim()) {
+    if (status == null) {
+      return fail('[cross-review] git status を取得できないため結論を記録しません。\n');
+    }
+    if (String(status).trim()) {
       return fail(`[cross-review] ${branch} に追跡ファイルの未コミット変更があります。変更をコミットしてから実行し直してください。\n`);
     }
   }
@@ -3105,6 +3108,17 @@ function runCommentCommand(opts, deps = {}) {
       writeErr(`[cross-review] ${context}結論は記録していません: ${recorded.round} 往復目の結論が既にあります (${statePath})\n`);
       process.exitCode = 1;
       return false;
+    }
+    if (opts.outcome === 'converged' && !opts.allowDirty) {
+      const status = trackedStatus();
+      const reason = status == null
+        ? 'git status を取得できません'
+        : String(status).trim() ? '追跡ファイルに未コミット変更があります' : null;
+      if (reason) {
+        writeErr(`[cross-review] ${context}結論は記録していません: ${reason}\n`);
+        process.exitCode = 1;
+        return false;
+      }
     }
     const updated = withTriage(loaded.state, branch, { round, sha: headSha, outcome: opts.outcome });
     try {

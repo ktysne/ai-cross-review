@@ -4372,6 +4372,69 @@ describe('cross-review comment サブコマンド', () => {
     process.exitCode = 0;
   });
 
+  it.each([
+    ['null を返す', () => null],
+    ['例外を投げる', () => { throw new Error('git status failed'); }],
+  ])('converged の git status が取得できない場合 (%s) は記録しない', (_label, statusResult) => {
+    const sha = 'b'.repeat(40);
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T', 'custom-comment.md': 'KEEP' };
+    const state = { branches: { [branch]: { round: 1 } } };
+    let stateReads = 0;
+    let stateWrites = 0;
+    let posts = 0;
+    const { deps, logs, written } = commentDeps(files, {
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return `${branch}\n`;
+        if (args[0] === 'status') return statusResult();
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+        return null;
+      },
+      readState: () => { stateReads += 1; return { path: '/repo/.cross-review-state.json', state, corrupt: false }; },
+      writeState: () => { stateWrites += 1; return true; },
+      ghRun: () => { posts += 1; return { status: 0, stdout: '', stderr: '' }; },
+    });
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1, outcome: 'converged', postNumber: 42, outPath: 'custom-comment.md' }, deps)).toBeNull();
+    expect(written).toEqual({});
+    expect(files['custom-comment.md']).toBe('KEEP');
+    expect(stateReads).toBe(0);
+    expect(stateWrites).toBe(0);
+    expect(state).toEqual({ branches: { [branch]: { round: 1 } } });
+    expect(posts).toBe(0);
+    expect(logs.err).toContain('git status を取得できないため結論を記録しません');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('投稿中に追跡ファイルが変更された converged は結論を記録しない', () => {
+    const sha = 'b'.repeat(40);
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
+    const state = { branches: {} };
+    let statusCalls = 0;
+    let posts = 0;
+    let stateWrites = 0;
+    const { deps, logs, written } = commentDeps(files, {
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return `${branch}\n`;
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+        if (args[0] === 'status') return ++statusCalls === 1 ? '' : ' M tracked.js\n';
+        return null;
+      },
+      readState: () => ({ path: '/repo/.cross-review-state.json', state, corrupt: false }),
+      writeState: () => { stateWrites += 1; return true; },
+      ghRun: () => { posts += 1; return { status: 0, stdout: '', stderr: '' }; },
+    });
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1, outcome: 'converged', postNumber: 42 }, deps)).toBeNull();
+    expect(posts).toBe(1);
+    expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
+    expect(stateWrites).toBe(0);
+    expect(state).toEqual({ branches: {} });
+    expect(logs.err).toContain('PR #42 へ投稿しましたが結論は記録していません: 追跡ファイルに未コミット変更があります');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
   it('--allow-dirty は converged を記録して未コミット変更を警告する', () => {
     const sha = 'c'.repeat(40);
     const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
