@@ -19,6 +19,7 @@ const {
   selectMigrationNotes,
   formatMigrationNotes,
   findMissingManifestEntries,
+  findStaleExcludedFiles,
   collectMissingManifestEntries,
   runSync,
   defaultPrepareUpstream,
@@ -122,6 +123,16 @@ describe('sync validateManifest', () => {
     const m = valid();
     m.files = [];
     expect(() => validateManifest(m)).toThrow(/files/);
+  });
+
+  it('excludedFiles は文字列の配列である必要がある', () => {
+    const m = valid();
+    m.excludedFiles = 'a';
+    expect(() => validateManifest(m)).toThrow(/excludedFiles/);
+    m.excludedFiles = ['a', 1];
+    expect(() => validateManifest(m)).toThrow(/excludedFiles/);
+    m.excludedFiles = null;
+    expect(() => validateManifest(m)).not.toThrow();
   });
 
   it('旧形式 {source,ref,commit} は移行を促すエラー', () => {
@@ -818,6 +829,21 @@ describe('findMissingManifestEntries', () => {
     expect(findMissingManifestEntries(example, local)).toEqual([]);
   });
 
+  it('除外欄にある from は未登録として返さない', () => {
+    const local = {
+      files: [{ from: 'tools/cross-review.js', to: 'tools/cross-review.js' }],
+      excludedFiles: ['tools/cross-review.sync-all.js'],
+    };
+    expect(findMissingManifestEntries(example, local)).toEqual([
+      { from: '.claude/skills/cross-review/SKILL.md', to: '.claude/skills/cross-review/SKILL.md' },
+    ]);
+  });
+
+  it('雛形にない除外 from を古い除外として返す', () => {
+    expect(findStaleExcludedFiles(example, { excludedFiles: ['removed/file.js', 'tools/cross-review.js'] }))
+      .toEqual(['removed/file.js']);
+  });
+
   it('雛形 / 取り込み先が壊れていても落ちない (files が無い、null)', () => {
     expect(findMissingManifestEntries(null, { files: [] })).toEqual([]);
     expect(findMissingManifestEntries({}, { files: [] })).toEqual([]);
@@ -891,10 +917,23 @@ describe('collectMissingManifestEntries', () => {
     expect(r.warning).toBeNull();
     expect(r.entries).toEqual([{ from: 'docs/cross-review.md', to: 'docs/cross-review.md' }]);
   });
+
+  it('実際に除外した配布物と古い除外を返す', () => {
+    const fsx = makeFs({
+      '/up/tools/cross-review.sync.example.json': EXAMPLE,
+    });
+    const local = {
+      ...localManifest,
+      excludedFiles: ['docs/cross-review.md', 'removed/file.js'],
+    };
+    const r = collectMissingManifestEntries('/up', local, { readFile: fsx.readFile, exists: fsx.exists });
+    expect(r.entries).toEqual([]);
+    expect(r.excludedEntries).toEqual([{ from: 'docs/cross-review.md', to: 'docs/cross-review.md' }]);
+    expect(r.staleExcludedFiles).toEqual(['removed/file.js']);
+  });
 });
 
-// --check-manifest は「上流の配布物を取りこぼしていないか」だけを報告し、マニフェストを書き換えず
-// 終了コードにも影響させない、という不変条件を固定する。
+// --check-manifest は未登録と古い除外を報告し、マニフェストを書き換えず終了コードにも影響させない。
 describe('runSync の --check-manifest', () => {
   const manifestObj = {
     upstream: { repo: 'https://example.com/x.git', ref: 'main' },
@@ -962,6 +1001,48 @@ describe('runSync の --check-manifest', () => {
     const res = runSync({ mode: 'check', dryRun: false, checkManifest: true }, h.deps);
     expect(res.missingManifestEntries).toEqual([]);
     expect(h.out.join('')).toMatch(/マニフェスト未登録の配布物はありません/);
+  });
+
+  it('除外があると未登録 0 件の行に除外件数を添える', () => {
+    const localManifest = { ...manifestObj, excludedFiles: ['tools/cross-review.sync-all.js'] };
+    const h = checkDeps({
+      '/proj/tools/cross-review.sync.json': JSON.stringify(localManifest, null, 2),
+      '/up/tools/cross-review.sync.example.json': EXAMPLE,
+    });
+    const res = runSync({ mode: 'check', dryRun: false, checkManifest: true }, h.deps);
+    expect(res.missingManifestEntries).toEqual([]);
+    expect(res.excludedManifestEntries).toEqual([{ from: 'tools/cross-review.sync-all.js', to: 'tools/cross-review.sync-all.js' }]);
+    expect(h.out.join('')).toMatch(/マニフェスト未登録の配布物はありません \(上流の雛形と一致、除外 1 件\)。/);
+  });
+
+  it('未登録がある場合も除外件数を別行に出す', () => {
+    const localManifest = { ...manifestObj, excludedFiles: ['tools/cross-review.sync-all.js'] };
+    const example = JSON.stringify({
+      files: [
+        { from: 'tools/cross-review.js', to: 'tools/cross-review.js' },
+        { from: 'tools/cross-review.sync-all.js', to: 'tools/cross-review.sync-all.js' },
+        { from: 'tools/extra.js', to: 'tools/extra.js' },
+      ],
+    });
+    const h = checkDeps({
+      '/proj/tools/cross-review.sync.json': JSON.stringify(localManifest, null, 2),
+      '/up/tools/cross-review.sync.example.json': example,
+    });
+    const res = runSync({ mode: 'check', dryRun: false, checkManifest: true }, h.deps);
+    expect(res.missingManifestEntries).toEqual([{ from: 'tools/extra.js', to: 'tools/extra.js' }]);
+    expect(h.out.join('')).toMatch(/excludedFiles で除外した配布物: 1 件/);
+  });
+
+  it('古くなった除外を件ごとに警告する', () => {
+    const localManifest = { ...manifestObj, excludedFiles: ['removed/file.js'] };
+    const h = checkDeps({
+      '/proj/tools/cross-review.sync.json': JSON.stringify(localManifest, null, 2),
+      '/up/tools/cross-review.sync.example.json': EXAMPLE,
+    });
+    const res = runSync({ mode: 'check', dryRun: false, checkManifest: true }, h.deps);
+    expect(res.staleExcludedFiles).toEqual(['removed/file.js']);
+    expect(h.err).toContain('[cross-review] 除外対象が上流の雛形にありません: removed/file.js\n');
+    expect(process.exitCode).toBe(0);
   });
 
   it('上流に雛形が無ければ警告してスキップし、同期は続く', () => {
@@ -1048,5 +1129,49 @@ describe('runSync の --check-manifest 単独指定 (非書き込み)', () => {
     expect(res.drift).toBe(false);
     expect(res.missingManifestEntries).toHaveLength(1);
     expect(process.exitCode).toBe(0);
+  });
+});
+
+describe('runSync のマニフェスト行末', () => {
+  const manifestObj = {
+    upstream: { repo: 'https://example.com/x.git', ref: 'main' },
+    lastSyncedCommit: 'oldcommit',
+    files: [{ from: 'tools/cross-review.js', to: 'tools/cross-review.js' }],
+  };
+
+  function syncWithManifest(raw) {
+    const fsx = makeFs({
+      '/proj/tools/cross-review.sync.json': raw,
+      '/up/tools/cross-review.js': 'SAME',
+      '/proj/tools/cross-review.js': 'SAME',
+    });
+    const deps = {
+      scriptDir: '/proj/tools',
+      readFile: fsx.readFile,
+      writeFile: fsx.writeFile,
+      exists: fsx.exists,
+      out: () => {},
+      err: () => {},
+      prepareUpstream: () => ({ dir: '/up', commit: 'newcommit', cleanup: () => {} }),
+    };
+    runSync({ mode: 'sync', dryRun: false }, deps);
+    return fsx.writes.find((w) => w.path === path.resolve('/proj/tools/cross-review.sync.json')).content;
+  }
+
+  beforeEach(() => { process.exitCode = 0; });
+  afterAll(() => { process.exitCode = 0; });
+
+  it('CRLF のマニフェストを書き戻すときも CRLF を保つ', () => {
+    const raw = `${JSON.stringify(manifestObj, null, 2).replace(/\n/g, '\r\n')}\r\n`;
+    const written = syncWithManifest(raw);
+    expect(written).toContain('\r\n');
+    expect(written.replace(/\r\n/g, '')).not.toContain('\n');
+  });
+
+  it('LF のマニフェストを書き戻すときも LF を保つ', () => {
+    const raw = `${JSON.stringify(manifestObj, null, 2)}\n`;
+    const written = syncWithManifest(raw);
+    expect(written).toContain('\n');
+    expect(written).not.toContain('\r');
   });
 });
