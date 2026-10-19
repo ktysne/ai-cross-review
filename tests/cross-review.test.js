@@ -3217,6 +3217,32 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     process.exitCode = 0;
   });
 
+  it('approval の明示が無くても GPT 側を止めた定義なら bridge を読まず代替する', () => {
+    const mem = memoryState();
+    const written = {};
+    const defPath = path.join('/home/u', '.claude', 'gpt-agents', `${CODEX_AGENT_REVIEW_NAME}.md`);
+    let spawnCalls = 0;
+    process.exitCode = 0;
+    runReview(limitOpts({ fallbackPromptPath: 'fb.md' }), bridgeDeps({
+      ...mem,
+      files: {
+        [bridgeScriptPath]: 'codex exec --sandbox "$codex_sandbox" -\n',
+        [defPath]: '---\ncodex_enabled: false\ncodex_model: gpt-5.6-sol\ncodex_sandbox: read-only\n---\n\n役割\n',
+      },
+      gitRun: stateGitRun(),
+      scriptDir: path.join('/repo', 'tools'),
+      noPrCheck: true,
+      spawnFn: () => { spawnCalls++; return null; },
+      writeFile: (filePath, body) => { written[filePath] = body; },
+    }));
+    const metaPath = path.join(resolveBranchReviewDir('feat/x', { scriptDir: path.join('/repo', 'tools') }), roundFileNames(1, 'subagent').meta);
+    expect(spawnCalls).toBe(0);
+    expect(written['fb.md']).toContain('STATE_DIFF');
+    expect(JSON.parse(mem.store.files[metaPath])).toMatchObject({ reviewer: 'subagent', via: 'subagent', fallback: true });
+    expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+    process.exitCode = 0;
+  });
+
   it('ホーム側の codex_model が空でも <cwd> 側の定義がモデルを指定していれば bridge を起動する', () => {
     const calls = [];
     const userDef = path.join('/home/u', '.claude', 'gpt-agents', `${CODEX_AGENT_REVIEW_NAME}.md`);
@@ -3969,6 +3995,64 @@ describe('cross-review レビュー出力の保存 (.cross-review/)', () => {
       process.exitCode = 0;
     });
 
+  it('フォールバック後に Codex が成功したら comment は Codex を選び結論を記録する', () => {
+    const mem = memoryState();
+    const branch = 'feat/save';
+    const files = mem.store.files;
+    const fallbackNames = roundFileNames(1, 'subagent');
+    const codexNames = roundFileNames(1, 'codex');
+    const fallbackPath = 'fb.md';
+    process.exitCode = 0;
+    runReview(saveOpts({ fallbackPromptPath: fallbackPath }), saveDeps(mem, {
+      writeFile: () => {},
+      spawnFn: (cmd, args, stdin, onExit) => {
+        settle(onExit, { code: 1, outputTail: 'usage limit reached' });
+        return null;
+      },
+    }));
+    expect(JSON.parse(files[path.join(dir, fallbackNames.meta)]).fallback).toBe(true);
+    expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+
+    process.exitCode = 0;
+    runReview(saveOpts(), saveDeps(mem, {
+      spawnFn: (cmd, args, stdin, onExit) => {
+        settle(onExit, { code: 0, output: 'CODEX_REVIEW_OUTPUT' });
+        return null;
+      },
+    }));
+    expect(files[path.join(dir, codexNames.review)]).toBe('CODEX_REVIEW_OUTPUT\n');
+
+    files[path.join(dir, roundFileNames(1, 'triage').triage)] = '対応内容';
+    let err = '';
+    runCommentCommand({ round: 1, outcome: 'fixing' }, {
+      scriptDir,
+      env: {},
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return `${branch}\n`;
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+        return '';
+      },
+      readState: mem.readState,
+      writeState: mem.writeState,
+      exists: (filePath) => Object.prototype.hasOwnProperty.call(files, filePath),
+      readFile: (filePath) => {
+        if (!Object.prototype.hasOwnProperty.call(files, filePath)) throw new Error(`ENOENT: ${filePath}`);
+        return files[filePath];
+      },
+      readdir: () => Object.keys(files).map((filePath) => path.basename(filePath)),
+      removeFile: (filePath) => { delete files[filePath]; },
+      writeReviewFile: (filePath, body) => { files[filePath] = body; },
+      err: (value) => { err += value; },
+    });
+
+    expect(files[path.join(dir, roundFileNames(1, 'codex').comment)]).toContain('Codex の指摘と対応');
+    expect(files[path.join(dir, roundFileNames(1, 'codex').comment)]).toContain('実行経路: 直接起動');
+    expect(branchStateOf(mem.store.state, branch).lastTriage).toEqual({ round: 1, sha, outcome: 'fixing' });
+    expect(err).toContain('結論を記録しました');
+    expect(process.exitCode).toBe(0);
+    process.exitCode = 0;
+  });
+
   it('レビュー開始時のブランチへ非同期完了後も保存する', () => {
     const mem = memoryState();
     let current = 'feat/save';
@@ -4374,6 +4458,69 @@ describe('cross-review comment サブコマンド', () => {
     process.exitCode = 0;
   });
 
+  it.each([
+    ['null を返す', () => null],
+    ['例外を投げる', () => { throw new Error('git status failed'); }],
+  ])('converged の git status が取得できない場合 (%s) は記録しない', (_label, statusResult) => {
+    const sha = 'b'.repeat(40);
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T', 'custom-comment.md': 'KEEP' };
+    const state = { branches: { [branch]: { round: 1 } } };
+    let stateReads = 0;
+    let stateWrites = 0;
+    let posts = 0;
+    const { deps, logs, written } = commentDeps(files, {
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return `${branch}\n`;
+        if (args[0] === 'status') return statusResult();
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+        return null;
+      },
+      readState: () => { stateReads += 1; return { path: '/repo/.cross-review-state.json', state, corrupt: false }; },
+      writeState: () => { stateWrites += 1; return true; },
+      ghRun: () => { posts += 1; return { status: 0, stdout: '', stderr: '' }; },
+    });
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1, outcome: 'converged', postNumber: 42, outPath: 'custom-comment.md' }, deps)).toBeNull();
+    expect(written).toEqual({});
+    expect(files['custom-comment.md']).toBe('KEEP');
+    expect(stateReads).toBe(0);
+    expect(stateWrites).toBe(0);
+    expect(state).toEqual({ branches: { [branch]: { round: 1 } } });
+    expect(posts).toBe(0);
+    expect(logs.err).toContain('git status を取得できないため結論を記録しません');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('投稿中に追跡ファイルが変更された converged は結論を記録しない', () => {
+    const sha = 'b'.repeat(40);
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
+    const state = { branches: {} };
+    let statusCalls = 0;
+    let posts = 0;
+    let stateWrites = 0;
+    const { deps, logs, written } = commentDeps(files, {
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return `${branch}\n`;
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+        if (args[0] === 'status') return ++statusCalls === 1 ? '' : ' M tracked.js\n';
+        return null;
+      },
+      readState: () => ({ path: '/repo/.cross-review-state.json', state, corrupt: false }),
+      writeState: () => { stateWrites += 1; return true; },
+      ghRun: () => { posts += 1; return { status: 0, stdout: '', stderr: '' }; },
+    });
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1, outcome: 'converged', postNumber: 42 }, deps)).toBeNull();
+    expect(posts).toBe(1);
+    expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
+    expect(stateWrites).toBe(0);
+    expect(state).toEqual({ branches: {} });
+    expect(logs.err).toContain('PR #42 へ投稿しましたが結論は記録していません: 追跡ファイルに未コミット変更があります');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
   it('--allow-dirty は converged を記録して未コミット変更を警告する', () => {
     const sha = 'c'.repeat(40);
     const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
@@ -4484,6 +4631,17 @@ describe('cross-review comment サブコマンド', () => {
     expect(written[at(subNames.comment)]).toContain('Claude 客観サブエージェント の指摘と対応');
     expect(process.exitCode).toBe(0);
     process.exitCode = 0;
+  });
+
+  it('--reviewer を明示すれば fallback のメタ情報も選べる', () => {
+    const files = {
+      [at('round-1-subagent.json')]: '{"reviewer":"subagent","fallback":true}',
+      [at('round-1-codex.json')]: '{"reviewer":"codex"}',
+      [at(names.triage)]: 'T',
+    };
+    const { deps, written } = commentDeps(files);
+    runCommentCommand({ round: 1, reviewerName: 'subagent' }, deps);
+    expect(written[at(names.comment)]).toContain('Claude 客観サブエージェント の指摘と対応');
   });
 
   it('判断ファイルが無ければ雛形だけを書き出して失敗する', () => {
@@ -4728,6 +4886,18 @@ describe('cross-review comment サブコマンド', () => {
     expect(detectRoundReviewers(dir, 1, { readdir: () => entries })).toEqual(['claude', 'codex']);
     expect(detectRoundReviewers(dir, 10, { readdir: () => entries })).toEqual(['codex']);
     expect(detectRoundReviewers(dir, 2, { readdir: () => { throw new Error('ENOENT'); } })).toEqual([]);
+  });
+
+  it('detectRoundReviewers は通常レビューがあれば fallback のレビュアーを除外する', () => {
+    const entries = ['round-1-subagent.json', 'round-1-codex.json'];
+    expect(detectRoundReviewers(dir, 1, {
+      readdir: () => entries,
+      readFile: (filePath) => (path.basename(filePath) === 'round-1-subagent.json' ? '{"fallback":true}' : '{}'),
+    })).toEqual(['codex']);
+    expect(detectRoundReviewers(dir, 1, {
+      readdir: () => entries.slice(0, 1),
+      readFile: () => '{"fallback":true}',
+    })).toEqual(['subagent']);
   });
 
   it('保存先はスクリプト位置から解決する (cwd に依存しない)', () => {
