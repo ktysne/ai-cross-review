@@ -21,6 +21,7 @@ const {
   findMissingManifestEntries,
   collectMissingManifestEntries,
   runSync,
+  defaultPrepareUpstream,
 } = require('../tools/cross-review.sync.js');
 
 describe('sync parseArgs', () => {
@@ -245,6 +246,50 @@ describe('sync computeSyncPlan', () => {
     expect(plan[1].status).toBe('unchanged');
   });
 
+  it('上流が LF、取り込み先が LF で同じ内容なら unchanged', () => {
+    const fsx = makeFs({
+      '/up/tools/cross-review.js': 'a\nb\n',
+      '/up/tests/cross-review.test.js': 'x\n',
+      '/proj/tools/cross-review.js': 'a\nb\n',
+      '/proj/tests/tools/cross-review.test.js': 'x\n',
+    });
+    const plan = computeSyncPlan(manifest, '/up', '/proj', fsx);
+    expect(plan.map((p) => p.status)).toEqual(['unchanged', 'unchanged']);
+  });
+
+  it('上流が LF、取り込み先が CRLF で同じ内容なら unchanged', () => {
+    const fsx = makeFs({
+      '/up/tools/cross-review.js': 'a\nb\n',
+      '/up/tests/cross-review.test.js': 'x\n',
+      '/proj/tools/cross-review.js': 'a\r\nb\r\n',
+      '/proj/tests/tools/cross-review.test.js': 'x\r\n',
+    });
+    const plan = computeSyncPlan(manifest, '/up', '/proj', fsx);
+    expect(plan.map((p) => p.status)).toEqual(['unchanged', 'unchanged']);
+  });
+
+  it('上流が CRLF、取り込み先が LF で同じ内容なら unchanged', () => {
+    const fsx = makeFs({
+      '/up/tools/cross-review.js': 'a\r\nb\r\n',
+      '/up/tests/cross-review.test.js': 'x\r\n',
+      '/proj/tools/cross-review.js': 'a\nb\n',
+      '/proj/tests/tools/cross-review.test.js': 'x\n',
+    });
+    const plan = computeSyncPlan(manifest, '/up', '/proj', fsx);
+    expect(plan.map((p) => p.status)).toEqual(['unchanged', 'unchanged']);
+  });
+
+  it('expected の行末は既存ファイルに合わせ、新規は LF にする', () => {
+    const fsx = makeFs({
+      '/up/tools/cross-review.js': 'NEW\nline\n',
+      '/up/tests/cross-review.test.js': 'x\r\ny\r\n',
+      '/proj/tools/cross-review.js': 'OLD\r\nline\r\n',
+    });
+    const plan = computeSyncPlan(manifest, '/up', '/proj', fsx);
+    expect(plan[0]).toMatchObject({ status: 'update', expected: 'NEW\r\nline\r\n' });
+    expect(plan[1]).toMatchObject({ status: 'create', expected: 'x\ny\n' });
+  });
+
   it('上流にファイルが無ければエラー', () => {
     const fsx = makeFs({ '/up/tools/cross-review.js': 'x' });
     expect(() => computeSyncPlan(manifest, '/up', '/proj', fsx)).toThrow(/上流にファイルがありません/);
@@ -260,6 +305,17 @@ describe('sync computeSyncPlan', () => {
     const bad = { files: [{ from: '../escape', to: 'a' }] };
     const fsx = makeFs({});
     expect(() => computeSyncPlan(bad, '/up', '/proj', fsx)).toThrow(/外/);
+  });
+});
+
+describe('sync defaultPrepareUpstream', () => {
+  it('checkout は利用者の autocrlf を無効にして LF で取り出す', () => {
+    const calls = [];
+    const gitRun = (args) => { calls.push(args); return args.includes('rev-parse') ? 'abc\n' : ''; };
+    const up = defaultPrepareUpstream('repo', 'main', { gitRun, mkdtemp: () => '/tmp/x', rm: () => {} });
+    expect(up.commit).toBe('abc');
+    const checkout = calls.find((a) => a.includes('checkout'));
+    expect(checkout).toEqual(['-C', '/tmp/x', '-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'checkout', '--quiet', 'FETCH_HEAD']);
   });
 });
 
@@ -380,6 +436,30 @@ describe('sync runSync', () => {
     expect(written.lastSyncedCommit).toBe('abc123def456');
     expect(written.lastSyncedRef).toBe('main');
     expect(process.exitCode).toBe(0);
+  });
+
+  it('check: 行末だけが違うならドリフト無し', () => {
+    const h = baseDeps({
+      '/up/tools/cross-review.js': 'E\nF\n',
+      '/up/docs/cross-review.md': 'D\n',
+      '/proj/tools/cross-review.js': 'E\r\nF\r\n',
+      '/proj/docs/cross-review.md': 'D\n',
+    });
+    const res = runSync({ mode: 'check', dryRun: false }, h.deps);
+    expect(res.drift).toBe(false);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('sync: 取り込み先の既存ファイルの行末を保って書く', () => {
+    const h = baseDeps({
+      '/up/tools/cross-review.js': 'NEW\nX\n',
+      '/up/docs/cross-review.md': 'NEW_D\n',
+      '/proj/tools/cross-review.js': 'OLD\r\nX\r\n',
+      '/proj/docs/cross-review.md': 'OLD_D\n',
+    });
+    runSync({ mode: 'sync', dryRun: false }, h.deps);
+    expect(h.fsx.store.get(path.resolve('/proj/tools/cross-review.js'))).toBe('NEW\r\nX\r\n');
+    expect(h.fsx.store.get(path.resolve('/proj/docs/cross-review.md'))).toBe('NEW_D\n');
   });
 
   it('sync: 同一コミットで一致なら何も書き込まない (マニフェストの整形崩れを防ぐ)', () => {
