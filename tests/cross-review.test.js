@@ -3177,6 +3177,90 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     expect(process.exitCode).toBe(0);
   });
 
+  it.each([
+    {
+      label: 'codex_enabled: false',
+      definition: '---\ncodex_enabled: false\ncodex_model: gpt-5.6-sol\ncodex_sandbox: read-only\n---\n\n役割\n',
+    },
+    {
+      label: 'codex_model が空',
+      definition: '---\ncodex_enabled: true\ncodex_model:\ncodex_sandbox: read-only\n---\n\n役割\n',
+    },
+  ])('$label の定義なら起動せず、定義による停止理由で代替する', ({ definition }) => {
+    const mem = memoryState();
+    const written = {};
+    let err = '';
+    let spawnCalls = 0;
+    const defPath = path.join('/home/u', '.claude', 'gpt-agents', `${CODEX_AGENT_REVIEW_NAME}.md`);
+    process.exitCode = 0;
+    runReview(limitOpts({ fallbackPromptPath: 'fb.md' }), bridgeDeps({
+      ...mem,
+      files: { [defPath]: definition },
+      gitRun: stateGitRun(),
+      scriptDir: path.join('/repo', 'tools'),
+      noPrCheck: true,
+      spawnFn: () => { spawnCalls++; throw new Error('定義で停止中は bridge を起動しない'); },
+      writeFile: (filePath, body) => { written[filePath] = body; },
+      err: (value) => { err += value; },
+    }));
+    const metaPath = path.join(resolveBranchReviewDir('feat/x', { scriptDir: path.join('/repo', 'tools') }), roundFileNames(1, 'subagent').meta);
+    expect(spawnCalls).toBe(0);
+    expect(written['fb.md']).toContain('STATE_DIFF');
+    expect(err).toContain('定義で GPT 側を止めている');
+    expect(err).toContain('Codex を直接実行できないため (定義で GPT 側を止めている) subagent 代替で確認した');
+    expect(JSON.parse(mem.store.files[metaPath])).toMatchObject({ reviewer: 'subagent', via: 'subagent' });
+    expect(mem.store.writes).toEqual([]);
+    expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+    process.exitCode = 0;
+  });
+
+  it('ホーム側の codex_model が空でも <cwd> 側の定義がモデルを指定していれば bridge を起動する', () => {
+    const calls = [];
+    const userDef = path.join('/home/u', '.claude', 'gpt-agents', `${CODEX_AGENT_REVIEW_NAME}.md`);
+    const projectDef = path.join('/repo', '.claude', 'gpt-agents', `${CODEX_AGENT_REVIEW_NAME}.md`);
+    process.exitCode = 0;
+    runReview(limitOpts(), bridgeDeps({
+      cwd: '/repo',
+      files: {
+        [userDef]: '---\ncodex_home: ~/.codex\ncodex_model:\ncodex_sandbox: read-only\n---\n\n役割\n',
+        [projectDef]: '---\ncodex_home: ~/.codex\ncodex_model: gpt-5.6-sol\ncodex_sandbox: read-only\n---\n\n役割\n',
+      },
+      noPrCheck: true,
+      spawnFn: (cmd, args, stdin, onExit) => {
+        calls.push({ cmd, args });
+        settle(onExit, { code: 0 });
+        return null;
+      },
+    }));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toContain(CODEX_AGENT_REVIEW_NAME);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('有効な定義があるのに bridge が終了コード 3 を返したら直接起動せず exitCode 1 で止める', () => {
+    const calls = [];
+    let err = '';
+    const defPath = path.join('/home/u', '.claude', 'gpt-agents', `${CODEX_AGENT_REVIEW_NAME}.md`);
+    process.exitCode = 0;
+    runReview(limitOpts(), bridgeDeps({
+      files: { [defPath]: agentDefText('read-only') },
+      noPrCheck: true,
+      spawnFn: (cmd, args, stdin, onExit) => {
+        calls.push({ cmd, args });
+        settle(onExit, { code: CODEX_AGENT_EXIT_MISSING });
+        return null;
+      },
+      writeFile: () => { throw new Error('有効な定義の終了コード 3 はフォールバックしない'); },
+      err: (value) => { err += value; },
+    }));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].cmd).toBe('bash');
+    expect(err).toContain('定義で GPT 側が有効なのに bridge が終了コード 3');
+    expect(err).toContain('直接起動へは切り替えません');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
   // 承認 never 固定の検査 (bridge が明示していなければ直接起動へ戻す)。
   it('スクリプトが approval_policy=never を明示していなければ直接起動で走らせ、警告を出す', () => {
     const calls = [];
@@ -3687,7 +3771,7 @@ describe('cross-review レビュー出力の保存 (.cross-review/)', () => {
     process.exitCode = 0;
   });
 
-  it('利用上限フォールバックでは保存しない', () => {
+  it('利用上限フォールバックは往復を増やさず subagent 用のプロンプトとメタ情報を保存する', () => {
     const mem = memoryState();
     process.exitCode = 0;
     runReview(saveOpts({ fallbackPromptPath: 'fb.md' }), saveDeps(mem, {
@@ -3697,9 +3781,190 @@ describe('cross-review レビュー出力の保存 (.cross-review/)', () => {
       },
       writeFile: () => {},
     }));
-    expect(mem.store.files).toEqual({});
+    const names = roundFileNames(1, 'subagent');
+    expect(mem.store.files[path.join(dir, names.prompt)]).toContain('SAVE_DIFF');
+    expect(JSON.parse(mem.store.files[path.join(dir, names.meta)])).toMatchObject({
+      reviewer: 'subagent',
+      via: 'subagent',
+      base: { ref: 'main', source: 'explicit' },
+      headSha: sha,
+    });
+    expect(mem.store.writes).toEqual([]);
     process.exitCode = 0;
   });
+
+  it('state --mark 後にフォールバックの subagent メタ情報で comment --outcome を記録できる', () => {
+    const mem = memoryState({
+      branches: { 'feat/x': { round: 2, lastReviewedSha: sha, dismissed: [], lastTriage: null } },
+    });
+    const scriptDir = path.join(path.sep, 'repo', 'tools');
+    const fallbackNames = roundFileNames(3, 'subagent');
+    const artifactDir = resolveBranchReviewDir('feat/x', { scriptDir });
+    const names = roundFileNames(3, 'subagent');
+    let err = '';
+    let recordedAt = 'first';
+    const branchGitRun = (args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x\n';
+      if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+      if (args[0] === 'diff') return 'SAVE_DIFF\n';
+      return '';
+    };
+    const runFallback = (checklist) => runReview(saveOpts({ fallbackPromptPath: 'fb.md' }), saveDeps(mem, {
+      checklist,
+      gitRun: branchGitRun,
+      scriptDir,
+      now: () => recordedAt,
+      writeFile: () => {},
+      spawnFn: (cmd, args, stdin, onExit) => {
+        settle(onExit, { code: 1, outputTail: 'usage limit reached' });
+        return null;
+      },
+    }));
+
+    process.exitCode = 0;
+    runFallback('FIRST_CHECKLIST');
+    expect(mem.store.writes).toEqual([]);
+    recordedAt = 'second';
+    runFallback('SECOND_CHECKLIST');
+    const metaPath = path.join(artifactDir, fallbackNames.meta);
+    const promptPath = path.join(artifactDir, fallbackNames.prompt);
+    expect(JSON.parse(mem.store.files[metaPath]).recordedAt).toBe('second');
+    expect(mem.store.files[promptPath]).toContain('SECOND_CHECKLIST');
+    expect(mem.store.files[promptPath]).not.toContain('FIRST_CHECKLIST');
+    expect(mem.store.writes).toEqual([]);
+    expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+    process.exitCode = 0;
+
+    const triagePath = path.join(artifactDir, names.triage);
+    mem.store.files[triagePath] = '### 指摘 1（要修正）: A\n**対応**: 直した';
+    runStateCommand({ mark: true }, {
+      ...mem,
+      gitRun: branchGitRun,
+      err: () => {},
+    });
+    expect(branchStateOf(mem.store.state, 'feat/x').round).toBe(3);
+    const readdir = (targetDir) => Object.keys(mem.store.files)
+      .filter((filePath) => path.dirname(filePath) === targetDir)
+      .map((filePath) => path.basename(filePath));
+    const commentPath = runCommentCommand({ round: 3, outcome: 'converged' }, {
+      ...mem,
+      scriptDir,
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x\n';
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+        return '';
+      },
+      exists: (filePath) => Object.prototype.hasOwnProperty.call(mem.store.files, filePath),
+      readFile: (filePath) => mem.store.files[filePath],
+      writeReviewFile: (filePath, body) => { mem.store.files[filePath] = body; },
+      removeFile: (filePath) => { delete mem.store.files[filePath]; },
+      readdir,
+      err: (value) => { err += value; },
+    });
+    expect(commentPath).toBe(path.join(artifactDir, names.comment));
+    expect(branchStateOf(mem.store.state, 'feat/x').lastTriage).toEqual({ round: 3, sha, outcome: 'converged' });
+    expect(err).toContain('3 往復目 / converged');
+    expect(process.exitCode).toBe(0);
+    process.exitCode = 0;
+  });
+
+  it.each([
+    { label: '--no-state', opts: { noState: true } },
+    { label: 'ブランチ名を取得できないとき', branchUnavailable: true },
+    { label: '状態ファイルが壊れているとき', corrupt: true },
+  ])('状態を使えない ($label) ときフォールバックのメタ情報を保存しない', ({ opts = {}, branchUnavailable = false, corrupt = false }) => {
+    const mem = memoryState({ branches: {} }, { corrupt });
+    const branchGitRun = (args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x\n';
+      if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+      if (args[0] === 'diff') return 'SAVE_DIFF\n';
+      return '';
+    };
+    process.exitCode = 0;
+    runReview(saveOpts({ fallbackPromptPath: 'fb.md', ...opts }), saveDeps(mem, {
+      gitRun: (args) => {
+        if (branchUnavailable && args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return null;
+        return branchGitRun(args);
+      },
+      spawnFn: (cmd, args, stdin, onExit) => {
+        settle(onExit, { code: 1, outputTail: 'usage limit reached' });
+        return null;
+      },
+      writeFile: () => {},
+    }));
+    expect(mem.store.files).toEqual({});
+    expect(mem.store.writes).toEqual([]);
+    expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+    process.exitCode = 0;
+  });
+
+  it('--fix の作業ツリーが変わっていれば代替プロンプトを書き出さず、変更ファイルと再実行方法を案内する', () => {
+      const mem = memoryState();
+      const written = {};
+      let err = '';
+      let worktreeVersion = 0;
+      const gitRun = (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x\n';
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+        if (args[0] === 'status') return ' M tracked.txt\n?? new.txt\n';
+        if (args[0] === 'ls-files') return 'new.txt\0';
+        if (args[0] === 'hash-object') return `new-hash-${worktreeVersion}\n`;
+        if (args[0] === 'diff' && args[1] === 'main...HEAD') return 'FIX_DIFF\n';
+        if (args[0] === 'diff' && args.includes('--name-only')) return 'tracked.txt\0';
+        if (args[0] === 'diff' && args.includes('--binary')) {
+          return args.includes('--') ? `file-diff-${worktreeVersion}` : `full-diff-${worktreeVersion}`;
+        }
+        return '';
+      };
+      process.exitCode = 0;
+      runReview(saveOpts({ fix: true, fallbackPromptPath: 'fb.md', noExclude: true }), saveDeps(mem, {
+        gitRun,
+        writeFile: (filePath, body) => { written[filePath] = body; },
+        err: (value) => { err += value; },
+        spawnFn: (cmd, args, stdin, onExit) => {
+          worktreeVersion = 1;
+          settle(onExit, { code: 1, outputTail: 'usage limit reached' });
+          return null;
+        },
+      }));
+      expect(written).toEqual({});
+      expect(err).toContain('作業ツリーが変わったため、代替プロンプトを書き出しません');
+      expect(err).toContain('tracked.txt');
+      expect(err).toContain('new.txt');
+      expect(err).toContain('元に戻してから同じコマンドを再実行');
+      expect(err).toContain('変更の扱いを依頼文に明記');
+      expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+      process.exitCode = 0;
+    });
+
+  it('--fix の作業ツリーに変化がなければ従来どおり代替プロンプトを書き出す', () => {
+      const mem = memoryState();
+      const written = {};
+      const gitRun = (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x\n';
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+        if (args[0] === 'status') return ' M tracked.txt\n?? new.txt\n';
+        if (args[0] === 'ls-files') return 'new.txt\0';
+        if (args[0] === 'hash-object') return 'same-new-hash\n';
+        if (args[0] === 'diff' && args[1] === 'main...HEAD') return 'FIX_DIFF\n';
+        if (args[0] === 'diff' && args.includes('--name-only')) return 'tracked.txt\0';
+        if (args[0] === 'diff' && args.includes('--binary')) return 'same-file-diff';
+        return '';
+      };
+      process.exitCode = 0;
+      runReview(saveOpts({ fix: true, fallbackPromptPath: 'fb.md', noExclude: true }), saveDeps(mem, {
+        gitRun,
+        writeFile: (filePath, body) => { written[filePath] = body; },
+        spawnFn: (cmd, args, stdin, onExit) => {
+          settle(onExit, { code: 1, outputTail: 'usage limit reached' });
+          return null;
+        },
+      }));
+      expect(written['fb.md']).toContain('FIX_DIFF');
+      expect(mem.store.files[path.join(resolveBranchReviewDir('feat/x', { scriptDir }), roundFileNames(1, 'subagent').meta)]).toBeDefined();
+      expect(process.exitCode).toBe(USAGE_LIMIT_EXIT_CODE);
+      process.exitCode = 0;
+    });
 
   it('レビュー開始時のブランチへ非同期完了後も保存する', () => {
     const mem = memoryState();

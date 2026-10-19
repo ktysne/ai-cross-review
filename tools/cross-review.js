@@ -171,7 +171,7 @@ const CODEX_SANDBOX_WORKSPACE_WRITE = 'workspace-write';
 // 「Codex の承認は never 固定」を保証できないので bridge 経由に使わない。
 const APPROVAL_NEVER_MARKER = 'approval_policy=never';
 
-// codex-agent.sh の終了コード。3 = bridge が未導入 (codex コマンドや定義が無い、codex_enabled: false)、
+// codex-agent.sh の終了コード。3 = bridge / Codex の未導入、定義による無効化またはモデル未設定。
 // 75 = GPT 側の事情 (利用上限やモデルの混雑など) で実行できなかった。
 const CODEX_AGENT_EXIT_MISSING = 3;
 const USAGE_LIMIT_EXIT_CODE = 75;
@@ -1975,7 +1975,17 @@ function readCodexAgentDefinition(name, deps = {}) {
   if (!userDef) return projectDef ? { path: projectPath, projectOnly: true } : null;
   if (!projectDef) return userDef;
   const rejected = codexAgentProjectOverrideError(userDef.text, projectDef.text, projectPath, home);
-  return rejected ? { path: projectPath, rejected } : userDef;
+  return rejected ? { path: projectPath, rejected } : { ...userDef, projectText: projectDef.text };
+}
+
+// bridge と同じく、codex_enabled はどちらかの定義が false なら止まり、codex_model は <cwd> 側にキーがあればそちらを使う。
+function codexAgentGptDisabled(def) {
+  const hasProject = def.projectText != null;
+  if (frontMatterValue(def.text, 'codex_enabled') === 'false'
+    || (hasProject && frontMatterValue(def.projectText, 'codex_enabled') === 'false')) return true;
+  const projectModel = hasProject ? frontMatterValue(def.projectText, 'codex_model') : null;
+  const model = projectModel != null ? projectModel : frontMatterValue(def.text, 'codex_model');
+  return !model || !model.trim();
 }
 
 // 定義ファイルの codex_sandbox が --fix の有無と一致するかを判定する純粋関数。
@@ -2056,6 +2066,9 @@ function codexAgentInvocation(script, opts, deps = {}) {
     return { error: `定義 ${agentName} を使えないため起動しません。${def.rejected}` };
   }
   if (def) {
+    if (codexAgentGptDisabled(def)) {
+      return { fallbackCause: 'definition-disabled', definitionPath: def.path };
+    }
     const check = checkCodexAgentSandbox({ fix: opts.fix, sandbox: codexAgentSandboxOf(def.text) });
     if (!check.ok) {
       return {
@@ -2073,6 +2086,8 @@ function codexAgentInvocation(script, opts, deps = {}) {
     via: 'agent',
     agentName,
     scriptPath: script,
+    codexDefinitionPresent: !!def,
+    definitionPath: def ? def.path : null,
     notice: opts.fix
       ? `Codex にレビュー + 検出事項の修正を依頼します (作業ツリーを編集します): codex-agent.sh 経由 (定義: ${agentName})\n`
       : `Codex でレビューを実行します: codex-agent.sh 経由 (定義: ${agentName})\n`,
@@ -2336,6 +2351,10 @@ function emitFallbackPrompt(prompt, opts, deps = {}) {
       terminal: 'GPT 側が使えないため (理由不明、終了コード 75) subagent 代替に切り替えます。',
       comment: 'Codex を直接実行できないため (理由不明の GPT 側使用不能) subagent 代替で確認した',
     },
+    'definition-disabled': {
+      terminal: '定義で GPT 側を止めているため subagent 代替に切り替えます。',
+      comment: 'Codex を直接実行できないため (定義で GPT 側を止めている) subagent 代替で確認した',
+    },
   };
   const notice = notices[cause] || notices['rate-limited'];
   writeErr(
@@ -2347,6 +2366,59 @@ function emitFallbackPrompt(prompt, opts, deps = {}) {
   );
   process.exitCode = USAGE_LIMIT_EXIT_CODE;
   return promptPath;
+}
+
+function snapshotFixWorktree(gitRun) {
+  const requiredOutput = (args) => {
+    const output = gitRun(args);
+    if (output == null) throw new Error(`git ${args.join(' ')} の結果を取得できません`);
+    return String(output);
+  };
+  const status = requiredOutput(['status', '--porcelain', '--untracked-files=all']);
+  const diff = requiredOutput(['diff', 'HEAD', '--binary']);
+  const trackedPaths = requiredOutput(['diff', 'HEAD', '--name-only', '-z'])
+    .split('\0')
+    .filter(Boolean)
+    .sort();
+  const untrackedPaths = requiredOutput(['ls-files', '--others', '--exclude-standard', '-z'])
+    .split('\0')
+    .filter(Boolean)
+    .sort();
+  const trackedDiffs = {};
+  for (const file of trackedPaths) {
+    const fileDiff = requiredOutput(['diff', 'HEAD', '--binary', '--', file]);
+    trackedDiffs[file] = crypto.createHash('sha256').update(fileDiff, 'utf8').digest('hex');
+  }
+  const untrackedHashes = {};
+  for (const file of untrackedPaths) {
+    untrackedHashes[file] = requiredOutput(['hash-object', '--', file]).trim();
+  }
+  return { status, diff, trackedDiffs, untrackedHashes };
+}
+
+function fixWorktreeSnapshotsEqual(before, after) {
+  return before.status === after.status
+    && before.diff === after.diff
+    && JSON.stringify(before.trackedDiffs) === JSON.stringify(after.trackedDiffs)
+    && JSON.stringify(before.untrackedHashes) === JSON.stringify(after.untrackedHashes);
+}
+
+function changedFixWorktreeFiles(before, after) {
+  const changed = new Set();
+  for (const file of new Set([...Object.keys(before.trackedDiffs), ...Object.keys(after.trackedDiffs)])) {
+    if (before.trackedDiffs[file] !== after.trackedDiffs[file]) changed.add(file);
+  }
+  for (const file of new Set([...Object.keys(before.untrackedHashes), ...Object.keys(after.untrackedHashes)])) {
+    if (before.untrackedHashes[file] !== after.untrackedHashes[file]) changed.add(file);
+  }
+  if (changed.size === 0) {
+    for (const snapshot of [before, after]) {
+      for (const line of snapshot.status.split(/\r?\n/)) {
+        if (line.length > 3) changed.add(line.slice(3).split(' -> ').at(-1));
+      }
+    }
+  }
+  return [...changed].sort();
 }
 
 // deps で gitRun / spawnFn を差し替え可能にする (テストから stdin 本文まで検証するため)。
@@ -2559,9 +2631,9 @@ function runReview(opts, deps = {}) {
   // レビュー出力 (codex / claude) か、サブエージェントへ渡したプロンプト (subagent) を
   // `.cross-review/` へ保存する。往復番号が確定したときだけ保存し、失敗しても警告に留める。
   const nowIso = () => (deps.now ? String(deps.now()) : new Date().toISOString());
-  const saveRound = (round, { body, isPrompt, via, truncated }) => {
+  const saveRound = (round, { body, isPrompt, via, truncated, reviewer = opts.reviewer }) => {
     if (round == null) return;
-    const names = roundFileNames(round, opts.reviewer);
+    const names = roundFileNames(round, reviewer);
     // 保持量の上限で先頭を捨てていたら、保存本文の先頭に注記を入れ、メタにも印を残す。
     // 保存ファイルの先頭に注記を入れ、保存ファイルだけを見ても全文でないと分かるようにする。
     // outputTruncated は保存ファイル先頭の注記に対応するメタ情報で、`comment` では参照しない。
@@ -2570,11 +2642,11 @@ function runReview(opts, deps = {}) {
     saveRoundArtifacts({
       branch,
       round,
-      reviewer: opts.reviewer,
+      reviewer,
       body: text,
       bodyName: isPrompt ? names.prompt : names.review,
       meta: {
-        reviewer: opts.reviewer,
+        reviewer,
         via,
         base: { ref: baseSelection.ref, source: baseSelection.source },
         diffKb: Number(diffKb.toFixed(1)),
@@ -2585,6 +2657,56 @@ function runReview(opts, deps = {}) {
       },
     }, invDeps);
   };
+  let fixWorktreeSnapshot = null;
+  let fixWorktreeSnapshotError = null;
+  let fixWorktreeSnapshotAttempted = false;
+  const writeFallback = (cause) => {
+    if (opts.fix && fixWorktreeSnapshotAttempted) {
+      if (fixWorktreeSnapshotError) {
+        writeErr(`[cross-review] --fix の起動前に作業ツリーを記録できなかったため、代替プロンプトを書き出しません: ${fixWorktreeSnapshotError}\n`);
+        process.exitCode = USAGE_LIMIT_EXIT_CODE;
+        return null;
+      }
+      let currentSnapshot;
+      try {
+        currentSnapshot = snapshotFixWorktree(gitRun);
+      } catch (err) {
+        writeErr(`[cross-review] --fix の終了後に作業ツリーを確認できなかったため、代替プロンプトを書き出しません: ${(err && err.message) || 'git error'}\n`);
+        process.exitCode = USAGE_LIMIT_EXIT_CODE;
+        return null;
+      }
+      if (!fixWorktreeSnapshotsEqual(fixWorktreeSnapshot, currentSnapshot)) {
+        const files = changedFixWorktreeFiles(fixWorktreeSnapshot, currentSnapshot);
+        const fileList = files.length ? files.map((file) => `  - ${file}\n`).join('') : '  - ファイル名を特定できませんでした\n';
+        writeErr('[cross-review] --fix の実行中に作業ツリーが変わったため、代替プロンプトを書き出しません。\n'
+          + `変更されたファイル:\n${fileList}`
+          + '  変更を捨てて再実行する場合は、これらのファイルを元に戻してから同じコマンドを再実行してください。\n'
+          + '  変更を残す場合は、その変更の扱いを依頼文に明記して再実行してください。\n');
+        process.exitCode = USAGE_LIMIT_EXIT_CODE;
+        return null;
+      }
+    }
+    const fallbackPath = emitFallbackPrompt(prompt, opts, {
+      err: writeErr,
+      writeFile: deps.writeFile,
+      tmpdir: deps.tmpdir,
+      pid: deps.pid,
+      cause,
+    });
+    if (fallbackPath && stateUsable && branch) {
+      let latest;
+      try {
+        latest = readStateFn(invDeps);
+      } catch {
+        latest = null;
+      }
+      if (latest && !latest.corrupt) {
+        const round = branchStateOf(latest.state, branch).round + 1;
+        saveRound(round, { body: prompt, isPrompt: true, via: 'subagent', reviewer: 'subagent' });
+      }
+    }
+    return fallbackPath;
+  };
   // reviewerInvocation も解決後の opts で揃える (現状 baseRef は参照しないが、プロンプトの
   // スコープ表記と起動引数が将来食い違わないよう、解決後の値だけを下流に渡す)。
   const inv = reviewerInvocation(resolvedOpts, invDeps);
@@ -2594,6 +2716,15 @@ function runReview(opts, deps = {}) {
     writeErr(`[cross-review] ${inv.error}\n`
       + '  定義ファイルの codex_sandbox を直すか、--codex-agent で適切な定義を指定してください。\n');
     process.exitCode = 2;
+    return null;
+  }
+  if (inv.fallbackCause) {
+    if (opts.noFallback) {
+      writeErr('[cross-review] 定義で GPT 側を止めているため Codex を起動しません (--no-fallback)。\n');
+      process.exitCode = USAGE_LIMIT_EXIT_CODE;
+      return null;
+    }
+    writeFallback(inv.fallbackCause);
     return null;
   }
   if (inv.emit) {
@@ -2609,6 +2740,14 @@ function runReview(opts, deps = {}) {
   // レビュアーを起動し、終了コードで「bridge 未導入」「GPT 側使用不能」を切り分ける。
   // 起動を関数にするのは、bridge 未導入のときに同じプロンプトで直接起動をやり直すため。
   const start = (invocation) => {
+    if (resolvedOpts.reviewer === 'codex' && resolvedOpts.fix && !fixWorktreeSnapshotAttempted) {
+      fixWorktreeSnapshotAttempted = true;
+      try {
+        fixWorktreeSnapshot = snapshotFixWorktree(gitRun);
+      } catch (err) {
+        fixWorktreeSnapshotError = (err && err.message) || 'git error';
+      }
+    }
     writeOut(invocation.notice);
     const reviewerEnvironment = resolvedOpts.reviewer === 'claude'
       ? { ...process.env, AGENT_COCKPIT_NONINTERACTIVE: '1' }
@@ -2621,6 +2760,11 @@ function runReview(opts, deps = {}) {
       const bridgeUnavailable = exit.code === CODEX_AGENT_EXIT_MISSING
         || (exit.error && exit.error.code === 'ENOENT');
       if (resolvedOpts.reviewer === 'codex' && invocation.via === 'agent' && bridgeUnavailable) {
+        if (exit.code === CODEX_AGENT_EXIT_MISSING && invocation.codexDefinitionPresent) {
+          writeErr(`[cross-review] 定義で GPT 側が有効なのに bridge が終了コード ${CODEX_AGENT_EXIT_MISSING} を返しました。直接起動へは切り替えません: ${invocation.definitionPath}\n`);
+          process.exitCode = 1;
+          return;
+        }
         writeErr('[cross-review] bridge が未導入のため直接起動へ切り替えます。\n');
         start(reviewerInvocation({ ...resolvedOpts, codexAgent: false }, invDeps));
         return;
@@ -2648,13 +2792,7 @@ function runReview(opts, deps = {}) {
       // 往復は記録しない。CLI はサブエージェントがレビューを終えたかを観測できないので、
       // 書き出した時点で記録すると、プロンプトを渡さずに再実行したとき未レビューの差分が
       // 「差分なし」になって再試行できなくなる。記録は `state --mark` で利用者が行う。
-      emitFallbackPrompt(prompt, opts, {
-        err: writeErr,
-        writeFile: deps.writeFile,
-        tmpdir: deps.tmpdir,
-        pid: deps.pid,
-        cause: classification.cause,
-      });
+      writeFallback(classification.cause);
     }, reviewerEnvironment);
   };
   return start(inv);
