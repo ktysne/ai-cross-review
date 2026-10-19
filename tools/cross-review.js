@@ -1113,19 +1113,20 @@ function resolveRoutingPath(deps = {}) {
   return path.join(cockpitHome || path.join(home, '.agent-cockpit'), 'routing.json');
 }
 
-// 経路の設定の正本は agent-cockpit の routing.json。agent-cockpit を入れていない環境で
-// 毎回警告を出さないよう、読めないときや値が不正なときは黙って default に倒す。
+// agent-cockpit の isValidRouting と同じ規則で読み、不正な設定は両方を既定とみなす cockpit の表示に合わせる。
 function readReviewRoute(deps = {}) {
   const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
   let routing;
   try {
-    // 手で編集したときに BOM が付くことがあり、JSON.parse は BOM を受け付けない。
-    routing = JSON.parse(String(readFile(resolveRoutingPath(deps))).replace(/^\uFEFF/, ''));
+    routing = JSON.parse(String(readFile(resolveRoutingPath(deps))));
   } catch {
     return 'default';
   }
-  if (!routing || typeof routing !== 'object' || Array.isArray(routing)) return 'default';
-  return routing.review === 'codex' || routing.review === 'claude' || routing.review === 'default'
+  if (!routing || typeof routing !== 'object' || Array.isArray(routing) || Object.keys(routing).length !== 2) {
+    return 'default';
+  }
+  const validRoutes = ['default', 'codex', 'claude'];
+  return validRoutes.includes(routing.agents) && validRoutes.includes(routing.review)
     ? routing.review
     : 'default';
 }

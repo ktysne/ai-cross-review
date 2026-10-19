@@ -420,11 +420,14 @@ describe('cross-review route', () => {
       ['ファイルが無い', () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); }],
       ['読めない', () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); }],
       ['JSON が壊れている', () => '{'],
-      ['review が無い', () => JSON.stringify({ agents: 'default' })],
       ['文字列の不正な値', () => JSON.stringify({ review: 'gpt' })],
       ['数値の値', () => JSON.stringify({ review: 1 })],
       ['トップレベルが配列', () => '[]'],
       ['トップレベルが null', () => 'null'],
+      ['agents のキーが無い', () => JSON.stringify({ review: 'codex' })],
+      ['agents の値が不正', () => JSON.stringify({ agents: 'gpt', review: 'codex' })],
+      ['3 つ目のキーがある', () => JSON.stringify({ agents: 'default', review: 'codex', other: 'default' })],
+      ['BOM が付いている', () => '\uFEFF{"agents":"default","review":"codex"}'],
     ];
 
     for (const [name, readFile] of invalidFiles) {
@@ -444,9 +447,8 @@ describe('cross-review route', () => {
 
   it('routing.json の有効な review 値を返す', () => {
     for (const review of ['codex', 'claude', 'default']) {
-      expect(readReviewRoute({ readFile: () => JSON.stringify({ review }) })).toBe(review);
+      expect(readReviewRoute({ readFile: () => JSON.stringify({ agents: 'default', review }) })).toBe(review);
     }
-    expect(readReviewRoute({ readFile: () => '\uFEFF{"review":"codex"}' })).toBe('codex');
   });
 
   it('AGENT_COCKPIT_HOME があればその routing.json を解決する', () => {
@@ -469,7 +471,7 @@ describe('cross-review route', () => {
       env: { AGENT_COCKPIT_HOME: '/cockpit' },
       readFile: (filePath) => {
         expect(filePath).toBe(path.join('/cockpit', 'routing.json'));
-        return JSON.stringify({ review: 'claude' });
+        return JSON.stringify({ agents: 'default', review: 'claude' });
       },
       out: (text) => output.push(text),
       readState: () => { stateReads += 1; throw new Error('state read'); },
@@ -2158,9 +2160,9 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
 
   describe('agent-cockpit の経路設定', () => {
     const routeCases = [
-      { name: 'codex', review: 'codex', read: () => JSON.stringify({ review: 'codex' }), allowed: ['codex'] },
-      { name: 'claude', review: 'claude', read: () => JSON.stringify({ review: 'claude' }), allowed: ['claude', 'subagent'] },
-      { name: 'default', review: 'default', read: () => JSON.stringify({ review: 'default' }), allowed: ['codex', 'claude', 'subagent'] },
+      { name: 'codex', review: 'codex', read: () => JSON.stringify({ agents: 'default', review: 'codex' }), allowed: ['codex'] },
+      { name: 'claude', review: 'claude', read: () => JSON.stringify({ agents: 'default', review: 'claude' }), allowed: ['claude', 'subagent'] },
+      { name: 'default', review: 'default', read: () => JSON.stringify({ agents: 'default', review: 'default' }), allowed: ['codex', 'claude', 'subagent'] },
       { name: 'routing.json の読取失敗', review: 'default', read: () => { throw new Error('read failed'); }, allowed: ['codex', 'claude', 'subagent'] },
       { name: '壊れた JSON', review: 'default', read: () => '{', allowed: ['codex', 'claude', 'subagent'] },
     ];
