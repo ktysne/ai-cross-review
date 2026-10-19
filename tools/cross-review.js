@@ -2039,17 +2039,17 @@ function scriptPinsApprovalNever(text) {
   });
 }
 
-// bridge (codex-agent.sh) 経由の起動を組み立てる。起動前に 2 つの不変条件を確かめる:
-//   - 承認は never 固定: スクリプトが approval_policy=never を明示していること。
-//     明示が無い、またはスクリプトを読めない場合は null を返し、呼び出し側は直接起動へ戻す
-//     (直接起動なら -c approval_policy=never を自分で渡せる)。
-//   - サンドボックス: 定義ファイルの codex_sandbox が --fix の有無と一致すること。
-//     食い違う場合は { error } を返し、レビュアーを起動させない。
-// 定義ファイルが見つからないときは検査せず bridge に委ねる (bridge が終了コード 3 で未導入を
-// 知らせ、呼び出し側が直接起動へ戻る)。
+// bridge 経由の起動可否を判定し、起動コマンドを組み立てる。
+// ホーム側定義が GPT 側を止めている場合は、承認検査より先に代替プロンプトへ切り替える。
+// 定義があれば承認方針とサンドボックスを検証し、無ければ bridge に委ねる。
 function codexAgentInvocation(script, opts, deps = {}) {
   const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
   const warn = deps.warn || ((m) => process.stderr.write(m));
+  const agentName = codexAgentNameFor(opts);
+  const def = readCodexAgentDefinition(agentName, deps);
+  if (def && !def.error && !def.projectOnly && !def.rejected && codexAgentGptDisabled(def)) {
+    return { fallbackCause: 'definition-disabled', definitionPath: def.path };
+  }
   let scriptText;
   try {
     scriptText = readFile(script);
@@ -2061,8 +2061,6 @@ function codexAgentInvocation(script, opts, deps = {}) {
     warn(`[cross-review] codex-agent.sh が ${APPROVAL_NEVER_MARKER} を明示していないため直接起動へ切り替えます (claude-codex-bridge #16 を参照)\n`);
     return null;
   }
-  const agentName = codexAgentNameFor(opts);
-  const def = readCodexAgentDefinition(agentName, deps);
   if (def && def.error) {
     return { error: `定義 ${agentName} を読めないため起動しません (${def.error}): ${def.path}` };
   }
@@ -2075,9 +2073,6 @@ function codexAgentInvocation(script, opts, deps = {}) {
     return { error: `定義 ${agentName} を使えないため起動しません。${def.rejected}` };
   }
   if (def) {
-    if (codexAgentGptDisabled(def)) {
-      return { fallbackCause: 'definition-disabled', definitionPath: def.path };
-    }
     const check = checkCodexAgentSandbox({ fix: opts.fix, sandbox: codexAgentSandboxOf(def.text) });
     if (!check.ok) {
       return {
@@ -2640,7 +2635,7 @@ function runReview(opts, deps = {}) {
   // レビュー出力 (codex / claude) か、サブエージェントへ渡したプロンプト (subagent) を
   // `.cross-review/` へ保存する。往復番号が確定したときだけ保存し、失敗しても警告に留める。
   const nowIso = () => (deps.now ? String(deps.now()) : new Date().toISOString());
-  const saveRound = (round, { body, isPrompt, via, truncated, reviewer = opts.reviewer }) => {
+  const saveRound = (round, { body, isPrompt, via, truncated, fallback, reviewer = opts.reviewer }) => {
     if (round == null) return;
     const names = roundFileNames(round, reviewer);
     // 保持量の上限で先頭を捨てていたら、保存本文の先頭に注記を入れ、メタにも印を残す。
@@ -2662,6 +2657,7 @@ function runReview(opts, deps = {}) {
         headSha,
         recordedAt: nowIso(),
         ...(routeOverride ? { routeOverride } : {}),
+        ...(fallback ? { fallback: true } : {}),
         ...(truncated ? { outputTruncated: true } : {}),
       },
     }, invDeps);
@@ -2711,7 +2707,7 @@ function runReview(opts, deps = {}) {
       }
       if (latest && !latest.corrupt) {
         const round = branchStateOf(latest.state, branch).round + 1;
-        saveRound(round, { body: prompt, isPrompt: true, via: 'subagent', reviewer: 'subagent' });
+        saveRound(round, { body: prompt, isPrompt: true, via: 'subagent', fallback: true, reviewer: 'subagent' });
       }
     }
     return fallbackPath;
@@ -2900,10 +2896,11 @@ function runDismissCommand(opts, deps = {}) {
 }
 
 // `.cross-review/` から `round-<N>-<reviewer>.json` を探し、その往復のレビュアー名を列挙する。
-// メタ情報 (json) を目印にするのは、レビュー出力 (md) が subagent 経路では後から人の手で
-// 置かれるのに対し、メタ情報は CLI が必ず書くため。
+// 通常レビューの記録があれば fallback を候補から除き、fallback だけならその記録を使う。
+// subagent のレビュー出力は後から手で置かれる一方、メタ情報は CLI が必ず書くため目印にする。
 function detectRoundReviewers(dir, round, deps = {}) {
   const readdir = deps.readdir || ((p) => fs.readdirSync(p));
+  const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
   let entries;
   try {
     entries = readdir(dir);
@@ -2912,11 +2909,22 @@ function detectRoundReviewers(dir, round, deps = {}) {
   }
   const pattern = new RegExp(`^round-${round}-(.+)\\.json$`);
   const found = [];
+  const nonFallback = [];
   for (const entry of entries || []) {
     const matched = pattern.exec(String(entry));
-    if (matched) found.push(matched[1]);
+    if (!matched) continue;
+    const reviewer = matched[1];
+    found.push(reviewer);
+    let isFallback = false;
+    try {
+      const meta = JSON.parse(String(readFile(path.join(dir, String(entry)))));
+      isFallback = !!(meta && typeof meta === 'object' && !Array.isArray(meta) && meta.fallback === true);
+    } catch {
+      // 読めないメタ情報は後段でエラーとして扱うため、候補から除外しない。
+    }
+    if (!isFallback) nonFallback.push(reviewer);
   }
-  return found.sort();
+  return (nonFallback.length ? nonFallback : found).sort();
 }
 
 // 旧形式の平置き出力に一致するファイル名だけを判定する。正の往復番号を要求し、
@@ -3068,7 +3076,10 @@ function runCommentCommand(opts, deps = {}) {
   };
   if (opts.outcome === 'converged' && !opts.allowDirty) {
     const status = trackedStatus();
-    if (status != null && String(status).trim()) {
+    if (status == null) {
+      return fail('[cross-review] git status を取得できないため結論を記録しません。\n');
+    }
+    if (String(status).trim()) {
       return fail(`[cross-review] ${branch} に追跡ファイルの未コミット変更があります。変更をコミットしてから実行し直してください。\n`);
     }
   }
@@ -3106,6 +3117,17 @@ function runCommentCommand(opts, deps = {}) {
       writeErr(`[cross-review] ${context}結論は記録していません: ${recorded.round} 往復目の結論が既にあります (${statePath})\n`);
       process.exitCode = 1;
       return false;
+    }
+    if (opts.outcome === 'converged' && !opts.allowDirty) {
+      const status = trackedStatus();
+      const reason = status == null
+        ? 'git status を取得できません'
+        : String(status).trim() ? '追跡ファイルに未コミット変更があります' : null;
+      if (reason) {
+        writeErr(`[cross-review] ${context}結論は記録していません: ${reason}\n`);
+        process.exitCode = 1;
+        return false;
+      }
     }
     const updated = withTriage(loaded.state, branch, { round, sha: headSha, outcome: opts.outcome });
     try {
