@@ -357,6 +357,9 @@ codex の起動後に終了コード 75 で出す代替プロンプトは、こ�
 claude-codex-bridge を入れている環境では、codex を直接起動する代わりに bridge の起動スクリプトを経由します。  
 モデル、推論 effort、認証ホーム（`CODEX_HOME`）を定義ファイル側で一元管理し、Claude Code のサブエージェント経由の Codex 起動と条件を揃えるためです。
 
+bridge が `CODEX_AGENT_RUN` を空でない値で設定した Codex 実装担当からは、`route`、`state` の表示（`--mark` と `--reset` なし）、ヘルプ、引数エラーによる使い方表示だけを許可します。
+レビュー実行（`codex` / `claude` / `subagent`。`--fix` を含む）、`state --mark`、`state --reset`、`dismiss`、`comment`、`artifacts` は終了コード 2 で拒否し、レビューは報告を受けたメインセッションが行います。
+
 起動経路は次の順で決まります。
 
 1. `--no-codex-agent` が付いていれば、解決せずに **codex を直接起動**します（従来の起動方法）。

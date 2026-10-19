@@ -13,6 +13,7 @@ process.env.AGENT_COCKPIT_HOME = path.join(path.dirname(fileURLToPath(import.met
 const require = createRequire(import.meta.url);
 const {
   parseArgs,
+  main,
   codexExecArgs,
   reviewerInvocation,
   resolveCodexAgentScript,
@@ -389,6 +390,118 @@ describe('cross-review parseArgs', () => {
     const out = parseArgs(['--help']);
     expect(out.help).toBe(true);
     expect(out.error).toBeNull();
+  });
+});
+
+describe('cross-review main (CODEX_AGENT_RUN)', () => {
+  const branch = 'feat/x';
+  const delegatedEnv = { CODEX_AGENT_RUN: 'bridge-run-76', AGENT_COCKPIT_HOME: '/cockpit' };
+  const stateSnapshot = () => ({
+    branches: {
+      [branch]: { round: 2, lastReviewedSha: 'd'.repeat(40), dismissed: ['既存の指摘'], lastTriage: null },
+    },
+  });
+  const gitRun = (args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return `${branch}\n`;
+    if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${'e'.repeat(40)}\n`;
+    return '';
+  };
+  const invokeMain = (argv, overrides = {}) => {
+    const stdout = [];
+    const stderr = [];
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      main({
+        argv,
+        env: delegatedEnv,
+        out: (text) => stdout.push(text),
+        err: (text) => stderr.push(text),
+        ...overrides,
+      });
+      return { exitCode: process.exitCode ?? 0, stdout: stdout.join(''), stderr: stderr.join('') };
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  };
+
+  it('委譲された実装担当からの codex / subagent レビューと --fix を拒否する', () => {
+    for (const args of [['codex'], ['codex', '--fix'], ['claude'], ['subagent'], ['subagent', '--fix']]) {
+      const initial = stateSnapshot();
+      const mem = memoryState(initial);
+      let spawnCount = 0;
+      const result = invokeMain(args, {
+        ...mem,
+        gitRun,
+        spawnFn: () => { spawnCount += 1; },
+      });
+
+      expect(result.exitCode, args.join(' ')).toBe(2);
+      expect(result.stderr, args.join(' ')).toContain('CODEX_AGENT_RUN=bridge-run-76');
+      expect(spawnCount, args.join(' ')).toBe(0);
+      expect(mem.store.writes, args.join(' ')).toEqual([]);
+      expect(mem.store.state, args.join(' ')).toEqual(initial);
+    }
+  });
+
+  it('state --mark / --reset、comment、dismiss、artifacts を拒否し状態を書き換えない', () => {
+    const commands = [
+      ['state', '--mark'],
+      ['state', '--reset'],
+      ['comment', '--round', '1'],
+      ['dismiss', '対象外の指摘'],
+      ['artifacts', '--clean-legacy'],
+    ];
+    for (const args of commands) {
+      const initial = stateSnapshot();
+      const mem = memoryState(initial);
+      const result = invokeMain(args, { ...mem, gitRun });
+
+      expect(result.exitCode, args.join(' ')).toBe(2);
+      expect(result.stderr, args.join(' ')).toContain('CODEX_AGENT_RUN=bridge-run-76');
+      expect(mem.store.writes, args.join(' ')).toEqual([]);
+      expect(mem.store.state, args.join(' ')).toEqual(initial);
+    }
+  });
+
+  it('route と引数なしの state は委譲中も表示できる', () => {
+    const route = invokeMain(['route'], {
+      readFile: () => JSON.stringify({ agents: 'default', review: 'claude' }),
+    });
+    expect(route).toMatchObject({ exitCode: 0, stdout: 'claude\n', stderr: '' });
+
+    const mem = memoryState(stateSnapshot());
+    const state = invokeMain(['state'], { ...mem, gitRun });
+    expect(state.exitCode).toBe(0);
+    expect(JSON.parse(state.stdout)).toMatchObject({ branch, round: 2, dismissed: ['既存の指摘'] });
+    expect(mem.store.writes).toEqual([]);
+  });
+
+  it('ヘルプと引数エラーは既存の使い方表示を維持する', () => {
+    const help = invokeMain(['codex', '--help']);
+    expect(help.exitCode).toBe(0);
+    expect(help.stdout).toBe(`${USAGE}\n`);
+    expect(help.stderr).toBe('');
+
+    const invalid = invokeMain(['codex', '--max-diff-kb']);
+    expect(invalid.exitCode).toBe(2);
+    expect(invalid.stderr).toContain(USAGE);
+    expect(invalid.stderr).not.toContain('委譲された実装担当');
+  });
+
+  it('CODEX_AGENT_RUN が空文字なら state --mark を拒否しない', () => {
+    const mem = memoryState(stateSnapshot());
+    const result = invokeMain(['state', '--mark'], {
+      ...mem,
+      env: { ...delegatedEnv, CODEX_AGENT_RUN: '' },
+      gitRun,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain('往復を記録しました');
+    expect(result.stderr).not.toContain('委譲された実装担当');
+    expect(mem.store.writes).toHaveLength(1);
+    expect(mem.store.state.branches[branch].round).toBe(3);
   });
 });
 

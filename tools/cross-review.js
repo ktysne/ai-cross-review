@@ -3256,42 +3256,54 @@ function runCommentCommand(opts, deps = {}) {
   return outPath;
 }
 
-function main() {
-  const opts = parseArgs(process.argv.slice(2));
+function main(deps = {}) {
+  const args = deps.argv || process.argv.slice(2);
+  const env = deps.env || process.env;
+  const writeOut = deps.out || ((s) => process.stdout.write(s));
+  const writeErr = deps.err || ((s) => process.stderr.write(s));
+  const opts = parseArgs(args);
   if (opts.help) {
-    process.stdout.write(USAGE + '\n');
+    writeOut(USAGE + '\n');
     return;
   }
   if (opts.error) {
-    process.stderr.write(`${opts.error}\n\n${USAGE}\n`);
+    writeErr(`${opts.error}\n\n${USAGE}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  const agentRun = env.CODEX_AGENT_RUN;
+  const stateIsReadOnly = opts.command === 'state' && !opts.mark && !opts.reset;
+  if (agentRun && opts.command !== 'route' && !stateIsReadOnly) {
+    writeErr(`[cross-review] 委譲された実装担当 (CODEX_AGENT_RUN=${agentRun}) の中ではクロスレビューを実行しません。レビューは報告を受けたメインセッションが行います。\n`);
     process.exitCode = 2;
     return;
   }
   if (opts.command === 'state') {
-    runStateCommand(opts);
+    runStateCommand(opts, deps);
     return;
   }
   if (opts.command === 'route') {
-    runRouteCommand(opts);
+    runRouteCommand(opts, deps);
     return;
   }
   if (opts.command === 'dismiss') {
-    runDismissCommand(opts);
+    runDismissCommand(opts, deps);
     return;
   }
   if (opts.command === 'comment') {
-    runCommentCommand(opts);
+    runCommentCommand(opts, deps);
     return;
   }
   if (opts.command === 'artifacts') {
-    runArtifactsCommand(opts);
+    runArtifactsCommand(opts, deps);
     return;
   }
-  runReview(opts);
+  runReview(opts, deps);
 }
 
 module.exports = {
   parseArgs,
+  main,
   codexExecArgs,
   reviewerInvocation,
   resolveCodexAgentScript,
