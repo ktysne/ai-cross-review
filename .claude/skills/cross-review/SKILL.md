@@ -47,7 +47,7 @@ CLI、`codex exec`、非対話実行などユーザの返信を受け取れな�
 会話や依頼文での指定は、そのセッションの事情をより細かく反映しているため、経路設定より優先します。
 軽微な例外（選択肢 3）の判断と codex 経路の終了コード 75 によるフォールバックは変わりません。
 自走中は経路設定も指定として扱い、設定の変更は次に回すレビューから有効にします（実行中のレビューは止めません）。
-指定した経路が codex 経路で、利用上限などにより使えないときは、CLI のフォールバック（終了コード 75）に従って subagent（Claude の客観サブエージェント）で回し、切り替えたことを報告に書きます。
+指定した経路が codex 経路で、利用上限などにより使えないときや定義で GPT 側を止めているときは、CLI のフォールバック（終了コード 75）に従って subagent（Claude の客観サブエージェント）で回し、切り替えたことを報告に書きます。
 Claude 側の経路にはこのフォールバックが無いので、使えなければ報告に書いて判断を仰ぎます（自走中は判断待ちの事項として載せます）。
 
 用語の定義は次のとおり。
@@ -91,9 +91,12 @@ node tools/cross-review.js codex --fix --instructions notes.md
                                       # レビューの指摘 (notes.md) を渡して修正させる
 ```
 
-GPT 側が利用上限やモデルの混雑などで使えないときは、subagent 代替のプロンプトが自動でファイルへ書き出され、終了コード 75 で終わる（`codex-agent.sh` は理由を最後の `codex-agent: result=` 行に出す。書き出し先は stderr に出る。既定は一時ディレクトリ、`--fallback-prompt <path>` で変更可）。
+GPT 側が利用上限やモデルの混雑などで使えないときは、subagent 代替のプロンプトが自動でファイルへ書き出され、終了コード 75 で終わる（`codex-agent.sh` は理由を最後の `codex-agent: result=` 行に出す。書き出し先は stderr に出る。既定は一時ディレクトリ、`--fallback-prompt <path>` で変更可）。定義の `codex_enabled: false` / 空の `codex_model` も同じフォールバックになりますが、この場合は bridge を起動しません。
 その中身をそのまま Agent ツールの客観レビュー用サブエージェント（読み取り専用。`--fix` 時は書込権限付き）へ渡す。
-PR コメントに残す案内は、`rate-limited` なら「Codex を直接実行できないため (利用上限) subagent 代替で確認した」、`unavailable` なら「Codex を直接実行できないため (GPT 側の一時的な使用不能) subagent 代替で確認した」、理由不明なら「Codex を直接実行できないため (理由不明の GPT 側使用不能) subagent 代替で確認した」とする（切り替えたくないときは `--no-fallback`）。
+`--fix` の起動前後で作業ツリーが変わっていたら、代替プロンプトを書き出さず、変更ファイルと元に戻して再実行する手順を案内して終了コード 75 で止まる。変更を残す場合は、依頼文にその扱いを明記して再実行する。
+PR コメントに残す案内は、`rate-limited` なら「Codex を直接実行できないため (利用上限) subagent 代替で確認した」、`unavailable` なら「Codex を直接実行できないため (GPT 側の一時的な使用不能) subagent 代替で確認した」、理由不明なら「Codex を直接実行できないため (理由不明の GPT 側使用不能) subagent 代替で確認した」、定義による停止なら「Codex を直接実行できないため (定義で GPT 側を止めている) subagent 代替で確認した」とする（切り替えたくないときは `--no-fallback`）。
+
+定義が無いときは bridge に委ね、終了コード 3 なら直接起動へ戻す。定義が有効なのに 3 が返った場合は直接起動せず終了コード 1 で止める。
 
 既定 base は **前回レビュー SHA (状態ファイル) → PR の base (`gh pr view --json baseRefName`) → `origin/main` → ローカル `main`** の順に解決し、決めた base と解決方法が差分サイズと同じ stderr 行に出る。
 **妥当性確認は `--base` を付けずにそのまま実行すればよい**（2 回目以降は前回レビュー SHA が自動で base になり、増分差分だけが送られる）。手で指定するなら従来どおり `--base <SHA>`。
@@ -110,7 +113,7 @@ node tools/cross-review.js artifacts --clean-legacy  # 旧形式の平置き出�
 ```
 
 往復が自動で記録されるのは、`subagent` がプロンプトを stdout に出したときと、レビュアー CLI が終了コード 0 で終わったときだけ。
-**GPT 側使用不能のフォールバックでは記録されない**（CLI はサブエージェントのレビュー完了を観測できないため）ので、サブエージェントでのレビューを終えたら `state --mark` で記録する。
+**GPT 側使用不能のフォールバックでは `round` を増やさない**（CLI はサブエージェントのレビュー完了を観測できないため）。状態を使える場合は次の往復の subagent メタ情報を保存する。レビューを終えたら `state --mark` で記録し、`comment --round <N> --outcome <値>` で結論を残す。
 
 差分サイズが閾値を超えたときは、ファイル要約の閾値を 32/16/8KB と下げて縮退を試し、収まらないときだけ中断する（`--strict-diff-guard` で従来の即中断）。
 差分ガード `--max-diff-kb` / 巨大ファイル要約 `--max-file-diff-kb` / 除外無効化 `--no-exclude`、fetch と gh の省略 (`CROSS_REVIEW_NO_FETCH=1`)、ロックファイル等の既定除外 (`.cross-review-ignore` / `CROSS_REVIEW_IGNORE`)、bridge (codex-agent.sh) 経由の起動と `--no-codex-agent` は `docs/cross-review.md` 参照。
