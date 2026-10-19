@@ -343,7 +343,7 @@ Claude の単発レビューでは、子プロセスに `AGENT_COCKPIT_NONINTERA
 
 `node tools/cross-review.js route` は agent-cockpit の `routing.json` から `review` の値を読み、`codex`、`claude`、`default` のいずれかを改行付きで stdout に出します。
 `AGENT_COCKPIT_HOME` が空でなければそのディレクトリの `routing.json` を読み、空ならホームディレクトリの `.agent-cockpit/routing.json` を読みます。
-ファイルが無い、読めない、JSON が壊れている、トップレベルがオブジェクトでない、または `review` が無いか有効な値でない場合は、何も通知せず `default` を出して終了コード 0 で終わります。
+`agents` と `review` の 2 キーがあり、両方が `default`、`codex`、`claude` のいずれかである場合だけ設定を有効とします。それ以外（BOM 付き JSON を含む）は何も通知せず `default` を出して終了コード 0 で終わります。
 経路設定の正本は agent-cockpit の [routing.json 設計（「経路の設定」）](https://github.com/ktysne/agent-cockpit/blob/main/docs/design/server.md) です。
 agent-cockpit が無い環境では設定ファイルが無いため `default` になり、従来のレビュー手順から変わりません。
 このコマンドは状態ファイルやネットワークを使わず、ファイルも書きません。
