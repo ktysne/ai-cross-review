@@ -765,6 +765,15 @@ describe('agents への配布と旧配置の片付け', () => {
     expect(h.fsx.exists(CODEX)).toBe(true);
   });
 
+  it('旧配置の SKILL.md がもう一方の旧配置へのファイルのリンクでも、両方を片付ける', () => {
+    const realpath = (p) => (path.resolve(p) === path.resolve(CODEX) ? path.resolve(CODEX_SUBAGENT) : path.resolve(p));
+    const h = globalDeps({ [path.join(HOME, '.codex/skills')]: '', [CODEX]: SKILL, [CODEX_SUBAGENT]: SKILL }, { realpath });
+    expect(runAll(globalOptions({ mode: 'sync' }), h.deps).exitCode).toBe(0);
+    expect(h.fsx.exists(CODEX)).toBe(false);
+    expect(h.fsx.exists(CODEX_SUBAGENT)).toBe(false);
+    expect(runAll(globalOptions({ json: true }), h.deps).exitCode).toBe(0);
+  });
+
   it('旧配置の実体を確かめられなければ removable: false にして消さない', () => {
     const realpath = (p) => {
       if (path.resolve(p).startsWith(path.join(HOME, '.codex'))) throw Object.assign(new Error('denied'), { code: 'EACCES' });

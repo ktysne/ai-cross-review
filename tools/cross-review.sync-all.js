@@ -356,10 +356,11 @@ function collectSkillVersions(scriptDir, skillBuffer, deps) {
   }
 }
 
-// 存在する最も近い親を実体へ解決したパス。リンクで共有した置き場を別物とみなすと、配った写しを消すため。
+// 親ディレクトリを実体へ解決し、ファイル名を足したパス。共有した置き場を別物とみなすと配った写しを消し、
+// ファイル自体のリンクを追うと、unlink がリンクだけを消して古い写しを残すため。
 function realPathKey(p, realpath, platform) {
-  const rest = [];
-  let dir = path.resolve(p);
+  const rest = [path.basename(p)];
+  let dir = path.dirname(path.resolve(p));
   for (;;) {
     try {
       const real = path.join(realpath(dir), ...rest);
