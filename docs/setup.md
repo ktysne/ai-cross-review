@@ -235,16 +235,27 @@ bridge の起動スクリプト探索では `CLAUDE_CONFIG_DIR` は見ません�
 bridge の定義も `~/.claude/tools/` を固定で呼ぶので、bridge は `~/.claude` に置きます。
 グローバル SKILL の配布（`--global-skill`）は `CLAUDE_CONFIG_DIR` を見て配布先を決めます。
 
-起動の前に、ai-cross-review は次の 2 点を確かめます。
+起動の前に `bash <スクリプト> --describe <定義名> -C <cwd>` で実効設定を照会します。
+子プロセスの cwd も起動時と同じにし、プロジェクト側の定義を同じ場所から探します。
+終了コード 0 と `protocol: 1` の JSON を確認し、`status: ok` の `sandbox` がレビューのみなら `read-only`、`--fix` なら `workspace-write`、`approval_policy` が `never` の場合だけ起動します。
+新版では ai-cross-review が定義ファイルやスクリプト本文を解析しません。
 
-- `codex-agent.sh` が `approval_policy=never` を指定しているか。指定が無い古い bridge では、警告を出して `codex` を直接起動します。
-- 定義ファイルの `codex_sandbox` が、レビューだけなら `read-only`、`--fix` なら `workspace-write` か。食い違うときは起動せずに終了コード 2 で止まります。
-
+定義が無ければ直接起動します。
+定義で Codex が無効、またはモデルが未設定なら、終了コード 75 の代替プロンプトへ進みます。
+Codex 不在、定義の不正や読取失敗、照会の時間切れ（15 秒）、JSON や protocol の不一致などは終了コード 1 で止まります。
+照会失敗から自動で直接起動には切り替えません。
 bridge を経由せずに起動したいときは、`--no-codex-agent` を付けます。
+bridge または bash が無い環境では、従来どおり直接起動します。
+
+旧 bridge と判定するのは、終了コード 2 で stdout が JSON でなく、stderr に「不明なオプション」と `--describe` がある場合だけです。
+その場合は互換処理で、従来の定義ファイルとスクリプト本文の検査を行います。
+最低対応版を claude-codex-bridge の commit `4a48688`（PR #170、`--describe` が `protocol: 1` の JSON を返す版）以降に引き上げたら、この互換処理を削除できます。
 
 ### 確認
 
-1. 次を実行します。実際にモデルを呼ぶので、利用枠を消費します。
+1. まず `bash ~/.claude/tools/codex-agent.sh --describe codex-review` を実行し、`protocol: 1`、`status: ok`、`sandbox: read-only`、`approval_policy: never` を確認します。
+   この照会はモデルを呼びません。
+   続いて次を実行します。実際にモデルを呼ぶので、利用枠を消費します。
 
    ```bash
    npm run review:codex -- --uncommitted --no-state
@@ -253,7 +264,7 @@ bridge を経由せずに起動したいときは、`--no-codex-agent` を付け
    経路設定で拒否されるときは、パターン A の確認の前置きに従います。
 
 2. 出力（stdout）に「Codex でレビューを実行します: codex-agent.sh 経由 (定義: codex-review)」と出て、続く `codex-agent: agent=codex-review` の監査行に `sandbox=read-only` が出れば成功です。監査行の `codex_home=` で、bridge の定義どおりの認証ホームを使っていることも確かめます。
-3. 「bridge が未導入のため直接起動へ切り替えます。」と出るときは、bridge の `codex-review` の定義が配置されていないか、`codex` コマンドが見つかっていません。bridge の導入手順の確認を行います。
+3. 直接起動が選ばれるときは、bridge、bash、または利用者側の定義が配置されているか確認します。Codex 不在の照会結果はエラーになるので、PATH を確認します。
 4. 「approval_policy=never を明示していないため直接起動へ切り替えます」と出るときは、bridge を更新して `codex-agent.sh` を配置し直します。
 
 ## パターン D: + agent-cockpit

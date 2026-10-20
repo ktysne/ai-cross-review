@@ -147,9 +147,7 @@ const SAFE_REF_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const CODEX_AGENT_SCRIPT_SUBPATH = ['.claude', 'tools', 'codex-agent.sh'];
 
 // bridge 経由で使う定義名。サンドボックスは定義ファイル側の codex_sandbox で決まるため、
-// 「レビューのみは read-only、--fix のときだけ workspace-write」の不変条件は、定義名の選択と
-// 起動前の codex_sandbox 検査 (checkCodexAgentSandbox) の両方で守る。
-// codex-review = read-only / codex-subagent = workspace-write。
+// 定義名を選んだ後も実効サンドボックスを検証し、レビューのみでの書き込みを防ぐ。
 const CODEX_AGENT_REVIEW_NAME = 'codex-review';
 const CODEX_AGENT_FIX_NAME = 'codex-subagent';
 
@@ -1918,6 +1916,8 @@ function codexAgentNameFor(opts) {
   return opts.fix ? CODEX_AGENT_FIX_NAME : CODEX_AGENT_REVIEW_NAME;
 }
 
+// 以下の旧版解析は、最低対応版を bridge 4a48688 (PR #170、--describe が protocol 1 を返す版) 以降にしたら削除可能。
+
 // 定義ファイルのフロントマター (先頭行の `---` から次の `---` まで) から 1 キーの値を取り出す。
 // 解釈は codex-agent.sh の fm_get と揃える:
 //   - 前方一致した最初の行だけを使う (`<key>:` は行頭から)
@@ -2057,15 +2057,7 @@ function checkCodexAgentSandbox({ fix, sandbox } = {}) {
   return { ok: sandbox === expected, expected, actual: sandbox };
 }
 
-// codex-agent.sh が承認方針を never に固定しているかを判定する純粋関数。
-// スクリプトが codex への追加引数を受け付けない以上、この明示が無ければ承認方針は
-// codex の config.toml 次第になり、「Codex の承認は never 固定」を保証できない。
-// 文字列の存在ではなく「codex exec の呼び出し (行末の \\ による継続行を含む) の引数に
-// -c approval_policy=never がある」ことを要求する。コメント (# 以降) は行末のものも含めて
-// 取り除き、echo 等の別コマンドの引数は数えない (どちらも codex の起動引数に乗らないため)。
-// 引用符の有無 (-c approval_policy=never / -c "approval_policy=never" / -c 'approval_policy=never')
-// は問わない。判定は文字列ベースなので、bridge スクリプトが変数展開や関数経由で引数を組み立てる
-// 形に変わったら追従が要る (そのときは直接起動へ戻るだけで、不変条件は破れない)。
+// 旧 bridge の承認方針は起動行の引数で検査する。最低対応版を bridge 4a48688 (PR #170、protocol 1) 以降にしたら削除可能。
 const APPROVAL_NEVER_ARG_PATTERN = /(^|\s)-c\s+["']?approval_policy=never["']?(\s|$)/;
 function scriptPinsApprovalNever(text) {
   const lines = String(text == null ? '' : text).split(/\r?\n/);
@@ -2090,10 +2082,92 @@ function scriptPinsApprovalNever(text) {
   });
 }
 
-// bridge 経由の起動可否を判定し、起動コマンドを組み立てる。
-// ホーム側定義が GPT 側を止めている場合は、承認検査より先に代替プロンプトへ切り替える。
-// 定義があれば承認方針とサンドボックスを検証し、無ければ bridge に委ねる。
+const CODEX_AGENT_DESCRIBE_TIMEOUT_MS = 15_000;
+
 function codexAgentInvocation(script, opts, deps = {}) {
+  const cwd = deps.cwd || process.cwd();
+  const agentName = codexAgentNameFor(opts);
+  const resolved = resolveReviewerCommandForSpawn('bash', deps);
+  const query = deps.spawnSync || spawnSync;
+  const fail = (reason) => ({
+    error: `bridge の照会に失敗したため起動しません: ${reason}\n`
+      + '  --no-codex-agent で直接起動できます。',
+    exitCode: 1,
+  });
+  let result;
+  try {
+    result = query(resolved.cmd, [script, '--describe', agentName, '-C', cwd], {
+      cwd,
+      shell: resolved.shell,
+      env: deps.env || process.env,
+      encoding: 'utf8',
+      timeout: CODEX_AGENT_DESCRIBE_TIMEOUT_MS,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    return fail(`${err.code || 'spawn'}: ${err.message}`);
+  }
+  if (result.error) {
+    if (result.error.code === 'ENOENT') return null;
+    return fail(`${result.error.code || 'spawn'}: ${result.error.message}`);
+  }
+  let description;
+  let hasJson = false;
+  try {
+    description = JSON.parse(result.stdout);
+    hasJson = true;
+  } catch {}
+  const stderr = String(result.stderr || '');
+  if (result.status === 2 && !hasJson
+    && stderr.includes('不明なオプション') && stderr.includes('--describe')) {
+    return legacyCodexAgentInvocation(script, opts, deps);
+  }
+  const detail = `終了コード ${result.status}${result.signal ? ` (${result.signal})` : ''}`
+    + (stderr ? `: ${stderr.split(/\r?\n/)[0]}` : '');
+  if (result.status !== 0) return fail(detail);
+  if (!hasJson) return fail(`${detail}: stdout が JSON ではありません`);
+  if (description?.protocol !== 1) return fail(`${detail}: protocol=${description?.protocol}`);
+
+  const definitionPath = description.definition?.user ?? description.definition?.project ?? null;
+  if (description.status === 'disabled') {
+    if (description.reason === 'definition-not-found') return null;
+    if (['codex-disabled', 'model-unset'].includes(description.reason)) {
+      return { fallbackCause: 'definition-disabled', definitionPath };
+    }
+    return fail(`status=disabled reason=${description.reason}: ${description.message}`);
+  }
+  if (['invalid', 'unreadable'].includes(description.status)) {
+    return fail(`status=${description.status} reason=${description.reason}: ${description.message}`);
+  }
+  if (description.status !== 'ok') {
+    return fail(`status=${description.status} message=${description.message} launch_exit=${description.launch_exit}`);
+  }
+  const expected = opts.fix ? CODEX_SANDBOX_WORKSPACE_WRITE : CODEX_SANDBOX_READ_ONLY;
+  if (description.sandbox !== expected) {
+    return fail(`定義 ${agentName} の codex_sandbox が ${description.sandbox} です`
+      + ` (${opts.fix ? '--fix では' : 'レビューのみでは'} ${expected} が必要): ${definitionPath}`);
+  }
+  if (description.approval_policy !== 'never') {
+    return fail(`定義 ${agentName} の approval_policy が ${description.approval_policy} です (never が必要): ${definitionPath}`);
+  }
+  return {
+    cmd: 'bash',
+    args: [script, agentName, '-C', cwd],
+    cwd,
+    via: 'agent',
+    agentName,
+    scriptPath: script,
+    codexDefinitionPresent: description.definition?.user != null,
+    definitionPath,
+    notice: opts.fix
+      ? `Codex にレビュー + 検出事項の修正を依頼します (作業ツリーを編集します): codex-agent.sh 経由 (定義: ${agentName})\n`
+      : `Codex でレビューを実行します: codex-agent.sh 経由 (定義: ${agentName})\n`,
+  };
+}
+
+// 最低対応版を bridge 4a48688 (PR #170、--describe が protocol 1 を返す版) 以降にしたら削除可能。
+function legacyCodexAgentInvocation(script, opts, deps = {}) {
   const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
   const warn = deps.warn || ((m) => process.stderr.write(m));
   const agentName = codexAgentNameFor(opts);
@@ -2138,6 +2212,7 @@ function codexAgentInvocation(script, opts, deps = {}) {
   return {
     cmd: 'bash',
     args: [script, agentName, '-C', cwd],
+    cwd,
     via: 'agent',
     agentName,
     scriptPath: script,
@@ -2149,20 +2224,14 @@ function codexAgentInvocation(script, opts, deps = {}) {
   };
 }
 
-// reviewer / fix から「起動コマンド、引数、端末通知」を決める純粋関数。
-// 主変更点 (どのレビュアーをどのサンドボックスで呼ぶか) を spawn 抜きで検証できるよう、
-// runReview の配線部分を分離する。stdin に渡すプロンプトは prompt をそのまま使う。
-// codex は codex-agent.sh (bridge) があればそれを経由し (via: 'agent')、無ければ
-// codex を直接起動する (via: 'direct')。via は終了分類 (classifyReviewerExit) と
-// bridge 未導入時の再起動判断に使う。deps は resolveCodexAgentScript / codexAgentInvocation へ
-// 渡す (env / homedir / exists / readFile / warn) ほか、bridge へ渡す作業ディレクトリ
-// (deps.cwd) を差し替える。
+// bridge があれば公開照会で起動可否を決め、無ければ直接起動する。
+// deps.spawnSync で照会を、deps.cwd で照会と起動の作業ディレクトリを差し替えられる。
 // 戻り値に error があるときは起動してはいけない (呼び出し側がエラー終了する)。
 function reviewerInvocation(opts, deps = {}) {
   if (opts.reviewer === 'codex') {
     // --no-codex-agent (codexAgent === false) は解決自体を行わず、常に直接起動する。
     const script = opts.codexAgent === false ? null : resolveCodexAgentScript(deps);
-    // bridge 経由が不変条件 (承認 never 固定) を満たせないときは null が返るので直接起動へ落ちる。
+    // null は直接起動、error は起動拒否、fallbackCause は代替プロンプトを表す。
     const agentInv = script ? codexAgentInvocation(script, opts, deps) : null;
     if (agentInv) return agentInv;
     return {
@@ -2284,13 +2353,14 @@ function createStreamCollector() {
 // onExit は終了時に 1 回だけ { code, outputTail, output, truncated, error } で呼ぶ
 // (runReview が outputTail を終了分類に、output を `.cross-review/` への保存に使い、
 //  truncated なら保存本文の先頭へ切り詰めの注記を足す)。
-function spawnReviewer(cmd, args, stdinText, onExit, environment = process.env) {
+function spawnReviewer(cmd, args, stdinText, onExit, environment = process.env, cwd = process.cwd()) {
   const resolved = resolveReviewerCommandForSpawn(cmd);
   const child = spawn(resolved.cmd, args, {
     stdio: ['pipe', 'pipe', 'pipe'],
     // Windows では .cmd/.bat shim のことがあるため、その場合だけ shell 経由にする。
     shell: resolved.shell,
     env: environment,
+    cwd,
   });
   // 転送側は Buffer のまま書いてバイト列を保ち、保持側は収集器 (StringDecoder) に任せる。
   // stdout と stderr は別々にデコードする (混ぜると片方の未完成バイト列がもう片方の先頭に
@@ -2767,11 +2837,9 @@ function runReview(opts, deps = {}) {
   // スコープ表記と起動引数が将来食い違わないよう、解決後の値だけを下流に渡す)。
   const inv = reviewerInvocation(resolvedOpts, invDeps);
   if (inv.error) {
-    // 定義ファイルの codex_sandbox が --fix の有無と食い違う。レビューのみで書き込み可能な
-    // 定義を使わせないため、レビュアーを起動せずエラー終了する (引数エラーと同じ終了コード 2)。
     writeErr(`[cross-review] ${inv.error}\n`
-      + '  定義ファイルの codex_sandbox を直すか、--codex-agent で適切な定義を指定してください。\n');
-    process.exitCode = 2;
+      + (inv.exitCode ? '' : '  定義ファイルの codex_sandbox を直すか、--codex-agent で適切な定義を指定してください。\n'));
+    process.exitCode = inv.exitCode || 2;
     return null;
   }
   if (inv.fallbackCause) {
@@ -2849,7 +2917,7 @@ function runReview(opts, deps = {}) {
       // 書き出した時点で記録すると、プロンプトを渡さずに再実行したとき未レビューの差分が
       // 「差分なし」になって再試行できなくなる。記録は `state --mark` で利用者が行う。
       writeFallback(classification.cause);
-    }, reviewerEnvironment);
+    }, reviewerEnvironment, invocation.cwd || invDeps.cwd || process.cwd());
   };
   return start(inv);
 }

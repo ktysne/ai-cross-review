@@ -716,7 +716,7 @@ describe('cross-review resolveCodexAgentScript (bridge の解決順)', () => {
   });
 });
 
-describe('cross-review reviewerInvocation (bridge 経由の codex 起動)', () => {
+describe('cross-review reviewerInvocation (旧 bridge 経由の codex 起動)', () => {
   const scriptPath = path.join('/home/u', '.claude', 'tools', 'codex-agent.sh');
   // bridge 経由はスクリプトが approval_policy=never を明示している場合に限るので、
   // 既定の擬似スクリプトには明示済みの本文を入れる。
@@ -732,6 +732,7 @@ describe('cross-review reviewerInvocation (bridge 経由の codex 起動)', () =
       env: {},
       homedir: '/home/u',
       cwd: '/repo',
+      spawnSync: () => ({ status: 2, stdout: '', stderr: '不明なオプションである: --describe' }),
       warn: () => {},
       exists: (p) => Object.prototype.hasOwnProperty.call(files, p),
       readFile: (p) => {
@@ -3042,6 +3043,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
       cwd: '/repo',
       tmpdir: '/tmp',
       pid: 7,
+      spawnSync: () => ({ status: 2, stdout: '', stderr: '不明なオプションである: --describe' }),
       ...rest,
     };
   };

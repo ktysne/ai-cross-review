@@ -13,6 +13,7 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:bridge": "vitest run tests/cross-review.bridge-compat.test.js",
     "lint": "eslint .",
     "review:codex": "node tools/cross-review.js codex",
     "review:codex:fix": "node tools/cross-review.js codex --fix",
