@@ -45,7 +45,7 @@ claude-codex-bridge と agent-cockpit もまとめて入れるときは、agent-
 
 | パターン | 確かめること |
 |---|---|
-| ai-cross-review だけ | `node tools/cross-review.sync.js --check` がドリフト無しで終わる。`node tools/cross-review.js subagent --uncommitted --no-state` がレビュー用プロンプトを出す。`git check-ignore` で `.cross-review-state.json` と `.cross-review/` が無視の対象になっている。 |
+| ai-cross-review だけ | `node tools/cross-review.js sync --check` がドリフト無しで終わる。`node tools/cross-review.js subagent --uncommitted --no-state` がレビュー用プロンプトを出す。`git check-ignore` で `.cross-review-state.json` と `.cross-review/` が無視の対象になっている。 |
 | + GitHub CLI | PR のあるブランチで `node tools/cross-review.js subagent --no-state` を実行すると、stderr の `base:` の行に `(PR の base)` と出る。 |
 | + claude-codex-bridge | `npm run review:codex` の出力に「codex-agent.sh 経由 (定義: codex-review)」と出る。 |
 | + agent-cockpit | ダッシュボードの「経路の設定」で選んだレビュアーを、`node tools/cross-review.js route` が返す。 |

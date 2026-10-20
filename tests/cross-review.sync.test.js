@@ -5,12 +5,15 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import fs from 'node:fs';
 
 const require = createRequire(import.meta.url);
 const {
   parseArgs,
   loadManifest,
   validateManifest,
+  isNewFormManifest,
+  LEGACY_FORM_SOURCES,
   applyReplacements,
   assertWithinRoot,
   computeSyncPlan,
@@ -1173,5 +1176,102 @@ describe('runSync のマニフェスト行末', () => {
     const written = syncWithManifest(raw);
     expect(written).toContain('\n');
     expect(written).not.toContain('\r');
+  });
+});
+
+
+describe('新形式の配布と旧形式との共存', () => {
+  const entry = { from: 'tools/cross-review.entry.js', to: 'tools/cross-review.js' };
+  const legacy = { from: 'tools/cross-review.js', to: 'tools/cross-review.js' };
+  const example = JSON.parse(fs.readFileSync(new URL('../tools/cross-review.sync.example.json', import.meta.url), 'utf8'));
+  const manifest = (files) => ({ upstream: { repo: 'x', ref: 'main' }, files });
+
+  beforeEach(() => { process.exitCode = 0; });
+  afterAll(() => { process.exitCode = 0; });
+
+  it('入口を配り、同期スクリプトの写しがない場合だけ新形式になる', () => {
+    expect(isNewFormManifest(manifest([entry]))).toBe(true);
+    expect(isNewFormManifest(manifest([legacy]))).toBe(false);
+    expect(isNewFormManifest(manifest([entry, { from: 'tools/cross-review.sync.js', to: 'tools/cross-review.sync.js' }]))).toBe(false);
+    expect(isNewFormManifest({})).toBe(false);
+  });
+
+  it.each([
+    ['tools/cross-review.js', 'tools/cross-review.js'],
+    ['./tools/cross-review.js', 'tools\\cross-review.js'],
+    ['tools/sub/../cross-review.js/', 'tools//cross-review.js'],
+  ])('正規化して同じ to を拒否する: %s / %s', (first, second) => {
+    const m = manifest([{ ...legacy, to: first }, { ...entry, to: second }]);
+    expect(() => validateManifest(m)).toThrow(/files\[0\].*files\[1\].*入口だけを足した場合/);
+  });
+
+  it('Windows のときだけ to の大文字と小文字を区別しない', () => {
+    const m = manifest([legacy, { ...entry, to: 'TOOLS/CROSS-REVIEW.JS' }]);
+    expect(() => validateManifest(m, null, { platform: 'win32' })).toThrow(/重複/);
+    expect(() => validateManifest(m, null, { platform: 'linux' })).not.toThrow();
+  });
+
+  it.each([[], ['--check'], ['--dry-run'], ['--check-manifest']])('重複時は上流の取得も書き込みもせず exit 2: %j', (...args) => {
+    const writes = [];
+    const errors = [];
+    let prepared = false;
+    const result = runSync(parseArgs(args), {
+      scriptDir: '/proj/tools', platform: 'win32', exists: () => true,
+      readFile: () => JSON.stringify(manifest([legacy, { ...entry, to: './TOOLS/cross-review.js' }])),
+      writeFile: (...values) => writes.push(values),
+      prepareUpstream: () => { prepared = true; throw new Error('取得してはいけない'); },
+      err: (value) => errors.push(value),
+    });
+    expect(result).toBeNull();
+    expect(process.exitCode).toBe(2);
+    expect(prepared).toBe(false);
+    expect(writes).toEqual([]);
+    expect(errors.join('')).toContain('入口だけを足した場合');
+  });
+
+  const collect = (m) => collectMissingManifestEntries('/up', m, {
+    exists: () => true, readFile: () => JSON.stringify(example),
+  });
+
+  it('旧形式では新形式専用の未登録を列挙せず、既知の旧配布物だけ除外警告を抑える', () => {
+    expect(LEGACY_FORM_SOURCES).toHaveLength(9);
+    const result = collect({ ...manifest([legacy]), excludedFiles: [...LEGACY_FORM_SOURCES, 'removed/file.js'] });
+    expect(result).toMatchObject({ legacyForm: true, entries: [], staleExcludedFiles: ['removed/file.js'] });
+  });
+
+  it('新形式では未登録と古い除外を引き続き検査する', () => {
+    const result = collect({ ...manifest([entry]), excludedFiles: ['tools/cross-review.sync.js', 'removed/file.js'] });
+    expect(result.legacyForm).toBe(false);
+    expect(result.entries).toEqual(example.files.slice(1));
+    expect(result.staleExcludedFiles).toEqual(['tools/cross-review.sync.js', 'removed/file.js']);
+  });
+
+  it('旧形式の移行案内と判定を同期結果に残す', () => {
+    const files = new Map([
+      [path.resolve('/proj/tools/cross-review.sync.json'), JSON.stringify(manifest([legacy]))],
+      [path.resolve('/up/tools/cross-review.sync.example.json'), JSON.stringify(example)],
+      [path.resolve('/up/tools/cross-review.js'), 'body'],
+      [path.resolve('/proj/tools/cross-review.js'), 'body'],
+    ]);
+    const errors = [];
+    const result = runSync({ mode: 'check', checkManifest: true }, {
+      scriptDir: '/proj/tools',
+      exists: (p) => files.has(path.resolve(p)), readFile: (p) => files.get(path.resolve(p)),
+      prepareUpstream: () => ({ dir: '/up', commit: 'sha' }),
+      writeFile: () => { throw new Error('書き込み禁止'); },
+      out: () => {}, err: (value) => errors.push(value),
+    });
+    expect(result).toMatchObject({ legacyForm: true, missingManifestEntries: [] });
+    expect(errors.join('')).toMatch(/旧形式.*files\[\].*移行ノート/);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('雛形は新形式として検証でき、すべての配布元が実在する', () => {
+    expect(isNewFormManifest(example)).toBe(true);
+    expect(example.files).toHaveLength(3);
+    expect(() => validateManifest(example)).not.toThrow();
+    for (const { from } of example.files) {
+      expect(fs.existsSync(new URL('../' + from, import.meta.url))).toBe(true);
+    }
   });
 });

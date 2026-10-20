@@ -579,7 +579,142 @@ git rev-parse HEAD                                                  # レビュ�
 node tools/cross-review.js <reviewer> --base <そのSHA> --instructions <指摘ファイル>
 ```
 
+## 入口と本体
+
+新形式の導入先には、本体を呼ぶ入口だけを `tools/cross-review.js` として置きます。
+上流の配布元は `tools/cross-review.entry.js` です。
+同期の雛形は、この入口、`templates/cloud-skill/SKILL.md`、`templates/docs/cross-review.md` の3件を配ります。
+クラウド向けの SKILL は導入先の `.claude/skills/cross-review/SKILL.md`、手順書の案内版は `docs/cross-review.md` に置きます。
+ローカル向けの全手順は上流の `.claude/skills/cross-review/SKILL.md` を `--global-skill` でホームへ配ります。
+
+入口は次の順で本体を探します。
+
+1. 環境変数 `CROSS_REVIEW_ENGINE` の指す checkout。
+2. `~/.cross-review/engine.json` の `{ "checkout": "<絶対パス>" }` が指す checkout。
+3. マニフェストの `upstream.repo` と `upstream.ref` を shallow fetch したキャッシュ。
+
+環境変数が外れている場合や、登録ファイルを読めない、登録先を使えない場合はエラーで止まります。
+登録ファイルが無い場合だけキャッシュへ進みます。
+checkout の経路ではマニフェストの `upstream.ref` は本体の選択に使わず、main 以外ならその旨を警告します。
+登録した checkout が既定のブランチ以外、または未コミットの変更を含む場合も警告して続行します。
+開発には別の worktree を使い、登録した checkout は main に保ちます。
+
+### 本体の登録と照会
+
+上流の checkout で次を実行します。
+
+```bash
+node tools/cross-review.sync-all.js --register
+node tools/cross-review.sync-all.js --register --check
+node tools/cross-review.sync-all.js --register --check --json
+```
+
+`--register` は実行した checkout の絶対パスをホームの登録ファイルに書きます。
+linked worktree の登録は警告します。
+照会は実行した checkout ではなく、登録ファイルが指す checkout を調べます。
+`--register --check --json` の形は次のとおりです。
+
+```json
+{
+  "schemaVersion": 1,
+  "subject": "register",
+  "result": "clean",
+  "registry": { "path": "<登録ファイルの絶対パス>", "exists": true, "error": null },
+  "checkout": {
+    "path": "<登録した checkout のパス>",
+    "exists": true,
+    "engine": { "path": "<checkout>/tools/cross-review.js", "state": "ok", "entryProtocol": { "min": 1, "max": 1 } },
+    "head": { "branch": "main", "sha": "<40桁>", "defaultBranch": "main", "onDefaultBranch": true },
+    "dirty": false
+  },
+  "issues": []
+}
+```
+
+登録が無いときは `registry.exists: false`、`checkout: null`、`result: clean`、`issues: []` です。
+登録ファイルが読めない、不正な JSON、checkout が絶対パスの文字列でない場合は `registry.error` に理由を入れ、`checkout: null`、`result: error` です。
+checkout が無い場合は `exists: false`、`engine: null` とし、読めた項目だけ埋め、分からない項目は null にします。
+`engine.state` は ok / missing（本体無し）/ unloadable（require の失敗、時間切れ、不正な出力）/ no-protocol（照合用 export 無し）です。
+export が無ければ `entryProtocol` は null です。
+既定のブランチは `origin/HEAD` から読み、取れなければ main とします。
+detached HEAD は `branch: null`、`onDefaultBranch: false` です。
+未追跡を含む `git status --porcelain` の出力が空でなければ dirty です。
+HEAD の SHA、ブランチ、status の取得に失敗した場合、該当項目（ブランチの場合は onDefaultBranch も）は null とし、git-failed を報告します。
+
+| issues の code | 条件 |
+|---|---|
+| registry-unreadable | 登録ファイルを解釈できない |
+| checkout-missing | 登録先が無い |
+| engine-missing | 本体が無い |
+| engine-unloadable | 本体を読み込めない |
+| protocol-export-missing | 照合用 export が無い |
+| git-failed | SHA、ブランチ、status の取得失敗 |
+| not-on-default-branch | 既定のブランチ以外または detached |
+| dirty | 未コミットの変更あり |
+
+issues は該当する `{ "code": "...", "message": "日本語の理由" }` をすべて並べます。
+登録無しと正常な登録先は clean（終了コード0）、既定のブランチ以外や dirty は drift（1）、登録先が使えない場合は error（3）です。
+error は drift より優先します。
+引数エラーは2で、`--json` は `--register --check` 単独（または既存の `--global-skill --check` 単独）でだけ受け付けます。
+0、1、3のいずれでも stdout は JSON 1個だけで、案内や警告は stderr に出ます。
+引数エラーでは JSON を出しません。
+JSON を指定しない照会は、人向けの表示で同じ終了コードを返します。
+
+### キャッシュと版の照合
+
+キャッシュのルートは `XDG_CACHE_HOME/ai-cross-review`、Windows の `LOCALAPPDATA/ai-cross-review`、`~/.cache/ai-cross-review`、一時ディレクトリの `ai-cross-review` の順で選びます。
+解決したコミットごとに `engines/<SHA>` へ取得し、取得時は SHA を stderr に1行出します。
+ブランチやタグは通常毎回問い合わせ、`refs.json` に repo と ref ごとの最後の SHA を記録します。
+`CROSS_REVIEW_NO_FETCH=1` またはネットワークの失敗時は、最後の SHA のキャッシュだけを使い、無ければ明示のエラーで止まります。
+40桁の SHA を指定した場合は問い合わせを省き、その SHA を使います。
+使用中の本体と記録された最新 SHA のキャッシュを残し、不要なキャッシュは本体の起動時に整理します。
+
+入口は整数の `ENTRY_PROTOCOL` を本体に渡し、本体が `ENTRY_PROTOCOL_RANGE` の範囲と照合します。
+対応外なら、古い側の checkout または入口を更新する案内を出し、終了コード2で止まります。
+照合用 export が無い古い本体も終了コード2です。
+
+### 導入先での sync と engine
+
+`node tools/cross-review.js sync` は本体側の同期処理を、導入先のルートと `tools/cross-review.sync.json` を指定して呼びます。
+`--check`、`--dry-run`、`--check-manifest`、`--ref` を使えますが、`--root` と `--manifest` は指定できません。
+成功は0、ドリフトは1、引数やマニフェストの誤りは2、上流の取得や同期プランの算出に失敗して確かめられなかった場合は3です。
+`node tools/cross-review.js engine` は使用中の本体を JSON で表示し、成功時は0です。
+JSON は schemaVersion、subject（engine）、engineSource（env / registry / cache）、enginePath、checkout、entryProtocol、acceptedEntryProtocol、projectRoot を持ちます。
+どちらも入口専用のサブコマンドで、旧形式の本体の写しから呼ぶと終了コード2です。
+
+### 旧形式との共存とマニフェスト検査
+
+旧形式は本体と同期スクリプトの写しで動き、新形式が使う checkout とは独立しています。
+新しい本体を旧形式の同期スクリプトで取り込んでも、従来の projectRoot を渡さない使い方を維持します。
+`files[]` に from が `tools/cross-review.sync.js` の項目が無く、to が `tools/cross-review.js` の項目の from が `tools/cross-review.entry.js` の場合を新形式と判定します。
+マニフェストに版のフィールドはありません。
+
+同じ to が複数ある場合は、同期、check、dry-run、check-manifest のすべてで、何も書かず終了コード2で止まります。
+比較はバックスラッシュをスラッシュへそろえ、POSIX のパス正規化を行い、先頭の ./ と末尾の / を除き、Windows では大文字と小文字を区別しません。
+エラーには重なる to と files の添字を表示します。
+旧形式の files に入口だけを足すとこの重複になるため、エラーではその項目を files から外すよう案内します。新形式への移行は、files の一部を足すのでなく、まとめて行う必要があります。
+
+旧形式の check-manifest は新形式専用の3配布物を未登録に数えず、files に足さずまとめて移行するよう案内します。
+戻り値の legacyForm でも区別でき、一括検査の集計にも案内を残します。
+旧形式の古い除外の警告を抑える from は次の一覧だけです。
+
+- `tools/cross-review.js`
+- `tools/cross-review.sync.js`
+- `tools/cross-review.sync-all.js`
+- `docs/cross-review.md`
+- `.cross-review.example.md`
+- `.claude/skills/cross-review/SKILL.md`
+- `tests/cross-review.test.js`
+- `tests/cross-review.sync.test.js`
+- `tests/cross-review.sync-all.test.js`
+
+一覧に無い除外（例 removed/file.js）は、旧形式でも今までどおり警告します。
+新形式では通常の未登録と古い除外の検査を使います。
+
 ## 同期スクリプト（tools/cross-review.sync.js）
+
+以下は旧形式の同期スクリプトの写しを使う場合の説明です。
+新形式では同じオプションを `node tools/cross-review.js sync` に渡します。
 
 「そのままコピーするファイル」（CLI 本体、この手順書、観点テンプレート、テスト等）を、上流リポジトリから取り込み先プロジェクトへ取り込むスクリプトです。  
 手で 1 ファイルずつ上書きコピーする代わりに、マニフェストに従って機械的に同期します（手動コピー運用の置き換え）。  
@@ -625,7 +760,8 @@ node tools/cross-review.js <reviewer> --base <そのSHA> --instructions <指摘�
 
 `excludedFiles` には、取り込み先の判断で意図して取り込まない配布物を指定します（例：テストの基盤が無いので vendored テストを取り込まない）。指定したパスが上流の雛形から無くなると、`--check-manifest` は古い除外として警告します。
 
-上の `files` は代表例です。配布物一式の雛形は `tools/cross-review.sync.example.json` にあり、こちらが正本です（CLI 本体、同期スクリプト、一括同期ツール `cross-review.sync-all.js`、手順書、観点テンプレート、**Claude Code スキル `.claude/skills/cross-review/SKILL.md`**、各テストを含む）。  
+上の `files` は旧形式の例です。
+現在の `tools/cross-review.sync.example.json` は入口、クラウド向けの SKILL、手順書の案内版だけを配る新形式の正本です。  
 このマニフェスト自体は**取り込み先で編集するファイル**です（上書きコピーの対象に含めない）。  
 `.cross-review.md`（観点）や `CLAUDE.md` / `AGENTS.md` などプロジェクト固有のファイルは `files` に入れません（上書きで消えます）。
 
@@ -658,11 +794,11 @@ since: 035a746efba75fb4f2cbbff7f0d3576fef6575ab
 - `.cross-review.md` に「指摘の出し方」4 項目を足す。
 ```
 
-**取り込み先の更新手順**：`node tools/cross-review.sync.js` で同期する → 表示された移行ノートの作業を行う → lint とテストを回す、の順です。  
+**取り込み先の更新手順**：`node tools/cross-review.js sync`（旧形式は `node tools/cross-review.sync.js`） で同期する → 表示された移行ノートの作業を行う → lint とテストを回す、の順です。  
 ノートの作業は同期スクリプトが代行しないので、表示されたら必ず人が対応してください。  
 移行ノートの表示は同期スクリプト自身の機能なので、この機能より前のバージョンから更新する初回だけは、取り込み先に残っている古いバージョンのスクリプトが動いてノートが出ません。  
 そのときは同期をもう一度実行する（1 回目で新しいバージョンに置き換わり、2 回目で未読のノートが出ます）か、上流の checkout から `tools/cross-review.sync-all.js` を使ってください（この checkout の同期ロジックで回るため、初回からノートが出ます）。  
-上流が新しい配布物を増やしていないかは `node tools/cross-review.sync.js --check-manifest` で確認できます（未登録のエントリを列挙し、古い除外を警告します。書き込みはしないので、必要なものだけ `files[]` に足してください）。
+上流が新しい配布物を増やしていないかは `node tools/cross-review.sync.js --check-manifest` で確認できます（未登録のエントリを列挙し、古い除外を警告します。新形式では必要なものだけ `files[]` に足します。旧形式では新形式の配布物を足さず、まとめて移行してください）。
 
 **未読の判定（`shownMigrations`）**：マニフェストの `shownMigrations` に、表示済みノートのファイル名を配列で記録します。  
 記録に無いノートが未読です。記録は既存の値を保ったまま未読分を足すので、上流から消えたノートも再表示されません。  
@@ -774,8 +910,9 @@ node tools/cross-review.sync-all.js --global-skill            # 配る
 npm run sync:global                                           # = 上と同じ（このリポジトリの scripts）
 ```
 
-`--json` は `--global-skill --check` かつ `--root`（位置引数を含む）無しでのみ受け付けます。
-`--global-skill` 無し、`--check` 無し、`--root`、`--list`、`--dry-run` との併用は引数エラー（exit 2）です。
+グローバル SKILL の照会では、`--json` は `--global-skill --check` かつ `--root`（位置引数を含む）無しで受け付けます。
+本体の登録の照会では、前述の `--register --check --json` を使います。
+グローバル SKILL の `--json` は、`--check` 無し、`--root`、`--list`、`--dry-run` との併用では引数エラー（exit 2）です。
 引数エラー以外では、配布元を読めない場合も必ず stdout に JSON だけを出し、末尾に改行を 1 つ付けます。
 配布元の案内行や人向けの集計は出しませんが、対象外の警告は stderr に出ます。
 
@@ -814,19 +951,19 @@ JSON は次の形です（パスとハッシュは例示用の値です）。
 - `reason` は `skipped` / `unreadable` なら必ず文字列、それ以外は null です。重複の場合は「`<先の id> と同じパス`」です。
 - `result` は正本を読めないか `unreadable` があれば `error`、それ以外で `stale` があれば `drift`、それ以外は `clean` です。終了コードはそれぞれ 3 / 1 / 0 です。
 
-> 引数解析、プロジェクト走査、結果分類、集計、一括同期の配線は `tests/cross-review.sync-all.test.js`（vitest）が担保します（取り込み先では任意。一括同期ツールを入れ、かつ vitest を使うときだけ同梱）。
+> 引数解析、プロジェクト走査、結果分類、集計、一括同期の配線は `tests/cross-review.sync-all.test.js`（vitest）が担保します（上流で検証し、新形式の導入先へは配りません）。
 
 ```bash
-node tools/cross-review.sync.js            # 上流から取り込む（差分のあるファイルだけ上書き）
-node tools/cross-review.sync.js --check    # ドリフト検査のみ（書き込まない。差分があれば exit 1）
-node tools/cross-review.sync.js --dry-run  # 何が変わるかだけ表示（書き込まない）
-node tools/cross-review.sync.js --ref v1.2.3   # 取り込むバージョンをマニフェストより優先
-node tools/cross-review.sync.js --check-manifest  # 未登録配布物と古い除外の確認（--check を含意。書き込まない）
+node tools/cross-review.js sync            # 上流から取り込む（差分のあるファイルだけ上書き）
+node tools/cross-review.js sync --check    # ドリフト検査のみ（書き込まない。差分があれば exit 1）
+node tools/cross-review.js sync --dry-run  # 何が変わるかだけ表示（書き込まない）
+node tools/cross-review.js sync --ref v1.2.3   # 取り込むバージョンをマニフェストより優先
+node tools/cross-review.js sync --check-manifest  # 未登録配布物と古い除外の確認（--check を含意。書き込まない）
 ```
 
 > 取り込み元の取得は git のネットワークアクセスを使います。  
 > サンドボックス内では fetch に失敗することがあるため、必要に応じてネットワークを許可して実行してください。  
-> 引数解析、マニフェスト検証、置換、同期プラン算出、同期/検査の配線は `tests/cross-review.sync.test.js`（vitest）が担保します（取り込み先では任意。vitest を使うときだけ同梱）。
+> 引数解析、マニフェスト検証、置換、同期プラン算出、同期/検査の配線は `tests/cross-review.sync.test.js`（vitest）が担保します（上流で検証し、新形式の導入先へは配りません）。
 
 ## 取り込み先の CLAUDE.md / AGENTS.md に書くこと（テンプレート）
 
@@ -837,7 +974,8 @@ node tools/cross-review.sync.js --check-manifest  # 未登録配布物と古い�
 ```markdown
 ## AI 相互レビュー（Claude ↔ Codex）
 
-相互レビューの手順の正本は [docs/cross-review.md](docs/cross-review.md)（vendored）と、
+相互レビューの手順書は [docs/cross-review.md](docs/cross-review.md) の案内から参照できます。
+ローカルの全手順は
 グローバル SKILL `~/.claude/skills/cross-review/SKILL.md` です。
 このリポジトリ固有のレビュー観点は `.cross-review.md` にあります。
 
@@ -854,14 +992,16 @@ node tools/cross-review.sync.js --check-manifest  # 未登録配布物と古い�
 既定のレビュアーは実装者と別のベンダーです。実装を一区切りしたら 3 択を `AskUserQuestion` で提示します（詳細は SKILL）。
 ```
 
-クラウド実行などグローバル SKILL を置けない環境の取り込み先では、これまでどおり `.claude/skills/cross-review/SKILL.md` を `files[]` に入れて vendored のまま同期を続けて構いません（グローバルと vendored のどちらか一方が最新であればよい）。
+新形式の導入先には `templates/cloud-skill/SKILL.md` を `.claude/skills/cross-review/SKILL.md` に写します。
+ローカルではホームの同名 SKILL が優先され、クラウドではプロジェクトの写しを使います。
 
 > **提案（ユーザ側の設定）**：グローバル `CLAUDE.md` の相互レビュー節も、同じ理由で「SKILL への参照」と「Codex の性質と取り扱い」の注記だけに縮められます（ユーザ自身の設定ファイルなので、この文書では提案に留めます）。
 
 ## 観点チェックリスト（.cross-review.md）
 
 レビュアーへ渡す観点は、リポジトリ直下の `.cross-review.md` から読み込みます。  
-探す順は `環境変数 CROSS_REVIEW_CHECKLIST（パス）→ <cwd>/.cross-review.md → <スクリプト>/../.cross-review.md → 組み込みの汎用観点（GENERIC_CHECKLIST）` です。  
+入口から呼ぶ場合は `環境変数 CROSS_REVIEW_CHECKLIST（パス）→ <cwd>/.cross-review.md → <導入先>/.cross-review.md → 組み込みの汎用観点（GENERIC_CHECKLIST）` の順です。
+旧形式では導入先の代わりに `<スクリプト>/../.cross-review.md` を探します。  
 どれも無くても汎用観点で動きます（起動時に stderr へ警告）。  
 `CROSS_REVIEW_CHECKLIST` を指定したのに読めないときは、黙って次へ進まず警告を出します。
 

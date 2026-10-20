@@ -15,22 +15,24 @@ ai-cross-review 自体を開発するときの入口です。利用者向けの�
 
 ## 配布物
 
-導入先へは、同期スクリプトがファイル単位で配ります。配布物の一覧の正本は `tools/cross-review.sync.example.json` です。配布物を増やしたり減らしたりしたら、この雛形を直します。導入先は `node tools/cross-review.sync.js --check-manifest` で取りこぼしに気づけます。
+導入先へは、同期スクリプトがファイル単位で配ります。
+配布物の一覧の正本は `tools/cross-review.sync.example.json` です。
+配布物を増やしたり減らしたりしたら、この雛形を直します。
+導入先は `node tools/cross-review.js sync --check-manifest` で取りこぼしに気づけます。
 雛形そのものは同期では配りません。導入先は導入手順の手順 1 でコピーして `tools/cross-review.sync.json` を作り、そちらを編集します。
 
 ### そのまま配るファイル（導入先では編集しない）
 
-| ファイル | 役割 | 導入先での扱い |
-|----------|------|----------------|
-| `tools/cross-review.js` | CLI 本体 | そのまま |
-| `tools/cross-review.sync.js` | 同期スクリプト（上流から取り込む / ドリフト検査） | そのまま |
-| `tools/cross-review.sync-all.js`（任意） | 一括同期ツール（作業ルート配下の導入先をまとめて同期、グローバル SKILL の配布） | 複数の導入先をまとめて更新する人だけ入れる |
-| `.claude/skills/cross-review/SKILL.md`（任意） | 相互レビューの実行手順（Claude Code スキル、汎用） | そのまま。プロジェクト固有の運用は書かない |
-| `tests/cross-review.test.js`（任意） | 本体のユニットテスト（vitest） | 導入先が vitest のときだけ。require のパスを導入先の配置に合わせる |
-| `tests/cross-review.sync.test.js`（任意） | 同期スクリプトのユニットテスト（vitest） | 同上 |
-| `tests/cross-review.sync-all.test.js`（任意） | 一括同期ツールのユニットテスト（vitest） | 一括同期ツールを入れ、かつ vitest のときだけ |
-| `.cross-review.example.md` | 観点のテンプレート | コピーして `.cross-review.md` を作り、そちらを編集する |
-| `docs/cross-review.md` | 相互レビューの手順書（汎用） | そのまま。ファイルは名前で参照していて、置き場所が変わっても壊れない |
+| 上流の配布元 → 導入先 | 役割 | 導入先での扱い |
+|---|---|---|
+| `tools/cross-review.entry.js` → `tools/cross-review.js` | 本体を探して呼ぶ入口 | そのまま |
+| `templates/cloud-skill/SKILL.md` → `.claude/skills/cross-review/SKILL.md` | Claude のクラウド向け手順 | そのまま |
+| `templates/docs/cross-review.md` → `docs/cross-review.md` | 上流の手順書への案内 | そのまま |
+
+本体、同期処理、テストは上流の checkout またはキャッシュに置き、導入先へは配りません。
+旧形式の導入先は本体や同期スクリプトの写しで動き、同期は `node tools/cross-review.sync.js` を使います。
+上流の `.claude/skills/cross-review/SKILL.md` はローカル向けの全手順として維持し、`--global-skill` でホームへ配ります。
+
 
 ### 導入先が編集するファイル（配らない）
 

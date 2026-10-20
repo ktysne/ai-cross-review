@@ -5,10 +5,9 @@ description: 実装を一区切りした後の AI 相互レビュー (Claude↔C
 
 # AI 相互レビューの実行手順
 
-> **汎用 SKILL（vendored）**。`tools/cross-review.sync.js` で upstream
-> ([ai-cross-review](https://github.com/ktysne/ai-cross-review)) から**上書き更新される対象**。直接編集せず、
-> 変更は upstream に入れて再同期する。**プロジェクト固有の運用**（検証コマンド、CI、同期スクリプト名、
-> ファイル配置など）はこの SKILL に書かず、`.cross-review.md`（観点）と各リポの doc（任意の overlay）へ分離する。
+このファイルはローカル向けの全手順の正本で、`node tools/cross-review.sync-all.js --global-skill` でホームへ配る。
+導入先のプロジェクトには `templates/cloud-skill/SKILL.md` のクラウド向け手順を同期する。
+プロジェクト固有の運用は `.cross-review.md` と各リポジトリの文書に書く。
 
 **汎用フローの正本**は `docs/cross-review.md`（取り込み先で別名、別配置のことがあるので、パスでなく名前で参照する）。
 レビュー観点はリポジトリ直下の `.cross-review.md` が単一ソース（CLI が自動添付する）。
@@ -166,10 +165,15 @@ PR があるときに省略した場合、`cockpit_skip_review` ツール (agent
 
 ## 基盤の更新
 
-vendored ファイル (`tools/cross-review.js` / `tools/cross-review.sync.js` / `docs/cross-review.md` / `.cross-review.example.md` / この SKILL) は直接編集せず、**upstream ([ai-cross-review](https://github.com/ktysne/ai-cross-review)) を直して `tools/cross-review.sync.js` で再同期**する（スクリプト名はプロジェクトの `package.json` 次第。例：`npm run sync` / `npm run sync:check`）。
+新形式の配布物（入口、クラウド向けの SKILL、手順書の案内版）は直接編集せず、upstream を直して `node tools/cross-review.js sync` で再同期する。
+旧形式では `node tools/cross-review.sync.js` を使う。
+本体は登録した checkout の `git pull` で更新する。
 
 複数の導入プロジェクトへまとめて反映するときは、`/Develop` 等の作業ルート配下を走査して一括同期する `tools/cross-review.sync-all.js` を使う（詳細は `docs/cross-review.md`「複数プロジェクトへ一括反映」）。app-owned / vendored の区分は `docs/cross-review.md` と各リポの doc を参照。
 
 この SKILL 自体をホームの共通配置へ配るときは `node tools/cross-review.sync-all.js --global-skill`（`--check` で古さの検査、`--dry-run` で確認、`--check --json` で配布先ごとの状態を JSON で取得）。配布先は `CLAUDE_CONFIG_DIR`（未設定なら `~/.claude`）、`CODEX_HOME`（未設定なら `~/.codex`）、`~/.codex-subagent` の各ホームの `skills/cross-review/SKILL.md`。Codex はレビュー時に、Codex のサブエージェントは修正適用や実装委譲の際に、それぞれのホームの写しを読むので、古いままだと旧ルールで動く。`--check` の終了コードは古い写しがあれば 1、読めないものがあれば 3、未配置だけなら 0。解決規則と JSON の形は `docs/cross-review.md`「グローバル SKILL の配布」。
 
-上流が配り始めたファイルを取り込み先が取りこぼしていないかは `node tools/cross-review.sync.js --check-manifest`（上流の雛形にあって `files[]` に無いエントリを列挙するだけ。`--check` を含意するので書き込みは起きない）。
+上流が配り始めたファイルを取り込み先が取りこぼしていないかは `node tools/cross-review.js sync --check-manifest`（上流の雛形にあって `files[]` に無いエントリを列挙するだけ。`--check` を含意するので書き込みは起きない）。
+
+旧形式の検査は `node tools/cross-review.sync.js --check-manifest` を使う。
+旧形式に新形式の配布物を足さない。足すと `to` が重なり、同期が止まる。新形式への移行の手順は、上流の移行ノートで案内する。
