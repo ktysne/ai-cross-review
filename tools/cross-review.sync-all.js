@@ -809,12 +809,14 @@ function planMigration(inspection) {
     packageRaw = fs.readFileSync(packagePath, 'utf8');
     const value = JSON.parse(packageRaw);
     // 標準の場所の同期スクリプトの呼び出しだけを置き換える。sync サブコマンドは --root と --manifest を受け付けない。
+    const normalizeScriptPaths = (text) => text.replace(/\\/g, '/').replace(/(^|[\s"'=])\.\//g, '$1');
     const removedCustomPaths = manifest.files
-      .filter((entry) => MIGRATION_REMOVED.has(entry.from) && entry.to !== 'tools/cross-review.sync.js').map((entry) => entry.to);
+      .filter((entry) => MIGRATION_REMOVED.has(entry.from) && normalizeScriptPaths(entry.to) !== 'tools/cross-review.sync.js')
+      .map((entry) => normalizeScriptPaths(entry.to));
     for (const [name, command] of Object.entries(value.scripts || {})) {
       if (typeof command !== 'string') continue;
       if (command.includes('cross-review.sync-all.js')
-          || removedCustomPaths.some((to) => command.includes(to))
+          || removedCustomPaths.some((to) => normalizeScriptPaths(command).includes(to))
           || (/\bnode tools\/cross-review\.sync\.js\b/.test(command) && /(?:^|\s)--(?:root|manifest)(?:[=\s]|$)/.test(command))
           || manifest.files.some((entry) => MIGRATION_REMOVED.has(entry.from) && entry.from.startsWith('tests/') && command.includes(entry.to))
           || [...MIGRATION_REMOVED].some((from) => from.startsWith('tests/') && command.includes(from))) {

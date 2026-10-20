@@ -1268,6 +1268,19 @@ describe('sync-all --migrate', () => {
     expect(output).toContain('手で修正: package.json scripts.sync: node tools/review-sync.js --check');
   });
 
+  it.each([
+    ['./tools/review-sync.js', 'node tools\\review-sync.js --check'],
+    ['tools/review-sync.js', 'node ./tools/review-sync.js --check'],
+  ])('同期スクリプトの to が %s で scripts の書き方が違っても手で直す項目に出す', (to, command) => {
+    const m = legacy();
+    m.files.find((entry) => entry.from === 'tools/cross-review.sync.js').to = to;
+    const p = project('custom-sync-notation', m);
+    put(path.join(p.root, 'package.json'), JSON.stringify({ scripts: { sync: command } }, null, 2) + '\n');
+    expect(run()).toBe(0);
+    expect(JSON.parse(read(path.join(p.root, 'package.json'))).scripts.sync).toBe(command);
+    expect(output).toContain(`手で修正: package.json scripts.sync: ${command}`);
+  });
+
   it('不足する新形式の配布物だけ雛形の配置で足し、未知の配布物を残す', () => {
     const m = legacy();
     m.files = [m.files[0], { from: 'custom.txt', to: 'own.txt' }];
