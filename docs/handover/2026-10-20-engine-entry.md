@@ -53,7 +53,7 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 | 順 | 対象 | 主な変更先 | 委譲の区分 | PR | base | 状態 |
 |---|---|---|---|---|---|---|
 | 0 | この計画 | `docs/handover/2026-10-20-engine-entry.md` | なし | #90 | main | マージ済み(2026-10-20) |
-| 0 | この計画の改訂(agent-cockpit の指摘の反映) | `docs/handover/2026-10-20-engine-entry.md` | なし | #91 | main | レビュー待ち(2026-10-20) |
+| 0 | この計画の改訂(agent-cockpit の指摘の反映) | `docs/handover/2026-10-20-engine-entry.md` | なし | #91 | main | マージ済み(2026-10-20) |
 | 1 | 本体の `projectRoot` 対応と版の照合、入口、探し方、キャッシュ、`--register` と `--register --check --json`、`sync` サブコマンド | `tools/cross-review.js`、`tools/cross-review.entry.js`(新規)、`tools/cross-review.sync-all.js`、`tests/` | hard | 未作成 | main | 未着手 |
 | 2 | 同じ `to` への重複の検査、旧形式でのマニフェスト検査、クラウド向けの SKILL、`docs/cross-review.md` の案内版、新形式の雛形のマニフェスト、文書 | `tools/cross-review.sync.js`、`templates/`(新規)、`tools/cross-review.sync.example.json`、`docs/cross-review.md`、`docs/setup.md`、`.claude/skills/cross-review/SKILL.md`、`tests/` | hard | 未作成 | 1 段目 | 未着手 |
 | 3 | `sync-all --migrate`、`--migrate --check --json`、移行ノート | `tools/cross-review.sync-all.js`、`docs/migrations/`(新規ノート)、`tests/` | hard | 未作成 | 2 段目 | 未着手 |
