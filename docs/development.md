@@ -81,6 +81,15 @@ npm run sync:global                          # グローバル SKILL の配布
 | [claude-codex-bridge](https://github.com/ktysne/claude-codex-bridge) | `~/.claude/tools/codex-agent.sh` を探し、定義 `codex-review`（read-only）と `codex-subagent`（workspace-write）で起動する。終了コード 3 は bridge が未導入、75 は GPT 側の事情で使えないことを表す |
 | [agent-cockpit](https://github.com/ktysne/agent-cockpit) | `AGENT_COCKPIT_HOME`（無ければ `~/.agent-cockpit`）の `routing.json` の `review` を読む。agent-cockpit は導入先の worktree のルートの `tools/cross-review.js` で導入を判断し、`.cross-review-state.json` の往復と結論を PR のカードに出す |
 
+`routing.json` の読み取り検証データは `tests/fixtures/agent-cockpit-routing/` に置いています。
+agent-cockpit の checkout と完全な SHA を指定して次のコマンドで写し直し、`npm test` で確かめてください。
+
+```bash
+node tools/import-agent-cockpit-routing.js --checkout <agent-cockpit の checkout> --revision <完全な SHA>
+```
+
+読み取りに失敗したときに `default` を返すのは、契約の「同期の呼び出し元は `null` のとき経路の指定を出しません」と同じ手順になるためです。
+
 ## 文書を直すとき
 
 - 導入の手順（取り込むファイル、導入先で足す設定、連携ツールごとの設定と確認）を変えたら [setup.md](setup.md) を直します。
