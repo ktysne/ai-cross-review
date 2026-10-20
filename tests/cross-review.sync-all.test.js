@@ -744,6 +744,34 @@ describe('--json の引数', () => {
   });
 });
 
+describe('配布条件のディレクトリを調べられないとき', () => {
+  beforeEach(() => { process.exitCode = 0; });
+  afterAll(() => { process.exitCode = 0; });
+
+  const denyingExists = (fsx, denied) => (p) => {
+    if (path.resolve(p) === denied) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    return fsx.exists(p);
+  };
+
+  it('--check は対象外ではなく unreadable にし、exit 3 と JSON の error を返す', () => {
+    const h = globalDeps();
+    h.deps.exists = denyingExists(h.fsx, path.join(HOME, '.codex', 'skills'));
+    const r = runAll(globalOptions({ json: true }), h.deps);
+    expect(r.exitCode).toBe(3);
+    const report = JSON.parse(h.sink.out.join(''));
+    expect(report.result).toBe('error');
+    expect(report.targets[1]).toMatchObject({ id: 'codex', state: 'unreadable', sha256: null });
+    expect(report.targets[1].reason).toMatch(/EACCES/);
+  });
+
+  it('--list は読めないことを対象外と分けて表示する', () => {
+    const h = globalDeps();
+    h.deps.exists = denyingExists(h.fsx, path.join(HOME, '.codex', 'skills'));
+    runAll(globalOptions({ mode: 'sync', list: true }), h.deps);
+    expect(h.sink.out.join('')).toMatch(/\(読めない: .*EACCES/);
+  });
+});
+
 describe('runAll の --global-skill --dry-run', () => {
   beforeEach(() => { process.exitCode = 0; });
   afterAll(() => { process.exitCode = 0; });

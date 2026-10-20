@@ -264,12 +264,25 @@ function syncOne(manifestPath, opts, deps = {}) {
   return { manifestPath, root, result, code, threw, out: out.join(''), err: err.join('') };
 }
 
+// fs.existsSync は権限エラーでも false を返し、「無い」と区別できないため stat で調べる。
+// 無いときだけ false を返し、ほかの失敗は例外のまま呼び出し側へ渡す。
+function pathExists(p) {
+  try {
+    fs.statSync(p);
+    return true;
+  } catch (err) {
+    if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return false;
+    throw err;
+  }
+}
+
 // 全モードで同じホーム解決、配布条件、重複判定を使う。
+// 配布条件のディレクトリを調べられないときは unreadable を立て、対象外と区別する。
 function resolveGlobalTargets(deps = {}) {
   const home = deps.home || os.homedir();
   const env = deps.env || process.env;
   const platform = deps.platform || process.platform;
-  const exists = deps.exists || ((p) => fs.existsSync(p));
+  const exists = deps.exists || pathExists;
   const seen = new Map();
   return GLOBAL_SKILL_TARGETS.map((t) => {
     const override = t.env && env[t.env];
@@ -280,14 +293,20 @@ function resolveGlobalTargets(deps = {}) {
     const keyPath = path.resolve(dest).replace(/[\\/]+$/, '');
     const key = platform === 'win32' ? keyPath.toLowerCase() : keyPath;
     let reason = null;
+    let unreadable = false;
     if (seen.has(key)) reason = `${seen.get(key)} と同じパス`;
     else {
       seen.set(key, t.id);
-      if (!exists(requireDir)) {
-        reason = `${override ? `${t.env} が指すホームの ` : ''}${requireDir} が無いため配布しない`;
+      try {
+        if (!exists(requireDir)) {
+          reason = `${override ? `${t.env} が指すホームの ` : ''}${requireDir} が無いため配布しない`;
+        }
+      } catch (err) {
+        unreadable = true;
+        reason = `${requireDir} を調べられません: ${(err && err.message) || 'stat error'}`;
       }
     }
-    return { id: t.id, path: dest, home: targetHome, homeFrom, available: reason === null, reason };
+    return { id: t.id, path: dest, home: targetHome, homeFrom, available: reason === null, unreadable, reason };
   });
 }
 
@@ -297,8 +316,9 @@ function sha256(buffer) {
 
 // バイト一致で写しを検査する。読めない写しは、書き込みモードで上書きを試せるよう区別する。
 function planGlobalSkill({ home, env, platform, exists, readFile, skillBuffer, sourcePath, sourceSha256 }) {
-  return resolveGlobalTargets({ home, env, platform, exists }).map(({ available, ...target }) => {
+  return resolveGlobalTargets({ home, env, platform, exists }).map(({ available, unreadable, ...target }) => {
     const base = { ...target, sourcePath, sourceSha256, sha256: null };
+    if (unreadable) return { ...base, state: 'unreadable' };
     if (!available) return { ...base, state: 'skipped' };
     let current;
     try {
@@ -323,7 +343,7 @@ function runGlobalSkill(opts, deps = {}) {
   const writeOut = deps.out || ((s) => process.stdout.write(s));
   const writeErr = deps.err || ((s) => process.stderr.write(s));
   const home = deps.home || os.homedir();
-  const exists = deps.exists || ((p) => fs.existsSync(p));
+  const exists = deps.exists || pathExists;
   const readFile = deps.readFile || ((p) => fs.readFileSync(p));
   const writeFile = deps.writeFile || ((p, c) => fs.writeFileSync(p, c));
   const mkdir = deps.mkdir || ((d) => fs.mkdirSync(d, { recursive: true }));
@@ -475,7 +495,7 @@ function runAll(opts, deps = {}) {
       const home = deps.home || os.homedir();
       writeOut(`${listed.length ? '\n' : ''}グローバル SKILL の配布先:\n`);
       for (const t of resolveGlobalTargets(deps)) {
-        writeOut(`  ${formatGlobalPath(home, t.path)}${t.available ? '' : ` (対象外: ${t.reason})`}\n`);
+        writeOut(`  ${formatGlobalPath(home, t.path)}${t.available ? '' : ` (${t.unreadable ? '読めない' : '対象外'}: ${t.reason})`}\n`);
         listed.push({ kind: 'global', project: formatGlobalPath(home, t.path), status: 'listed', changed: 0 });
       }
     }
