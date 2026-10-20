@@ -1144,40 +1144,96 @@ function emptyBranchState() {
 
 const TRIAGE_OUTCOMES = new Set(['fixing', 'converged', 'halted']);
 
-function normalizeLastTriage(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  if (!Number.isSafeInteger(value.round) || value.round < 1) return null;
-  // 読み手は PR の head と完全一致で比べるので、短縮 SHA は受けない (SHA-1 は 40 桁、SHA-256 は 64 桁)。
-  if (typeof value.sha !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value.sha)) return null;
-  if (!TRIAGE_OUTCOMES.has(value.outcome)) return null;
+function stateIssue(issues, path, code, value) {
+  if (value !== undefined) issues.push({ path, code });
+}
+
+function isStateObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeLastTriage(value, issues = [], path = []) {
+  if (value == null) return null;
+  if (!isStateObject(value)) {
+    stateIssue(issues, path, 'invalid-type', value);
+    return null;
+  }
+  if (!Number.isSafeInteger(value.round) || value.round < 1) {
+    stateIssue(issues, [...path, 'round'], typeof value.round === 'number' ? 'out-of-range' : 'invalid-type', value.round);
+    return null;
+  }
+  if (typeof value.sha !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value.sha)) {
+    stateIssue(issues, [...path, 'sha'], typeof value.sha === 'string' ? 'invalid-format' : 'invalid-type', value.sha);
+    return null;
+  }
+  if (!TRIAGE_OUTCOMES.has(value.outcome)) {
+    stateIssue(issues, [...path, 'outcome'], 'invalid-value', value.outcome);
+    return null;
+  }
   return { round: value.round, sha: value.sha.toLowerCase(), outcome: value.outcome };
 }
 
-// 読み込んだ JSON を既知の形へ正規化する純粋関数。型が違う値は初期値へ落とす
-// (手で編集された状態ファイルでも後段が壊れないようにする)。
-function normalizeState(raw) {
+// 正規化の契約は docs/contracts/cross-review-state.md を参照。
+function normalizeStateWithIssues(raw, issues) {
   const out = { branches: {} };
-  const src = (raw && typeof raw === 'object' && raw.branches && typeof raw.branches === 'object')
-    ? raw.branches
-    : {};
-  for (const [name, value] of Object.entries(src)) {
-    if (!name) continue;
+  if (!isStateObject(raw)) {
+    stateIssue(issues, [], 'invalid-type', raw);
+    return out;
+  }
+  if (!isStateObject(raw.branches)) {
+    stateIssue(issues, ['branches'], 'invalid-type', raw.branches);
+    return out;
+  }
+  for (const [name, value] of Object.entries(raw.branches)) {
+    const path = ['branches', name];
+    if (!name) {
+      stateIssue(issues, path, 'invalid-format', name);
+      continue;
+    }
+    if (!isStateObject(value)) stateIssue(issues, path, 'invalid-type', value);
     const v = (value && typeof value === 'object') ? value : {};
     const round = (Number.isSafeInteger(v.round) && v.round >= 0) ? v.round : 0;
+    if (!Number.isSafeInteger(v.round) || v.round < 0) {
+      stateIssue(issues, [...path, 'round'], typeof v.round === 'number' ? 'out-of-range' : 'invalid-type', v.round);
+    }
     const sha = (typeof v.lastReviewedSha === 'string' && v.lastReviewedSha.trim())
       ? v.lastReviewedSha.trim()
       : null;
-    const dismissed = Array.isArray(v.dismissed)
-      ? v.dismissed.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim())
-      : [];
+    if (v.lastReviewedSha != null && sha === null) {
+      stateIssue(issues, [...path, 'lastReviewedSha'], typeof v.lastReviewedSha === 'string' ? 'invalid-format' : 'invalid-type', v.lastReviewedSha);
+    }
+    const dismissed = [];
+    if (Array.isArray(v.dismissed)) {
+      v.dismissed.forEach((s, index) => {
+        if (typeof s === 'string' && s.trim()) dismissed.push(s.trim());
+        else stateIssue(issues, [...path, 'dismissed', index], typeof s === 'string' ? 'invalid-format' : 'invalid-type', s);
+      });
+    } else {
+      stateIssue(issues, [...path, 'dismissed'], 'invalid-type', v.dismissed);
+    }
     out.branches[name] = {
       round,
       lastReviewedSha: sha,
       dismissed,
-      lastTriage: normalizeLastTriage(v.lastTriage),
+      lastTriage: normalizeLastTriage(v.lastTriage, issues, [...path, 'lastTriage']),
     };
   }
   return out;
+}
+
+function normalizeState(raw) {
+  return normalizeStateWithIssues(raw, []);
+}
+
+function parseStateText(text) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { kind: 'invalid', state: null, issues: [] };
+  }
+  const issues = [];
+  return { kind: 'ok', state: normalizeStateWithIssues(raw, issues), issues };
 }
 
 // state から 1 ブランチ分を取り出す純粋関数 (記録が無ければ初期状態)。
@@ -1240,9 +1296,7 @@ function withoutBranch(state, branch) {
   return { branches };
 }
 
-// 状態ファイルを読む。戻り値は { path, state, corrupt }。
-// 見つからなければ空の状態 (corrupt:false)。JSON が壊れている / 読めない場合は corrupt:true にし、
-// 呼び出し側は「警告して無視、書き戻さない」を選べるようにする (既存の記録を上書きで消さないため)。
+// 読み取り結果の契約は docs/contracts/cross-review-state.md を参照。
 function readState(deps = {}) {
   const exists = deps.exists || ((p) => fs.existsSync(p));
   const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
@@ -1253,18 +1307,15 @@ function readState(deps = {}) {
   } catch {
     present = false; // 存在確認そのものが失敗したら「無い」と同じ扱いにする。
   }
-  if (!present) return { path: statePath, state: normalizeState(null), corrupt: false };
+  if (!present) return { path: statePath, state: normalizeState(null), corrupt: false, kind: 'missing', issues: [] };
   let body;
   try {
     body = String(readFile(statePath));
   } catch {
-    return { path: statePath, state: normalizeState(null), corrupt: true };
+    return { path: statePath, state: normalizeState(null), corrupt: true, kind: 'unreadable', issues: [] };
   }
-  try {
-    return { path: statePath, state: normalizeState(JSON.parse(body)), corrupt: false };
-  } catch {
-    return { path: statePath, state: normalizeState(null), corrupt: true };
-  }
+  const parsed = parseStateText(body);
+  return { ...parsed, path: statePath, state: parsed.state || normalizeState(null), corrupt: parsed.kind === 'invalid' };
 }
 
 // 状態ファイルを書く。書けなくてもレビュー自体は続けたいので、失敗は警告 1 行で false を返す。
@@ -3356,6 +3407,7 @@ module.exports = {
   runRouteCommand,
   emptyBranchState,
   normalizeState,
+  parseStateText,
   branchStateOf,
   nextState,
   withDismissed,
