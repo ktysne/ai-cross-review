@@ -18,6 +18,8 @@ bash ~/.claude/tools/codex-agent.sh --describe codex-review
 `status: ok`、`sandbox: read-only`、`approval_policy: never` ならレビューを起動できます。
 `--fix` 用の `codex-subagent` は `workspace-write` が必要です。
 定義が無ければ直接起動し、無効化やモデル未設定なら終了コード 75 の代替プロンプトへ進みます。
+ただし、bridge が commit `ac9df4b`（PR #174）より前の版で Codex CLI が入っていない環境では、定義で無効化していても `codex-not-found` として終了コード 1 で止まります。
+bridge を `ac9df4b` 以降に更新すると、終了コード 75 へ進みます。
 
 定義の不正や読取失敗、サンドボックスや承認方針の食い違いは、起動せず終了コード 2 で止まります(今までと同じ)。
 照会の時間切れ、不正な JSON、protocol の不一致などは、起動せず終了コード 1 で止まります。
