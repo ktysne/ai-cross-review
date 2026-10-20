@@ -69,6 +69,12 @@ describe('bridge 公開照会の分類', () => {
     expect(invoke(null, options, { spawnSync: () => { throw Object.assign(new Error('不在'), { code: 'ENOENT' }); } })).toBeNull();
   });
 
+  it('Windows で bash が見つからなければ照会せずに直接起動を選ぶ', () => {
+    const spawnQuery = vi.fn();
+    expect(invoke(null, options, { platform: 'win32', lookup: () => [], spawnSync: spawnQuery })).toBeNull();
+    expect(spawnQuery).not.toHaveBeenCalled();
+  });
+
   it.each(['codex-disabled', 'model-unset'])('無効化 %s は代替プロンプトを選ぶ', (reason) => {
     expect(invoke(reply(response({ status: 'disabled', reason, definition: { project: '/project.md' } }))))
       .toEqual({ fallbackCause: 'definition-disabled', definitionPath: '/project.md' });

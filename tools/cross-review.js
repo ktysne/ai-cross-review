@@ -2088,6 +2088,7 @@ function codexAgentInvocation(script, opts, deps = {}) {
   const cwd = deps.cwd || process.cwd();
   const agentName = codexAgentNameFor(opts);
   const resolved = resolveReviewerCommandForSpawn('bash', deps);
+  if (resolved.notFound) return null;
   const query = deps.spawnSync || spawnSync;
   const fail = (reason) => ({
     error: `bridge の照会に失敗したため起動しません: ${reason}\n`
@@ -2304,7 +2305,8 @@ function resolveReviewerCommandForSpawn(cmd, deps = {}) {
 
   // .ps1 は cmd.exe では直接実行できないため、このフォールバックは環境依存。
   // npm グローバルインストールは通常 .cmd shim も作るので、実運用ではまずそこを使う。
-  return { cmd: candidates[0] || cmd, shell: true };
+  // shell 経由では不在が ENOENT にならないので、見つからなかったことを notFound で返す。
+  return { cmd: candidates[0] || cmd, shell: true, notFound: candidates.length === 0 };
 }
 
 // 子プロセスの出力 (Buffer の塊) を文字列として溜め込む収集器を作る純粋関数 (I/O は持たない)。
