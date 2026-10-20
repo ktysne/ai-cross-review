@@ -9,8 +9,9 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 
 ## 現在地と次にやること
 
-- 3 段の実装は終わった。1 段目(#95)と 2 段目(#96)はマージ済みで、3 段目(#97)はレビューを終えてマージを待っている。
-- #97 のマージの後に、「移行を全リポジトリへ反映する手順」を始める。手順の 1 と 2(`--register` と `--global-skill`)は、ホームのファイルを書くので、開発者の確認を得てから行う。
+- 3 段(#95、#96、#97)はすべてマージ済みである。
+- 「移行を全リポジトリへ反映する手順」の 1 から 4 を、開発者の承認を得て 2026-10-20 に行った。手元の 22 の導入先は、すべて移行できる判定で、導入先ごとの PR を出した(「移行の PR」)。
+- 次は、各導入先の PR のマージを待ち、手順の 5(`--migrate --check` が終了コード 0 を返すこと)を確かめる。#89 はその後に閉じる。
 - 開発者の判断を待っている事項は「判断待ち」にある。
 
 ## 決定済みの判断
@@ -54,7 +55,7 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 | 0 | この計画の改訂(agent-cockpit の指摘の反映) | `docs/handover/2026-10-20-engine-entry.md` | なし | #91 | main | マージ済み(2026-10-20) |
 | 1 | 本体の `projectRoot` 対応と版の照合、入口、探し方、キャッシュ、`--register` と `--register --check --json`、`sync` サブコマンド | `tools/cross-review.js`、`tools/cross-review.entry.js`(新規)、`tools/cross-review.sync-all.js`、`tests/` | hard | #95 | main | マージ済み(2026-10-20) |
 | 2 | 同じ `to` への重複の検査、旧形式でのマニフェスト検査、クラウド向けの SKILL、`docs/cross-review.md` の案内版、新形式の雛形のマニフェスト、文書 | `tools/cross-review.sync.js`、`templates/`(新規)、`tools/cross-review.sync.example.json`、`docs/cross-review.md`、`docs/setup.md`、`.claude/skills/cross-review/SKILL.md`、`tests/` | hard | #96 | main(1 段目のマージ後) | マージ済み(2026-10-20) |
-| 3 | `sync-all --migrate`、`--migrate --check --json`、移行ノート | `tools/cross-review.sync-all.js`、`docs/migrations/`(新規ノート)、`tests/` | hard | #97 | main(2 段目のマージ後) | レビュー済み、マージ待ち |
+| 3 | `sync-all --migrate`、`--migrate --check --json`、移行ノート | `tools/cross-review.sync-all.js`、`docs/migrations/`(新規ノート)、`tests/` | hard | #97 | main(2 段目のマージ後) | マージ済み(2026-10-20) |
 
 - 1 段目は、入口が無いと本体の `projectRoot` 対応を確かめられないので、本体と入口を 1 つの PR にする。
 - 1 段目のテストには、登録が無い、登録先が正常、HEAD が既定のブランチでない、未コミットの変更がある、登録先が無い、本体が照合用の export を持たない、の各場合の `--register --check --json` の `result` と終了コードを入れる。
@@ -62,6 +63,41 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 - 2 段目のテストには、同じ `to` が 2 つあるマニフェストで同期と検査がエラーになり何も書かないこと(大文字と小文字だけが違う場合を含む)と、旧形式の導入先の `--check-manifest` が新形式だけの配布物を列挙せずに `--migrate` を案内することを入れる。
 - 3 段目は、2 段目の雛形のマニフェストを移行の行き先として使う。
 - 3 段がすべてマージされるまでは、導入先を移行しない。
+
+## 移行の PR
+
+2026-10-20 に、上流の main(3cbb4f2)で 22 の導入先を移行した。
+どの PR もブランチは `chore/cross-review-engine-entry`、base は各リポジトリの既定のブランチである。
+マージは各リポジトリの開発者が行う。
+
+| 導入先 | PR | 状態 |
+|---|---|---|
+| agent-cockpit | ktysne/agent-cockpit#685 | マージ待ち |
+| agent-gc | ktysne/agent-gc#161 | マージ待ち |
+| agent-limit-checker | ktysne/agent-limit-checker#73 | マージ待ち |
+| ai-comment-tidy | ktysne/ai-comment-tidy#69 | マージ待ち |
+| blade-preset-maker | ktysne/blade-preset-maker#28 | マージ待ち |
+| claude-codex-bridge | ktysne/claude-codex-bridge#175 | マージ待ち |
+| cli-updater | ktysne/cli-updater#7 | マージ待ち |
+| clipy-for-windows | ktysne/clipy-for-windows#49 | マージ待ち |
+| ktysne-top | ktysne/ktysne-top#30 | マージ待ち |
+| log-converter | ktysne/log-converter#21 | マージ待ち |
+| rec-studio | ktysne/rec-studio#852 | マージ待ち |
+| riff-trainer | ktysne/riff-trainer#210 | マージ待ち |
+| screen-recorder | ktysne/screen-recorder#124 | マージ待ち |
+| session-score-player | ktysne/session-score-player#421 | マージ待ち |
+| tab-forge | ktysne/tab-forge#23 | マージ待ち |
+| tab-image-maker | ktysne/tab-image-maker#48 | マージ待ち |
+| ux-load-review | ktysne/ux-load-review#15 | マージ待ち |
+| ux-readability-review | ktysne/ux-readability-review#15 | マージ待ち |
+| ux-state-review | ktysne/ux-state-review#22 | マージ待ち |
+| ux-structure-review | ktysne/ux-structure-review#15 | マージ待ち |
+| VOICEVOX Coding | ktysne/voicevox-coding#80 | マージ待ち |
+| YouTubeChatExtension | ktysne/YouTubeChatExtension#17 | マージ待ち |
+
+- `--migrate` の自動の書き換えのほかに、CLAUDE.md、AGENTS.md、手順書にある `node tools/cross-review.sync.js` を `node tools/cross-review.js sync` に直し、配布物の列挙から消した同期スクリプトを外した。
+- claude-codex-bridge のテストは `tools/cross-review.js` を require して本体の関数を呼んでいたので、`engine` の照会で本体のパスを得てから読む形に直した。導入先のコードが本体の関数を直接呼ぶ箇所は、ほかに無かった。
+- agent-cockpit の `skills/update-tools/SKILL.md` にある `node tools/cross-review.sync.js --check` は、ktysne/agent-cockpit#684 で直すので、この移行では触っていない。
 
 ## 着手前の点検
 
