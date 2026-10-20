@@ -100,7 +100,18 @@ describe('bridge 公開照会の分類', () => {
     [{ sandbox: 'read-only' }, true, 'workspace-write'],
     [{ approval_policy: 'on-request' }, false, 'on-request'],
   ])('照会値が必要な権限と異なれば拒否する (%j)', (values, fix, expected) => {
-    expect(invoke(reply(response(values)), { ...options, fix }).error).toContain(expected);
+    const inv = invoke(reply(response(values)), { ...options, fix });
+    expect(inv.error).toContain(expected);
+    expect(inv.exitCode).toBeUndefined();
+    expect(inv.error).not.toContain('--no-codex-agent');
+  });
+
+  it.each([
+    ['invalid', 'project-override-rejected', undefined], ['unreadable', 'front-matter-unreadable-user', undefined],
+    ['disabled', 'codex-not-found', 1], ['disabled', 'future', 1],
+  ])('%s/%s の終了コードは定義の拒否なら既定の 2、照会や環境の失敗なら 1 にする', (status, reason, exitCode) => {
+    const inv = invoke(reply(response({ status, reason, message: '照会の説明' })));
+    expect(inv.exitCode).toBe(exitCode);
   });
 
   it('旧版と同じエラー文でも JSON があれば互換解析しない', () => {

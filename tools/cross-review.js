@@ -2094,6 +2094,8 @@ function codexAgentInvocation(script, opts, deps = {}) {
       + '  --no-codex-agent で直接起動できます。',
     exitCode: 1,
   });
+  // 定義の拒否は引数エラーと同じ終了コード 2 にし、直接起動での迂回を案内しない。
+  const reject = (reason) => ({ error: `定義 ${agentName} を使えないため起動しません: ${reason}` });
   let result;
   try {
     result = query(resolved.cmd, [script, '--describe', agentName, '-C', cwd], {
@@ -2135,21 +2137,24 @@ function codexAgentInvocation(script, opts, deps = {}) {
     if (['codex-disabled', 'model-unset'].includes(description.reason)) {
       return { fallbackCause: 'definition-disabled', definitionPath };
     }
+    if (description.reason === 'codex-not-found') {
+      return { error: `Codex CLI が見つからないため起動しません (reason=codex-not-found): ${description.message}`, exitCode: 1 };
+    }
     return fail(`status=disabled reason=${description.reason}: ${description.message}`);
   }
   if (['invalid', 'unreadable'].includes(description.status)) {
-    return fail(`status=${description.status} reason=${description.reason}: ${description.message}`);
+    return reject(`status=${description.status} reason=${description.reason}: ${description.message}`);
   }
   if (description.status !== 'ok') {
     return fail(`status=${description.status} message=${description.message} launch_exit=${description.launch_exit}`);
   }
   const expected = opts.fix ? CODEX_SANDBOX_WORKSPACE_WRITE : CODEX_SANDBOX_READ_ONLY;
   if (description.sandbox !== expected) {
-    return fail(`定義 ${agentName} の codex_sandbox が ${description.sandbox} です`
+    return reject(`codex_sandbox が ${description.sandbox} です`
       + ` (${opts.fix ? '--fix では' : 'レビューのみでは'} ${expected} が必要): ${definitionPath}`);
   }
   if (description.approval_policy !== 'never') {
-    return fail(`定義 ${agentName} の approval_policy が ${description.approval_policy} です (never が必要): ${definitionPath}`);
+    return reject(`approval_policy が ${description.approval_policy} です (never が必要): ${definitionPath}`);
   }
   return {
     cmd: 'bash',

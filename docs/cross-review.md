@@ -384,12 +384,16 @@ bridge が `CODEX_AGENT_RUN` を空でない値で設定した Codex 実装担�
 
 **公開照会の判定**：新経路では定義ファイルとスクリプト本文を解析しません。
 `status: ok` なら、照会の `sandbox` がレビューのみでは `read-only`、`--fix` では `workspace-write` で、`approval_policy` が `never` のときだけ起動します。
-食い違うときは照会値を表示し、終了コード 1 で止まります。
+食い違うときは照会値を表示し、定義の拒否として終了コード 2 で止まります。
 
 - `status: disabled` で `reason: definition-not-found` なら、直接起動を選びます。
 - `codex-disabled` または `model-unset` なら、bridge を起動せず終了コード 75 の代替プロンプトへ進みます。
-- `codex-not-found`、未知の reason、`invalid`、`unreadable`、未知の status はエラーです。
-  応答の理由とメッセージを表示し、未知の status では `launch_exit` も表示します。
+- `invalid` と `unreadable`(リポジトリ側の定義が変えてはいけないキーを変えている場合を含む)は、定義の拒否として終了コード 2 で止まります。
+- `codex-not-found` は終了コード 1 で止まります。
+- 未知の reason と未知の status は、照会の失敗と同じく終了コード 1 で止まります。
+  未知の status では `launch_exit` も表示します。
+- どの場合も、応答の理由とメッセージを表示します。
+  定義の拒否では、直接起動での迂回を案内しません。
 - 照会成功後に定義が消えることがあります。
   利用者側の定義が照会時に存在したのに、起動した bridge が終了コード 3 を返した場合は、直接起動へ切り替えず終了コード 1 で止めます。
 
