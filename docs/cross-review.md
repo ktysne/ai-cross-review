@@ -676,9 +676,9 @@ since: 035a746efba75fb4f2cbbff7f0d3576fef6575ab
 
 - **判定**：`cross-review.sync.json` の存在を単一マーカーにします（同期に必須のファイルなので誤検出しにくい）。慣例どおり `tools/cross-review.sync.json` に置かれている前提ですが、ルート直下に置かれていても拾います。
 - **同期ロジック**：各プロジェクトに同梱された版ではなく、**この checkout の `cross-review.sync.js`（`runSync`）を再利用**して回します。導入先の sync スクリプトが古くても最新ロジックで一括反映できます。取り込むファイル、上流 ref は各プロジェクトのマニフェストを尊重します（`--ref` で一時上書き可）。
-- **独立実行**：1 プロジェクトの失敗（マニフェスト不正、上流取得失敗など）で全体を止めません。各プロジェクトを独立に回し、最後に「更新 / 変更なし / ドリフト / エラー / 対象外」を集計します。終了コードは「いずれかが失敗」または「`--check` でいずれかにドリフト」のとき **1**（CI 向け）。
+- **独立実行**：1 プロジェクトの失敗（マニフェスト不正、上流取得失敗など）で全体を止めません。各プロジェクトを独立に回し、最後に「更新 / 変更なし / ドリフト / エラー / 対象外」を集計します。終了コードは処理失敗や検査不能があれば **3**、`--check` でドリフトだけなら **1** です。
 - **対象外（skip）**：`cross-review.sync.json` という名前でも、**valid JSON だが** 内容が `upstream` / `files` を持たないもの（旧 `{source, ref, commit}` 形式の独自 sync 来歴や、別用途でたまたま同名のファイル）は **同期対象外（対象外）** として skip し、エラーにはしません。`/Develop` に新旧の流儀が混在していても全体を失敗させないためです。
-- **破損は skip せず error（exit 1）**：ファイルが **読めない（IO/権限エラー）/ JSON 構文エラー（破損）** の場合は、正式導入先の設定崩れなので対象外で握り潰さず **error** にし、終了コードを **1** にします（CI の `sync-all --check` で検出できるようにするため）。1 件の error でも他プロジェクトの同期は止めず、最後に集計します。
+- **破損は skip せず error（exit 3）**：ファイルが **読めない（IO/権限エラー）/ JSON 構文エラー（破損）** の場合は、正式導入先の設定崩れなので対象外で握り潰さず **error** にし、終了コードを **3** にします（CI の `sync-all --check` で検出できるようにするため）。1 件の error でも他プロジェクトの同期は止めず、最後に集計します。
 - **走査**：`--depth <n>`（既定 4）で最大深さを調整。`node_modules` / `.git` / 隠しディレクトリはたどりません。
 - **移行ノート**：未読のノートがあったプロジェクトは、集計行の末尾に「（移行ノート N 件）」が付きます。本文は各プロジェクトの同期時に stderr へ出ますが、一括同期では流れて見落としやすいためです。
 - **マニフェスト検査**：`--check` では各プロジェクトで `sync --check-manifest` も回し、未登録があったプロジェクトの集計行に「（マニフェスト未登録 N 件）」を付けます。一括検査は「取り込み先が上流に追いつけているか」を見る用途なので、ファイルのドリフトと配布物の取りこぼしを 1 回で拾います。未登録はドリフトではないので終了コードには含めません。検査が回らなかった（雛形が無い / 読めない / 構造が不正）プロジェクトには「（マニフェスト検査スキップ）」を付け、未登録 0 件の正常な検査と見分けられるようにします。
@@ -700,28 +700,108 @@ node tools/cross-review.sync-all.js --global-skill             # グローバル
 `--global-skill` は、この checkout の `.claude/skills/cross-review/SKILL.md` をホームの共通配置へ配り、各リポジトリにはそのプロジェクト固有の事情だけを残せるようにします（残す内容は次節のテンプレート）。
 
 配布先は次の 3 つです。
+表中の `<home>` は OS のユーザーホームです。
+各ホームの下の `skills/cross-review/SKILL.md` に配ります。
 
-| 配布先 | 条件 |
+| id | ホームの解決規則 | 配布条件（requireDir） | homeFrom |
+|---|---|---|---|
+| `claude` | `CLAUDE_CONFIG_DIR`、未設定なら `<home>/.claude` | ホーム自体が既にある | `CLAUDE_CONFIG_DIR` / `default` |
+| `codex` | `CODEX_HOME`、未設定なら `<home>/.codex` | `<ホーム>/skills` が既にある | `CODEX_HOME` / `default` |
+| `codex-subagent` | `<home>/.codex-subagent` 固定 | `<ホーム>/skills` が既にある | `fixed` |
+
+空文字の環境変数は未設定として扱い、相対パスは実行時の作業ディレクトリから絶対化します。
+`~` は展開しません。
+解決後の配布先パスが重複したときは、表の順で先の配布先だけを扱い、後の要素を「対象外」にします（Windows では大文字と小文字を区別しません）。
+条件を満たさない配布先も削除せず「対象外」とし、理由を stderr に出します。
+
+Claude はホームがあるか、Codex は `<ホーム>/skills` があるかで条件が異なります。
+Codex のホームがあっても skills を使わない環境に、新たにディレクトリを作らないためです。
+Codex はレビュー時に、Codex のサブエージェントは修正適用や実装委譲の際に、それぞれのホームにある写しを読みます。
+
+bridge の定義ファイルは読みません。
+定義で `codex_home` を既定以外にした場合、その独自ホームの写しは検査も配布もしません。
+また、`CODEX_HOME` を `~/.codex` 以外に設定した環境では、bridge の既定ホーム `~/.codex` の写しは検査も配布もしません。
+bridge の設定と異なる場合は、必要な写しを別途管理してください。
+
+配布先ごとの状態は次の 5 種類です。
+「古い」は更新時刻ではなく、正本と写しのバイト列が一致しないことを表します。
+行末だけが違う写しも「古い」になります。
+正本が端末の `core.autocrlf` で変わらないよう、`.gitattributes` で正本の SKILL を LF に固定しています。
+
+| state | 表示名 | 判定 |
+|---|---|---|
+| `match` | 一致 | 正本とバイト一致 |
+| `stale` | 古い | 読めるが正本とバイト不一致 |
+| `missing` | 未配置 | 配布条件を満たすが写しが無い |
+| `unreadable` | 読めない | 写し、または配布条件のディレクトリを権限などで調べられず比較できない |
+| `skipped` | 対象外 | 配布条件を満たさない、または先の要素と同じパス |
+
+- `--check` は書き込まず検査します。`stale` はドリフト、`unreadable` は検査不能です。`missing` はドリフトに数えません。
+- `--dry-run` は書き込まず、配布前の状態と配布予定を表示します。
+- 書き込みモードは `missing`、`stale`、`unreadable` に正本を配ります。`unreadable` でも上書きに成功すればエラーにしません。
+- `--root`（位置引数を含む）を付けなければ、プロジェクト走査をせずグローバル配布だけを行います。
+- `--list` は同じホーム解決規則で配布先と対象外の理由を列挙します。
+- 人向けの集計には `global:` の行が加わり、配布先ごとの検査時の状態が並びます。
+
+一括同期の終了コードは、JSON の有無や `--root` の併用によらず次の意味です。
+
+| 終了コード | 意味 |
 |---|---|
-| `~/.claude/skills/cross-review/SKILL.md` | 常に配る（ディレクトリが無ければ作る） |
-| `~/.codex/skills/cross-review/SKILL.md` | `~/.codex/skills/` が既にあるときだけ配る |
-| `~/.codex-subagent/skills/cross-review/SKILL.md` | `~/.codex-subagent/skills/` が既にあるときだけ配る |
+| 0 | 差分なし、または処理成功。グローバル SKILL が未配置だけの場合も含む |
+| 1 | `--check` でプロジェクトのドリフト、またはグローバル SKILL の `stale` がある |
+| 2 | 引数エラー |
+| 3 | 検査不能または処理失敗。配布元を読めない、`--check` の `unreadable`、配布先への書き込み失敗、プロジェクトの error（マニフェスト破損、上流取得失敗など）、導入プロジェクトが見つからない場合 |
 
-Codex はレビュー時に、Codex のサブエージェントは修正適用や実装委譲の際に、それぞれのホームにある写しを読むので、古いままだと旧ルールで動きます。  
-Codex 用のディレクトリが無い環境では新たに作らず、「対象外」として stderr に理由を出します。
-
-- `--check` と併用すると書き込まず、古ければ **ドリフト扱いで exit 1** にします（グローバル SKILL が古いのは取り込み先のドリフトと同じ扱い）。
-- `--dry-run` は書き込まず、何が変わるかだけ表示します。
-- `--root` を付けずに `--global-skill` だけを指定した場合は、**プロジェクト走査をせずグローバル配布だけ**を行います。
-- `--list` と併用すると、配布先のパス（と対象外の理由）を列挙するだけで終わります。
-- 集計には `global:` の行が加わり、配布先ごとの状態（新規 / 更新 / 一致 / 対象外）が並びます。
+検査不能とドリフトが混在するときは、3 が 1 に優先します。
 
 ```bash
 node tools/cross-review.sync-all.js --global-skill --list     # 配布先を列挙するだけ
-node tools/cross-review.sync-all.js --global-skill --dry-run  # 何が変わるかだけ表示（書き込まない）
+node tools/cross-review.sync-all.js --global-skill --dry-run  # 配布予定を表示
+node tools/cross-review.sync-all.js --global-skill --check    # 検査するだけ
+node tools/cross-review.sync-all.js --global-skill --check --json
 node tools/cross-review.sync-all.js --global-skill            # 配る
 npm run sync:global                                           # = 上と同じ（このリポジトリの scripts）
 ```
+
+`--json` は `--global-skill --check` かつ `--root`（位置引数を含む）無しでのみ受け付けます。
+`--global-skill` 無し、`--check` 無し、`--root`、`--list`、`--dry-run` との併用は引数エラー（exit 2）です。
+引数エラー以外では、配布元を読めない場合も必ず stdout に JSON だけを出し、末尾に改行を 1 つ付けます。
+配布元の案内行や人向けの集計は出しませんが、対象外の警告は stderr に出ます。
+
+JSON は次の形です（パスとハッシュは例示用の値です）。
+
+```json
+{
+  "schemaVersion": 1,
+  "result": "clean",
+  "source": {
+    "path": "/repo/.claude/skills/cross-review/SKILL.md",
+    "sha256": "<正本のSHA-256 hex>",
+    "error": null
+  },
+  "targets": [
+    {
+      "id": "claude",
+      "path": "/home/u/.claude/skills/cross-review/SKILL.md",
+      "home": "/home/u/.claude",
+      "homeFrom": "default",
+      "state": "match",
+      "sha256": "<観測した写しのSHA-256 hex>",
+      "sourcePath": "/repo/.claude/skills/cross-review/SKILL.md",
+      "sourceSha256": "<正本のSHA-256 hex>",
+      "reason": null
+    }
+  ]
+}
+```
+
+- `source.path`、各 `path`、`home`、`sourcePath` は絶対パスです。
+- `targets` は表の順に 3 要素で、各 `id` と `homeFrom` は表の値です。ただし配布元を読めない場合は空配列です。
+- `source.sha256` は正本のバイト列の SHA-256 です。正本を読めない場合だけ null になり、`source.error` に理由が入ります。読めた場合の `source.error` は null です。
+- 各 `sourcePath` と `sourceSha256` は常にトップの `source.path` と `source.sha256` と同値です。
+- 各 `sha256` は `match` / `stale` なら観測した写しのハッシュ、`missing` / `unreadable` / `skipped` なら null です。
+- `reason` は `skipped` / `unreadable` なら必ず文字列、それ以外は null です。重複の場合は「`<先の id> と同じパス`」です。
+- `result` は正本を読めないか `unreadable` があれば `error`、それ以外で `stale` があれば `drift`、それ以外は `clean` です。終了コードはそれぞれ 3 / 1 / 0 です。
 
 > 引数解析、プロジェクト走査、結果分類、集計、一括同期の配線は `tests/cross-review.sync-all.test.js`（vitest）が担保します（取り込み先では任意。一括同期ツールを入れ、かつ vitest を使うときだけ同梱）。
 

@@ -1,3 +1,5 @@
 # Markdown は強制改行に行末スペース 2 つ (ハード改行) を使うため、
 # git diff --check / git apply の trailing-whitespace 検出 (blank-at-eol) を md では無効化する。
 *.md whitespace=-blank-at-eol
+# --global-skill はこの作業ツリーの SKILL をバイト列のまま配って比べるため、端末の autocrlf で正本が変わらないよう LF に固定する。
+.claude/skills/cross-review/SKILL.md text eol=lf

@@ -5,9 +5,11 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 const {
+  main,
   parseArgs,
   projectRootForManifest,
   findManifests,
@@ -21,7 +23,7 @@ const {
   syncOne,
   runAll,
   DEFAULT_DEPTH,
-  GLOBAL_SKILL_TARGETS,
+  resolveGlobalTargets,
 } = require('../tools/cross-review.sync-all.js');
 
 // 同期対象とみなす準拠マニフェスト (upstream / files を持つ) の最小内容。
@@ -325,10 +327,10 @@ describe('runAll', () => {
     err: (s) => sink.err.push(s),
   });
 
-  it('プロジェクトが無ければ exit 1', () => {
+  it('プロジェクトが無ければ exit 3', () => {
     const sink = { out: [], err: [] };
     const r = runAll({ root: '/empty', depth: 4, mode: 'sync' }, mkDeps([], {}, sink));
-    expect(r.exitCode).toBe(1);
+    expect(r.exitCode).toBe(3);
     expect(sink.err.join('')).toMatch(/見つかりません/);
   });
 
@@ -354,7 +356,7 @@ describe('runAll', () => {
     expect(r.items.map((i) => i.status)).toEqual(['updated', 'unchanged']);
   });
 
-  it('1 件でもエラーがあれば exit 1 (他は続行)', () => {
+  it('1 件でもエラーがあれば exit 3 (他は続行)', () => {
     const sink = { out: [], err: [] };
     const manifests = ['/r/a/tools/cross-review.sync.json', '/r/b/tools/cross-review.sync.json'];
     const syncResults = {
@@ -362,7 +364,7 @@ describe('runAll', () => {
       '/r/b/tools/cross-review.sync.json': { result: { results: [{ status: 'update' }], wrote: ['x'], drift: false }, code: 0 },
     };
     const r = runAll({ root: '/r', depth: 4, mode: 'sync', dryRun: false }, mkDeps(manifests, syncResults, sink));
-    expect(r.exitCode).toBe(1);
+    expect(r.exitCode).toBe(3);
     expect(r.items[0]).toMatchObject({ status: 'error' });
     expect(r.items[1]).toMatchObject({ status: 'updated' });
   });
@@ -376,6 +378,18 @@ describe('runAll', () => {
     const r = runAll({ root: '/r', depth: 4, mode: 'check' }, mkDeps(manifests, syncResults, sink));
     expect(r.exitCode).toBe(1);
     expect(r.items[0].status).toBe('drift');
+  });
+
+  it('--check でプロジェクトの error とドリフトが混在したら exit 3', () => {
+    const sink = { out: [], err: [] };
+    const manifests = ['/r/a/tools/cross-review.sync.json', '/r/b/tools/cross-review.sync.json'];
+    const syncResults = {
+      [manifests[0]]: { result: { results: [{ status: 'update' }], wrote: [], drift: true }, code: 1 },
+      [manifests[1]]: { result: null, code: 1, err: '上流取得失敗' },
+    };
+    const r = runAll({ root: '/r', depth: 4, mode: 'check' }, mkDeps(manifests, syncResults, sink));
+    expect(r.exitCode).toBe(3);
+    expect(r.items.map((i) => i.status)).toEqual(['drift', 'error']);
   });
 
   it('非準拠マニフェスト (旧形式) は同期せず skipped・exit 0', () => {
@@ -413,27 +427,27 @@ describe('runAll', () => {
     expect(r.items[0].status).toBe('skipped');
   });
 
-  it('破損マニフェスト (JSON 構文エラー) は skip せず error・exit 1', () => {
+  it('破損マニフェスト (JSON 構文エラー) は skip せず error・exit 3', () => {
     const sink = { out: [], err: [] };
     const manifests = ['/r/broken/tools/cross-review.sync.json'];
     const deps = mkDeps(manifests, {}, sink, () => '{ not json');
     deps.syncOne = () => { throw new Error('破損で syncOne が呼ばれた'); };
     const r = runAll({ root: '/r', depth: 4, mode: 'sync', dryRun: false }, deps);
-    expect(r.exitCode).toBe(1);
+    expect(r.exitCode).toBe(3);
     expect(r.items[0].status).toBe('error');
   });
 
-  it('読めないマニフェスト (raw=null) は skip せず error・exit 1', () => {
+  it('読めないマニフェスト (raw=null) は skip せず error・exit 3', () => {
     const sink = { out: [], err: [] };
     const manifests = ['/r/unreadable/tools/cross-review.sync.json'];
     const deps = mkDeps(manifests, {}, sink, () => null);
     deps.syncOne = () => { throw new Error('読めないのに syncOne が呼ばれた'); };
     const r = runAll({ root: '/r', depth: 4, mode: 'check' }, deps);
-    expect(r.exitCode).toBe(1);
+    expect(r.exitCode).toBe(3);
     expect(r.items[0].status).toBe('error');
   });
 
-  it('準拠と破損が混在: 準拠は同期しつつ破損は error・全体 exit 1', () => {
+  it('準拠と破損が混在: 準拠は同期しつつ破損は error・全体 exit 3', () => {
     const sink = { out: [], err: [] };
     const manifests = ['/r/app/tools/cross-review.sync.json', '/r/broken/tools/cross-review.sync.json'];
     const syncResults = {
@@ -441,13 +455,11 @@ describe('runAll', () => {
     };
     const readManifest = (mp) => (mp.includes('broken') ? '{ not json' : CONFORMING_MANIFEST);
     const r = runAll({ root: '/r', depth: 4, mode: 'sync', dryRun: false }, mkDeps(manifests, syncResults, sink, readManifest));
-    expect(r.exitCode).toBe(1);
+    expect(r.exitCode).toBe(3);
     expect(r.items.map((i) => i.status)).toEqual(['updated', 'error']);
   });
 });
 
-// 仮想 FS (絶対パス -> 内容) でグローバル SKILL の配布を検証する。ディレクトリは空文字を値に持つ
-// エントリで表す。キーは path.resolve で正規化する (Windows で '/home/u' が 'D:\home\u' になるため)。
 function makeHomeFs(initial = {}) {
   const store = new Map(Object.entries(initial).map(([k, v]) => [path.resolve(k), v]));
   const writes = [];
@@ -458,8 +470,10 @@ function makeHomeFs(initial = {}) {
     mkdirs,
     readFile: (p) => {
       const key = path.resolve(p);
-      if (!store.has(key)) throw new Error(`ENOENT: ${key}`);
-      return store.get(key);
+      if (!store.has(key)) throw Object.assign(new Error(`ENOENT: ${key}`), { code: 'ENOENT' });
+      const value = store.get(key);
+      if (value instanceof Error) throw value;
+      return Buffer.from(value);
     },
     exists: (p) => store.has(path.resolve(p)),
     writeFile: (p, c) => { const key = path.resolve(p); store.set(key, c); writes.push({ path: key, content: c }); },
@@ -467,199 +481,314 @@ function makeHomeFs(initial = {}) {
   };
 }
 
-describe('planGlobalSkill', () => {
-  const HOME = '/home/u';
-  // planGlobalSkill が返す path は path.join(home, ...to) なので、期待値も同じ組み立て方で作る
-  // (path.resolve するとドライブレターが付き、Windows で一致しなくなる)。
-  const CLAUDE = path.join(HOME, '.claude', 'skills', 'cross-review', 'SKILL.md');
-  const CODEX = path.join(HOME, '.codex', 'skills', 'cross-review', 'SKILL.md');
-  const CODEX_SUBAGENT = path.join(HOME, '.codex-subagent', 'skills', 'cross-review', 'SKILL.md');
+const HOME = path.resolve('/home/u');
+const SOURCE = path.resolve('/repo/.claude/skills/cross-review/SKILL.md');
+const SKILL = Buffer.from('# SKILL 本文\n');
+const digest = (buffer) => createHash('sha256').update(buffer).digest('hex');
+const skillPath = (dir) => path.join(HOME, dir, 'skills', 'cross-review', 'SKILL.md');
+const CLAUDE = skillPath('.claude');
+const CODEX = skillPath('.codex');
+const CODEX_SUBAGENT = skillPath('.codex-subagent');
 
-  it('未配置は create、内容が古ければ update、一致すれば unchanged', () => {
-    const fsx = makeHomeFs({
-      '/home/u/.codex/skills': '',
-      '/home/u/.codex/skills/cross-review/SKILL.md': '古い SKILL',
-      '/home/u/.codex-subagent/skills': '',
-    });
-    const plans = planGlobalSkill({ home: HOME, targets: GLOBAL_SKILL_TARGETS, exists: fsx.exists, readFile: fsx.readFile, skillText: '新しい SKILL' });
-    expect(plans).toEqual([
-      { path: CLAUDE, status: 'create', reason: expect.any(String) },
-      { path: CODEX, status: 'update', reason: expect.any(String) },
-      { path: CODEX_SUBAGENT, status: 'create', reason: expect.any(String) },
+function globalDeps(homeFiles = {}, overrides = {}) {
+  const fsx = makeHomeFs({ [SOURCE]: SKILL, [path.join(HOME, '.claude')]: '', ...homeFiles });
+  const sink = { out: [], err: [] };
+  return {
+    fsx,
+    sink,
+    deps: {
+      scriptDir: path.resolve('/repo/tools'), home: HOME, env: {}, platform: 'linux',
+      exists: fsx.exists, readFile: fsx.readFile, writeFile: fsx.writeFile, mkdir: fsx.mkdir,
+      findManifests: () => { throw new Error('走査してはいけない'); },
+      out: (s) => sink.out.push(s), err: (s) => sink.err.push(s), ...overrides,
+    },
+  };
+}
+
+function globalOptions(extra = {}) {
+  return { root: null, depth: 4, mode: 'check', globalSkill: true, ...extra };
+}
+
+describe('resolveGlobalTargets', () => {
+  it('既定ホームと固定ホームを識別し、配布先を常に3要素返す', () => {
+    const h = globalDeps();
+    const targets = resolveGlobalTargets(h.deps);
+    expect(targets.map((t) => [t.id, t.homeFrom, t.path])).toEqual([
+      ['claude', 'default', CLAUDE], ['codex', 'default', CODEX], ['codex-subagent', 'fixed', CODEX_SUBAGENT],
     ]);
-
-    fsx.store.set(path.resolve(CLAUDE), '新しい SKILL');
-    fsx.store.set(path.resolve(CODEX), '新しい SKILL');
-    fsx.store.set(path.resolve(CODEX_SUBAGENT), '新しい SKILL');
-    const same = planGlobalSkill({ home: HOME, targets: GLOBAL_SKILL_TARGETS, exists: fsx.exists, readFile: fsx.readFile, skillText: '新しい SKILL' });
-    expect(same.map((p) => p.status)).toEqual(['unchanged', 'unchanged', 'unchanged']);
+    expect(targets.map((t) => t.available)).toEqual([true, false, false]);
   });
 
-  it('Codex の skills ディレクトリが無ければ各 Codex 側は skip (Claude 側は配る)', () => {
-    const fsx = makeHomeFs({});
-    const plans = planGlobalSkill({ home: HOME, targets: GLOBAL_SKILL_TARGETS, exists: fsx.exists, readFile: fsx.readFile, skillText: 'S' });
-    expect(plans.map((p) => p.status)).toEqual(['create', 'skip', 'skip']);
-    expect(plans.slice(1).every((p) => /配布しない/.test(p.reason))).toBe(true);
+  it('環境変数の相対パスは絶対化し、~ は展開しない', () => {
+    const h = globalDeps({}, { env: { CLAUDE_CONFIG_DIR: 'custom/claude', CODEX_HOME: '~/codex' } });
+    const targets = resolveGlobalTargets(h.deps);
+    expect(targets[0]).toMatchObject({ home: path.resolve('custom/claude'), homeFrom: 'CLAUDE_CONFIG_DIR', path: path.resolve('custom/claude/skills/cross-review/SKILL.md') });
+    expect(targets[1]).toMatchObject({ home: path.resolve('~/codex'), homeFrom: 'CODEX_HOME', path: path.resolve('~/codex/skills/cross-review/SKILL.md') });
+    expect(targets[2].homeFrom).toBe('fixed');
   });
 
-  it('~/.codex/skills だけがあれば Codex 側へ配り、サブエージェント側は skip', () => {
-    const fsx = makeHomeFs({ '/home/u/.codex/skills': '' });
-    const plans = planGlobalSkill({ home: HOME, targets: GLOBAL_SKILL_TARGETS, exists: fsx.exists, readFile: fsx.readFile, skillText: 'S' });
-    expect(plans.map((p) => p.status)).toEqual(['create', 'create', 'skip']);
-    expect(plans[2].reason).toMatch(/配布しない/);
+  it('空文字の環境変数は未設定として既定を使う', () => {
+    const h = globalDeps({}, { env: { CLAUDE_CONFIG_DIR: '', CODEX_HOME: '' } });
+    expect(resolveGlobalTargets(h.deps).map((t) => t.homeFrom)).toEqual(['default', 'default', 'fixed']);
+    expect(resolveGlobalTargets(h.deps).map((t) => t.path)).toEqual([CLAUDE, CODEX, CODEX_SUBAGENT]);
   });
 
-  it('配置済みだが読めない配布先は update (古い写しを残さない)', () => {
-    const fsx = makeHomeFs({ '/home/u/.claude/skills/cross-review/SKILL.md': 'x' });
-    const plans = planGlobalSkill({
-      home: HOME,
-      targets: [GLOBAL_SKILL_TARGETS[0]],
-      exists: fsx.exists,
-      readFile: () => { throw new Error('EACCES'); },
-      skillText: 'S',
-    });
-    expect(plans[0]).toMatchObject({ status: 'update' });
-    expect(plans[0].reason).toMatch(/読めない/);
+  it('Claude のホームが無ければ環境変数名を理由に含めて対象外にする', () => {
+    const h = globalDeps({}, { env: { CLAUDE_CONFIG_DIR: '/absent' } });
+    expect(resolveGlobalTargets(h.deps)[0]).toMatchObject({ available: false, reason: expect.stringMatching(/CLAUDE_CONFIG_DIR.*無いため配布しない/) });
+  });
+
+  it.each(['linux', 'win32'])('%s: CODEX_HOME と固定ホームの重複は後の要素を対象外にする', (platform) => {
+    const h = globalDeps({}, { env: { CODEX_HOME: path.join(HOME, '.codex-subagent') + path.sep }, platform });
+    expect(resolveGlobalTargets(h.deps)[2]).toMatchObject({ id: 'codex-subagent', available: false, reason: 'codex と同じパス' });
+  });
+
+  it('win32 の重複判定は大文字と小文字を区別しない', () => {
+    const h = globalDeps({}, { env: { CODEX_HOME: path.join(HOME, '.CODEX-SUBAGENT') }, platform: 'win32' });
+    expect(resolveGlobalTargets(h.deps)[2].reason).toBe('codex と同じパス');
+    expect(resolveGlobalTargets({ ...h.deps, platform: 'linux' })[2].reason).not.toBe('codex と同じパス');
+  });
+
+  it('Claude と Codex の重複も先の id を理由に残す', () => {
+    const h = globalDeps({}, { env: { CODEX_HOME: path.join(HOME, '.claude') } });
+    expect(resolveGlobalTargets(h.deps)[1].reason).toBe('claude と同じパス');
+  });
+});
+
+describe('planGlobalSkill', () => {
+  it('未配置、古い、一致をバイト比較で区別する', () => {
+    const h = globalDeps({ [path.join(HOME, '.codex/skills')]: '', [CODEX]: '古い', [path.join(HOME, '.codex-subagent/skills')]: '', [CODEX_SUBAGENT]: SKILL });
+    const plans = planGlobalSkill({ ...h.deps, skillBuffer: SKILL, sourcePath: SOURCE, sourceSha256: digest(SKILL) });
+    expect(plans.map((p) => p.state)).toEqual(['missing', 'stale', 'match']);
+    expect(plans.map((p) => p.sha256)).toEqual([null, digest('古い'), digest(SKILL)]);
+    expect(plans.every((p) => p.reason === null)).toBe(true);
+  });
+
+  it('同じ置換文字にデコードされる異なるバイトも stale にする', () => {
+    const h = globalDeps({ [CLAUDE]: Buffer.from([0xff]) });
+    const plans = planGlobalSkill({ ...h.deps, skillBuffer: Buffer.from([0xfe]), sourcePath: SOURCE, sourceSha256: digest(Buffer.from([0xfe])) });
+    expect(plans[0].state).toBe('stale');
+  });
+
+  it('行末だけが違う写し (CRLF の正本と LF の写し) も stale にする', () => {
+    const crlf = Buffer.from('# SKILL\r\n本文\r\n');
+    const h = globalDeps({ [CLAUDE]: Buffer.from('# SKILL\n本文\n') });
+    const plans = planGlobalSkill({ ...h.deps, skillBuffer: crlf, sourcePath: SOURCE, sourceSha256: digest(crlf) });
+    expect(plans[0].state).toBe('stale');
   });
 });
 
 describe('runAll の --global-skill', () => {
-  // scriptDir=/repo/tools → 配布元は /repo/.claude/skills/cross-review/SKILL.md
-  const SKILL = '# SKILL 本文\n';
-  function globalDeps(homeFiles = {}, sink = { out: [], err: [] }) {
-    const fsx = makeHomeFs({
-      '/repo/.claude/skills/cross-review/SKILL.md': SKILL,
-      ...homeFiles,
-    });
-    return {
-      fsx,
-      sink,
-      deps: {
-        scriptDir: '/repo/tools',
-        home: '/home/u',
-        exists: fsx.exists,
-        readFile: fsx.readFile,
-        writeFile: fsx.writeFile,
-        mkdir: fsx.mkdir,
-        findManifests: () => { throw new Error('走査してはいけない'); },
-        out: (s) => sink.out.push(s),
-        err: (s) => sink.err.push(s),
-      },
-    };
-  }
-
   beforeEach(() => { process.exitCode = 0; });
   afterAll(() => { process.exitCode = 0; });
 
-  it('--global-skill 単独 (--root 無し) は走査せずグローバル配布だけを行う', () => {
-    const h = globalDeps({
-      '/home/u/.codex/skills': '',
-      '/home/u/.codex-subagent/skills': '',
-    });
-    const r = runAll({ root: null, depth: 4, mode: 'sync', dryRun: false, globalSkill: true }, h.deps);
+  it('書き込みモードは missing、stale、unreadable をすべて配る', () => {
+    const h = globalDeps({ [path.join(HOME, '.codex/skills')]: '', [CODEX]: '古い', [path.join(HOME, '.codex-subagent/skills')]: '', [CODEX_SUBAGENT]: new Error('EACCES') });
+    const r = runAll(globalOptions({ mode: 'sync' }), h.deps);
     expect(r.exitCode).toBe(0);
-    expect(r.items).toHaveLength(1);
     expect(r.items[0]).toMatchObject({ kind: 'global', status: 'updated', changed: 3 });
-    expect(h.fsx.writes.map((w) => w.path)).toEqual([
-      path.resolve('/home/u/.claude/skills/cross-review/SKILL.md'),
-      path.resolve('/home/u/.codex/skills/cross-review/SKILL.md'),
-      path.resolve('/home/u/.codex-subagent/skills/cross-review/SKILL.md'),
-    ]);
-    expect(h.fsx.writes.map((w) => w.content)).toEqual([SKILL, SKILL, SKILL]);
-    expect(h.fsx.mkdirs).toHaveLength(3);
-    // 走査していないので「走査ルート」の見出しは出さない。
+    expect(r.items[0].plans.map((p) => p.state)).toEqual(['missing', 'stale', 'unreadable']);
+    expect(h.fsx.writes.map((w) => w.path)).toEqual([CLAUDE, CODEX, CODEX_SUBAGENT]);
+    expect(h.fsx.writes.every((w) => w.content.equals(SKILL))).toBe(true);
     expect(h.sink.out.join('')).not.toMatch(/走査ルート/);
-    expect(h.sink.out.join('')).toMatch(/\[更新\] \(3 件\) global:/);
+    expect(h.sink.out.join('')).toMatch(/未配置.*古い.*読めない/);
   });
 
-  it('Codex 用の skills ディレクトリが無ければ配らず作らない', () => {
+  it('Claude のホームも Codex の skills も無い環境は作らず対象外にする', () => {
     const h = globalDeps();
-    const r = runAll({ root: null, depth: 4, mode: 'sync', dryRun: false, globalSkill: true }, h.deps);
-    expect(r.items[0]).toMatchObject({ status: 'updated', changed: 1 });
-    expect(h.fsx.writes).toHaveLength(1);
-    expect(h.fsx.writes[0].path).toBe(path.resolve('/home/u/.claude/skills/cross-review/SKILL.md'));
-    expect(h.fsx.mkdirs).toEqual([path.resolve('/home/u/.claude/skills/cross-review')]);
-    expect(h.fsx.exists('/home/u/.codex/skills/cross-review/SKILL.md')).toBe(false);
-    expect(h.fsx.exists('/home/u/.codex-subagent/skills/cross-review/SKILL.md')).toBe(false);
-    expect(h.sink.err.join('')).toMatch(/配布しません/);
-  });
-
-  it('--check は書き込まず、古ければ drift として exit 1', () => {
-    const h = globalDeps({ '/home/u/.claude/skills/cross-review/SKILL.md': '古い' });
-    const r = runAll({ root: null, depth: 4, mode: 'check', globalSkill: true }, h.deps);
-    expect(r.exitCode).toBe(1);
-    expect(r.items[0]).toMatchObject({ status: 'drift' });
-    expect(h.fsx.writes).toEqual([]);
-  });
-
-  it('--check で最新と一致していれば clean・exit 0', () => {
-    const h = globalDeps({ '/home/u/.claude/skills/cross-review/SKILL.md': SKILL });
-    const r = runAll({ root: null, depth: 4, mode: 'check', globalSkill: true }, h.deps);
+    h.fsx.store.delete(path.join(HOME, '.claude'));
+    const r = runAll(globalOptions({ mode: 'sync' }), h.deps);
     expect(r.exitCode).toBe(0);
-    expect(r.items[0]).toMatchObject({ status: 'clean' });
+    expect(r.items[0].plans.map((p) => p.state)).toEqual(['skipped', 'skipped', 'skipped']);
     expect(h.fsx.writes).toEqual([]);
+    expect(h.fsx.mkdirs).toEqual([]);
+    expect(h.sink.err).toHaveLength(3);
   });
 
-  it('--dry-run は書き込まず would-update だけを出す', () => {
+  it('Codex のホームだけあっても skills を作らない', () => {
+    const h = globalDeps({ [path.join(HOME, '.codex')]: '' });
+    runAll(globalOptions({ mode: 'sync' }), h.deps);
+    expect(h.fsx.writes.map((w) => w.path)).toEqual([CLAUDE]);
+    expect(h.fsx.mkdirs).toEqual([path.dirname(CLAUDE)]);
+  });
+
+  it.each([
+    ['missing', undefined, 0, 'clean'], ['match', SKILL, 0, 'clean'], ['stale', '古い', 1, 'drift'],
+    ['unreadable', new Error('EACCES'), 3, 'error'],
+  ])('--check: %s の終了コードと JSON のフィールドが一致する', (state, content, code, result) => {
+    for (const json of [false, true]) {
+      const h = globalDeps(content === undefined ? {} : { [CLAUDE]: content });
+      const r = runAll(globalOptions({ json }), h.deps);
+      expect(r.exitCode).toBe(code);
+      expect(process.exitCode).toBe(code);
+      expect(h.fsx.writes).toEqual([]);
+      if (!json) {
+        expect(h.sink.out.join('')).toContain({ missing: '未配置', match: '一致', stale: '古い', unreadable: '読めない' }[state]);
+        continue;
+      }
+      const output = h.sink.out.join('');
+      const report = JSON.parse(output);
+      expect(output).toBe(JSON.stringify(report, null, 2) + '\n');
+      expect(report).toEqual({
+        schemaVersion: 1, result,
+        source: { path: SOURCE, sha256: digest(SKILL), error: null },
+        targets: [
+          {
+            id: 'claude', path: CLAUDE, home: path.join(HOME, '.claude'), homeFrom: 'default', state,
+            sha256: ['match', 'stale'].includes(state) ? digest(content) : null,
+            sourcePath: SOURCE, sourceSha256: digest(SKILL), reason: state === 'unreadable' ? expect.any(String) : null,
+          },
+          ...['codex', 'codex-subagent'].map((id) => ({
+            id, path: id === 'codex' ? CODEX : CODEX_SUBAGENT, home: path.join(HOME, `.${id}`),
+            homeFrom: id === 'codex' ? 'default' : 'fixed', state: 'skipped', sha256: null,
+            sourcePath: SOURCE, sourceSha256: digest(SKILL), reason: expect.any(String),
+          })),
+        ],
+      });
+      expect(h.sink.err.join('')).toMatch(/配布しません/);
+    }
+  });
+
+  it('stale と unreadable の混在は exit 3 を優先する', () => {
+    for (const json of [false, true]) {
+      const h = globalDeps({ [CLAUDE]: '古い', [path.join(HOME, '.codex/skills')]: '', [CODEX]: new Error('EACCES') });
+      expect(runAll(globalOptions({ json }), h.deps).exitCode).toBe(3);
+      if (json) expect(JSON.parse(h.sink.out.join('')).result).toBe('error');
+    }
+  });
+
+  it.each(['missing', 'unreadable'])('配布元が %s なら exit 3 と source.error を返す', (state) => {
+    for (const json of [false, true]) {
+      const h = globalDeps();
+      if (state === 'missing') h.fsx.store.delete(SOURCE);
+      else h.fsx.store.set(SOURCE, new Error('EACCES'));
+      const r = runAll(globalOptions({ json }), h.deps);
+      expect(r.exitCode).toBe(3);
+      if (json) expect(JSON.parse(h.sink.out.join(''))).toEqual({ schemaVersion: 1, result: 'error', source: { path: SOURCE, sha256: null, error: expect.stringMatching(/配布元の SKILL を読めません/) }, targets: [] });
+      else expect(h.sink.out.join('')).toMatch(/エラー/);
+      expect(h.fsx.writes).toEqual([]);
+    }
+  });
+
+  it('--dry-run は配布予定を表示して書き込まない', () => {
     const h = globalDeps();
-    const r = runAll({ root: null, depth: 4, mode: 'sync', dryRun: true, globalSkill: true }, h.deps);
+    const r = runAll(globalOptions({ mode: 'sync', dryRun: true }), h.deps);
     expect(r.exitCode).toBe(0);
     expect(r.items[0]).toMatchObject({ status: 'would-update', changed: 1 });
     expect(h.fsx.writes).toEqual([]);
   });
 
-  it('配布元の SKILL が無ければ error・exit 1', () => {
-    const sink = { out: [], err: [] };
-    const fsx = makeHomeFs({});
-    const r = runAll({ root: null, depth: 4, mode: 'sync', dryRun: false, globalSkill: true }, {
-      scriptDir: '/repo/tools',
-      home: '/home/u',
-      exists: fsx.exists,
-      readFile: fsx.readFile,
-      writeFile: fsx.writeFile,
-      mkdir: fsx.mkdir,
-      out: (s) => sink.out.push(s),
-      err: (s) => sink.err.push(s),
-    });
-    expect(r.exitCode).toBe(1);
-    expect(r.items[0]).toMatchObject({ kind: 'global', status: 'error' });
-    expect(r.items[0].message).toMatch(/配布元の SKILL がありません/);
-    expect(sink.out.join('')).toMatch(/\[エラー\]/);
+  it('上書きに失敗したら exit 3 と配布先ごとの状態を表示する', () => {
+    const h = globalDeps({ [CLAUDE]: new Error('EACCES') }, { writeFile: () => { throw new Error('EACCES write'); } });
+    const r = runAll(globalOptions({ mode: 'sync' }), h.deps);
+    expect(r.exitCode).toBe(3);
+    expect(h.sink.out.join('')).toMatch(/配布に失敗.*EACCES write.*読めない/);
   });
 
-  it('--list との併用は配布先を列挙するだけ (書き込まない)', () => {
-    const h = globalDeps();
-    const r = runAll({ root: null, depth: 4, mode: 'sync', list: true, globalSkill: true }, h.deps);
+  it('--list は環境変数で解決した配布先を表示し、検査も書き込みもしない', () => {
+    const h = globalDeps({}, { env: { CLAUDE_CONFIG_DIR: '/custom/claude', CODEX_HOME: '/custom/codex' }, readFile: () => { throw new Error('検査してはいけない'); } });
+    const r = runAll(globalOptions({ list: true }), h.deps);
     expect(r.exitCode).toBe(0);
-    expect(h.sink.out.join('')).toMatch(/グローバル SKILL の配布先:/);
-    expect(h.sink.out.join('')).toMatch(/\.claude/);
-    expect(h.sink.out.join('')).toMatch(/\.codex-subagent/);
-    expect(h.sink.out.join('')).toMatch(/対象外/);
+    const output = h.sink.out.join('');
+    expect(output).toContain(path.resolve('/custom/claude/skills/cross-review/SKILL.md'));
+    expect(output).toContain(path.resolve('/custom/codex/skills/cross-review/SKILL.md'));
+    expect(output).toContain('対象外');
     expect(h.fsx.writes).toEqual([]);
   });
 
-  it('--root と併用するとプロジェクト走査に global の行が加わる', () => {
-    const sink = { out: [], err: [] };
-    const fsx = makeHomeFs({ '/repo/.claude/skills/cross-review/SKILL.md': SKILL });
-    const manifests = ['/r/a/tools/cross-review.sync.json'];
-    const r = runAll({ root: '/r', depth: 4, mode: 'sync', dryRun: false, globalSkill: true }, {
-      scriptDir: '/repo/tools',
-      home: '/home/u',
-      exists: fsx.exists,
-      readFile: fsx.readFile,
-      writeFile: fsx.writeFile,
-      mkdir: fsx.mkdir,
-      findManifests: () => manifests,
+  it.each([false, true])('環境変数で指定したホームだけを検査または配布する (check=%s)', (check) => {
+    const customClaude = path.resolve('/custom/claude');
+    const customCodex = path.resolve('/custom/codex');
+    const h = globalDeps({ [customClaude]: '', [path.join(customCodex, 'skills')]: '' }, { env: { CLAUDE_CONFIG_DIR: customClaude, CODEX_HOME: customCodex } });
+    const r = runAll(globalOptions({ mode: check ? 'check' : 'sync' }), h.deps);
+    expect(r.items[0].plans.slice(0, 2).map((p) => [p.home, p.homeFrom, p.state])).toEqual([
+      [customClaude, 'CLAUDE_CONFIG_DIR', 'missing'], [customCodex, 'CODEX_HOME', 'missing'],
+    ]);
+    expect(h.fsx.writes.map((w) => w.path)).toEqual(check ? [] : [path.join(customClaude, 'skills/cross-review/SKILL.md'), path.join(customCodex, 'skills/cross-review/SKILL.md')]);
+  });
+
+  it('--root 併用でもプロジェクトの error はグローバルの stale に優先する', () => {
+    const h = globalDeps({ [CLAUDE]: '古い' }, {
+      findManifests: () => ['/r/a/tools/cross-review.sync.json'],
       readManifest: () => CONFORMING_MANIFEST,
-      syncOne: () => ({ result: { results: [{ status: 'update' }], wrote: ['x'], drift: false }, code: 0 }),
-      out: (s) => sink.out.push(s),
-      err: (s) => sink.err.push(s),
+      syncOne: () => ({ result: null, code: 1, err: '取得失敗' }),
     });
+    const r = runAll(globalOptions({ root: '/r' }), h.deps);
+    expect(r.exitCode).toBe(3);
+    expect(r.items.map((i) => i.status)).toEqual(['error', 'drift']);
+    expect(h.sink.out.join('')).toMatch(/検出した導入プロジェクト: 1 件/);
+  });
+});
+
+describe('--json の引数', () => {
+  beforeEach(() => { process.exitCode = 0; });
+  afterAll(() => { process.exitCode = 0; });
+  it('グローバル単独の --check のみ受け付ける', () => {
+    expect(parseArgs(['--global-skill', '--check', '--json'])).toMatchObject({ json: true, error: null });
+  });
+
+  it.each([
+    ['--check', '--json'], ['--global-skill', '--json'],
+    ['--global-skill', '--check', '--json', '--root', '/r'],
+    ['--global-skill', '--check', '--json', '--root=/r'],
+    ['--global-skill', '--check', '--json', '/r'],
+    ['--global-skill', '--check', '--json', '--list'],
+    ['--global-skill', '--check', '--json', '--dry-run'],
+  ])('無効な組み合わせ %j は引数エラー exit 2 にする', (...args) => {
+    expect(parseArgs(args).error).toMatch(/--json/);
+    const h = globalDeps();
+    main(args, h.deps);
+    expect(process.exitCode).toBe(2);
+    expect(h.sink.out.join('')).toBe('');
+    expect(h.sink.err.join('')).toMatch(/--json/);
+  });
+
+  it('--help は引数エラーより優先してヘルプを出す', () => {
+    const h = globalDeps();
+    main(['--help', '--json'], h.deps);
+    expect(process.exitCode).toBe(0);
+    expect(h.sink.out.join('')).toMatch(/使い方/);
+  });
+});
+
+describe('配布条件のディレクトリを調べられないとき', () => {
+  beforeEach(() => { process.exitCode = 0; });
+  afterAll(() => { process.exitCode = 0; });
+
+  const denyingExists = (fsx, denied) => (p) => {
+    if (path.resolve(p) === denied) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    return fsx.exists(p);
+  };
+
+  it('--check は対象外ではなく unreadable にし、exit 3 と JSON の error を返す', () => {
+    const h = globalDeps();
+    h.deps.exists = denyingExists(h.fsx, path.join(HOME, '.codex', 'skills'));
+    const r = runAll(globalOptions({ json: true }), h.deps);
+    expect(r.exitCode).toBe(3);
+    const report = JSON.parse(h.sink.out.join(''));
+    expect(report.result).toBe('error');
+    expect(report.targets[1]).toMatchObject({ id: 'codex', state: 'unreadable', sha256: null });
+    expect(report.targets[1].reason).toMatch(/EACCES/);
+  });
+
+  it('--list は読めないことを対象外と分けて表示する', () => {
+    const h = globalDeps();
+    h.deps.exists = denyingExists(h.fsx, path.join(HOME, '.codex', 'skills'));
+    runAll(globalOptions({ mode: 'sync', list: true }), h.deps);
+    expect(h.sink.out.join('')).toMatch(/\(読めない: .*EACCES/);
+  });
+});
+
+describe('runAll の --global-skill --dry-run', () => {
+  beforeEach(() => { process.exitCode = 0; });
+  afterAll(() => { process.exitCode = 0; });
+
+  it('読めない写しは書き込みのモードと同じく配布予定に数える', () => {
+    const h = globalDeps({ [CLAUDE]: new Error('EACCES') });
+    const r = runAll(globalOptions({ mode: 'sync', dryRun: true }), h.deps);
     expect(r.exitCode).toBe(0);
-    expect(r.items.map((i) => i.status)).toEqual(['updated', 'updated']);
-    // 集計の件数は導入プロジェクトだけを数える (global の行は含めない)。
-    expect(sink.out.join('')).toMatch(/検出した導入プロジェクト: 1 件/);
-    expect(sink.out.join('')).toMatch(/global:/);
+    expect(r.items[0]).toMatchObject({ status: 'would-update', changed: 1 });
+    expect(h.fsx.writes).toEqual([]);
   });
 });
 

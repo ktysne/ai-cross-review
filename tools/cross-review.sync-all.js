@@ -30,13 +30,11 @@
 //   はそのままでは消える。集計行の直後へインデントして出し、どのプロジェクトの警告かを対応付ける。
 //   検査が回らなかった (雛形が無い / 読めない / 構造不正) ときは集計行にも「マニフェスト検査スキップ」を
 //   出し、未登録 0 件の正常な検査と見分けられるようにする。
-// - --global-skill は、相互レビューの汎用ルールを各リポジトリの CLAUDE.md へ写す運用をやめ、ホームの
-//   グローバル SKILL へ配るための配布口。配布元はこの checkout の SKILL で、配布先は GLOBAL_SKILL_TARGETS
-//   に持つ。Codex はレビュー時に ~/.codex/skills/ の、Codex サブエージェントは修正適用や実装委譲の際に
-//   ~/.codex-subagent/skills/ の写しを読むため、古いままだと旧ルールで動く。requireDir がある配布先は、Codex を使わない環境に
-//   ディレクトリを作らないよう、その親ディレクトリが既にあるときだけ配る。
+// - --global-skill のホーム解決と配布条件は resolveGlobalTargets に集約する。
+//   Codex はホームがあっても skills を使わない環境があるため、skills があるときだけ配る。
+//   Claude はホームがあるときだけ配り、未導入の環境にホームを作らない。
 // - 1 プロジェクトの失敗 (マニフェスト不正、上流取得失敗等) で全体を止めない。各プロジェクトを独立に回し、
-//   最後に集計を出す。終了コードは「いずれかが失敗」または「--check でいずれかにドリフト」で 1。
+//   最後に集計を出す。検査不能や処理失敗は exit 3、--check のドリフトだけなら exit 1 にする。
 // - 副作用 (ディレクトリ走査、runSync 実行) は deps で差し替え可能にし、純粋なロジック (引数解析、
 //   プロジェクトルート算出、結果分類、集計) を単体テストで固定する。cross-review.sync.js と同じ方針。
 
@@ -45,6 +43,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 
 const SYNC_MANIFEST_FILENAME = 'cross-review.sync.json';
 const DEFAULT_DEPTH = 4;
@@ -54,16 +53,13 @@ const SKIP_DIRS = new Set(['node_modules', '.git']);
 // --global-skill の配布元 (この checkout のルートからの相対)。一括同期と同じく、配布するのは
 // 各プロジェクトに同梱された版ではなくこの checkout の版とする。
 const SKILL_SOURCE = ['.claude', 'skills', 'cross-review', 'SKILL.md'];
-// --global-skill の配布先 (ホームからの相対)。requireDir が非 null の配布先は、そのディレクトリが
-// 既にあるときだけ配る (そのツールを入れていない環境に配布先ディレクトリを作らないため)。
-// .codex と .codex-subagent は claude-codex-bridge の既定の codex_home。定義側で別名にした環境は対象外として配らない。
+// bridge の定義ファイルは読まず、サブエージェントのホームは既定の固定パスだけを扱う。
 const GLOBAL_SKILL_TARGETS = [
-  { to: ['.claude', 'skills', 'cross-review', 'SKILL.md'], requireDir: null },
-  { to: ['.codex', 'skills', 'cross-review', 'SKILL.md'], requireDir: ['.codex', 'skills'] },
-  { to: ['.codex-subagent', 'skills', 'cross-review', 'SKILL.md'], requireDir: ['.codex-subagent', 'skills'] },
+  { id: 'claude', env: 'CLAUDE_CONFIG_DIR', dir: '.claude', requireSkills: false },
+  { id: 'codex', env: 'CODEX_HOME', dir: '.codex', requireSkills: true },
+  { id: 'codex-subagent', dir: '.codex-subagent', requireSkills: true },
 ];
-// planGlobalSkill が返す状態の表示名。
-const GLOBAL_STATUS_LABEL = { create: '新規', update: '更新', unchanged: '一致', skip: '対象外' };
+const GLOBAL_STATE_LABEL = { match: '一致', stale: '古い', missing: '未配置', unreadable: '読めない', skipped: '対象外' };
 
 const USAGE = [
   'ai-cross-review 一括同期ツール (作業ルート配下の導入プロジェクトをまとめて同期する)',
@@ -77,13 +73,15 @@ const USAGE = [
   '  --ref <ref>     取り込む上流 ref を全プロジェクト共通で上書き (ブランチ / タグ / コミット)',
   '  --depth <n>     走査の最大深さ (既定 4)',
   '  --list          検出したプロジェクトを列挙するだけ (同期しない)',
-  '  --global-skill  相互レビュー SKILL をホームのグローバル配置 (~/.claude/skills、~/.codex/skills、~/.codex-subagent/skills) へ配る',
+  '  --global-skill  CLAUDE_CONFIG_DIR / CODEX_HOME (既定 ~/.claude / ~/.codex)、固定 ~/.codex-subagent の skills へ配る',
+  '  --json          --global-skill --check 単独 (root 無し、--list / --dry-run 無し) の結果を JSON で出す',
   '  -h, --help      このヘルプを表示',
   '',
   '判定: cross-review.sync.json (同期マニフェスト) を持つディレクトリを導入プロジェクトとみなす。',
   '--check では各プロジェクトのマニフェスト検査 (sync --check-manifest) も併せて回す。',
   '--global-skill は単独 (--root 無し) でも動き、そのときはプロジェクト走査をせずグローバル配布だけを行う。',
-  '~/.codex/skills/ と ~/.codex-subagent/skills/ は既に存在するときだけ配る (未導入の環境にディレクトリを作らないため)。',
+  'Claude はホーム、Codex は <ホーム>/skills が既にあるときだけ配る。',
+  '終了コード: 0 成功、1 --check のドリフト (未配置を除く)、2 引数エラー、3 検査不能 / 処理失敗 / 導入先無し。3 は 1 に優先する。',
   '',
   '例:',
   '  node tools/cross-review.sync-all.js --root /Develop --check   # /Develop 配下のドリフト検査',
@@ -94,7 +92,7 @@ const USAGE = [
 // process.argv.slice(2) を受け取り、モードとオプションを解釈する。
 function parseArgs(argv) {
   const args = argv.slice();
-  const out = { root: null, mode: 'sync', dryRun: false, ref: null, depth: DEFAULT_DEPTH, list: false, globalSkill: false, help: false, error: null };
+  const out = { root: null, mode: 'sync', dryRun: false, ref: null, depth: DEFAULT_DEPTH, list: false, globalSkill: false, json: false, help: false, error: null };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '-h' || a === '--help') {
@@ -107,6 +105,8 @@ function parseArgs(argv) {
       out.list = true;
     } else if (a === '--global-skill') {
       out.globalSkill = true;
+    } else if (a === '--json') {
+      out.json = true;
     } else if (a === '--root') {
       const v = args[i + 1];
       if (!v || v.startsWith('-')) out.error = '--root にはディレクトリパスが必要です';
@@ -141,6 +141,9 @@ function parseArgs(argv) {
     } else {
       out.error = `余計な引数: ${a}`;
     }
+  }
+  if (out.json && (!out.globalSkill || out.mode !== 'check' || out.root != null || out.list || out.dryRun)) {
+    out.error = '--json は --global-skill --check と root 無しで指定してください (--list / --dry-run は併用不可)';
   }
   return out;
 }
@@ -261,37 +264,70 @@ function syncOne(manifestPath, opts, deps = {}) {
   return { manifestPath, root, result, code, threw, out: out.join(''), err: err.join('') };
 }
 
-// --global-skill の配布先ごとに、配布してよいか (requireDir の有無) を判定する。
-// 戻り値: [{ path, available, reason }]。targets 未指定なら既定の GLOBAL_SKILL_TARGETS を使う。
-function resolveGlobalTargets(home, targets, exists) {
-  const list = Array.isArray(targets) && targets.length ? targets : GLOBAL_SKILL_TARGETS;
-  return list.map((t) => {
-    const dest = path.join(home, ...t.to);
-    if (t.requireDir) {
-      const req = path.join(home, ...t.requireDir);
-      if (!exists(req)) return { path: dest, available: false, reason: `${req} が無いため配布しない` };
+// fs.existsSync は権限エラーでも false を返し、「無い」と区別できないため stat で調べる。
+// 無いときだけ false を返し、ほかの失敗は例外のまま呼び出し側へ渡す。
+function pathExists(p) {
+  try {
+    fs.statSync(p);
+    return true;
+  } catch (err) {
+    if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return false;
+    throw err;
+  }
+}
+
+// 全モードで同じホーム解決、配布条件、重複判定を使う。
+// 配布条件のディレクトリを調べられないときは unreadable を立て、対象外と区別する。
+function resolveGlobalTargets(deps = {}) {
+  const home = deps.home || os.homedir();
+  const env = deps.env || process.env;
+  const platform = deps.platform || process.platform;
+  const exists = deps.exists || pathExists;
+  const seen = new Map();
+  return GLOBAL_SKILL_TARGETS.map((t) => {
+    const override = t.env && env[t.env];
+    const targetHome = path.resolve(override || path.join(home, t.dir));
+    const dest = path.join(targetHome, 'skills', 'cross-review', 'SKILL.md');
+    const homeFrom = override ? t.env : (t.env ? 'default' : 'fixed');
+    const requireDir = t.requireSkills ? path.join(targetHome, 'skills') : targetHome;
+    const keyPath = path.resolve(dest).replace(/[\\/]+$/, '');
+    const key = platform === 'win32' ? keyPath.toLowerCase() : keyPath;
+    let reason = null;
+    let unreadable = false;
+    if (seen.has(key)) reason = `${seen.get(key)} と同じパス`;
+    else {
+      seen.set(key, t.id);
+      try {
+        if (!exists(requireDir)) {
+          reason = `${override ? `${t.env} が指すホームの ` : ''}${requireDir} が無いため配布しない`;
+        }
+      } catch (err) {
+        unreadable = true;
+        reason = `${requireDir} を調べられません: ${(err && err.message) || 'stat error'}`;
+      }
     }
-    return { path: dest, available: true, reason: null };
+    return { id: t.id, path: dest, home: targetHome, homeFrom, available: reason === null, unreadable, reason };
   });
 }
 
-// グローバル SKILL の配布プランを算出する純粋関数 (書き込みはしない)。
-// 戻り値: [{ path, status, reason }]。status は create (未配置) / update (内容が古い) /
-// unchanged (一致) / skip (requireDir が無いので配らない)。
-function planGlobalSkill({ home, targets, exists, readFile, skillText }) {
-  return resolveGlobalTargets(home, targets, exists).map((t) => {
-    if (!t.available) return { path: t.path, status: 'skip', reason: t.reason };
-    if (!exists(t.path)) return { path: t.path, status: 'create', reason: '未配置' };
+function sha256(buffer) {
+  return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+// バイト一致で写しを検査する。読めない写しは、書き込みモードで上書きを試せるよう区別する。
+function planGlobalSkill({ home, env, platform, exists, readFile, skillBuffer, sourcePath, sourceSha256 }) {
+  return resolveGlobalTargets({ home, env, platform, exists }).map(({ available, unreadable, ...target }) => {
+    const base = { ...target, sourcePath, sourceSha256, sha256: null };
+    if (unreadable) return { ...base, state: 'unreadable' };
+    if (!available) return { ...base, state: 'skipped' };
     let current;
     try {
-      current = readFile(t.path);
+      current = Buffer.from(readFile(target.path));
     } catch (err) {
-      // 配置済みだが読めない (権限、壊れたリンク等)。一致を確かめられない以上、古い写しが残る方が
-      // 害が大きいので更新扱いにして上書きを試す。
-      return { path: t.path, status: 'update', reason: `既存を読めないため上書き (${(err && err.message) || 'read error'})` };
+      if (err && err.code === 'ENOENT') return { ...base, state: 'missing', reason: null };
+      return { ...base, state: 'unreadable', reason: `写しを読めません: ${(err && err.message) || 'read error'}` };
     }
-    if (current === skillText) return { path: t.path, status: 'unchanged', reason: '最新と一致' };
-    return { path: t.path, status: 'update', reason: '内容が古い' };
+    return { ...base, state: current.equals(skillBuffer) ? 'match' : 'stale', sha256: sha256(current), reason: null };
   });
 }
 
@@ -302,56 +338,58 @@ function formatGlobalPath(home, p) {
   return `~${path.sep}${rel}`;
 }
 
-// グローバル SKILL の配布を実行する。--check / --dry-run では書き込まない。
-// 戻り値は集計アイテム { kind: 'global', project, status, changed, plans } (エラー時は message 付き)。
-// 走査対象のプロジェクトと同じ集計に並べるため、status は他の項目と同じ語彙 (updated / unchanged /
-// would-update / drift / clean / error) に寄せる。
+// --check / --dry-run では書き込まない。検査時の各状態と配布元を report に保持する。
 function runGlobalSkill(opts, deps = {}) {
   const writeOut = deps.out || ((s) => process.stdout.write(s));
   const writeErr = deps.err || ((s) => process.stderr.write(s));
   const home = deps.home || os.homedir();
-  const exists = deps.exists || ((p) => fs.existsSync(p));
-  const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
+  const exists = deps.exists || pathExists;
+  const readFile = deps.readFile || ((p) => fs.readFileSync(p));
   const writeFile = deps.writeFile || ((p, c) => fs.writeFileSync(p, c));
   const mkdir = deps.mkdir || ((d) => fs.mkdirSync(d, { recursive: true }));
   const scriptDir = deps.scriptDir || __dirname;
   const sourcePath = path.join(path.resolve(scriptDir, '..'), ...SKILL_SOURCE);
-  const errorItem = (message) => ({ kind: 'global', project: 'global', status: 'error', changed: 0, message, plans: [] });
+  const report = { schemaVersion: 1, result: 'error', source: { path: sourcePath, sha256: null, error: null }, targets: [] };
+  const errorItem = (message, project = 'global', plans = []) => ({ kind: 'global', project, status: 'error', changed: 0, message, plans, report });
 
-  if (!exists(sourcePath)) return errorItem(`配布元の SKILL がありません: ${sourcePath}`);
-  let skillText;
+  let skillBuffer;
   try {
-    skillText = readFile(sourcePath);
+    skillBuffer = Buffer.from(readFile(sourcePath));
   } catch (err) {
-    return errorItem(`配布元の SKILL を読めません: ${sourcePath} (${(err && err.message) || 'read error'})`);
+    report.source.error = `配布元の SKILL を読めません: ${sourcePath} (${(err && err.message) || 'read error'})`;
+    return errorItem(report.source.error);
   }
-
-  const plans = planGlobalSkill({ home, targets: deps.targets, exists, readFile, skillText });
-  writeOut(`グローバル SKILL の配布元: ${sourcePath}\n`);
+  report.source.sha256 = sha256(skillBuffer);
+  const plans = planGlobalSkill({ home, env: deps.env, platform: deps.platform, exists, readFile, skillBuffer, sourcePath, sourceSha256: report.source.sha256 });
+  report.targets = plans;
+  const unreadable = plans.some((p) => p.state === 'unreadable');
+  const stale = plans.filter((p) => p.state === 'stale');
+  report.result = unreadable ? 'error' : (stale.length ? 'drift' : 'clean');
+  if (!opts.json) writeOut(`グローバル SKILL の配布元: ${sourcePath}\n`);
   for (const p of plans) {
-    if (p.status === 'skip') writeErr(`[cross-review] グローバル SKILL を配布しません: ${formatGlobalPath(home, p.path)} (${p.reason})\n`);
+    if (p.state === 'skipped') writeErr(`[cross-review] グローバル SKILL を配布しません: ${formatGlobalPath(home, p.path)} (${p.reason})\n`);
   }
 
-  const pending = plans.filter((p) => p.status === 'create' || p.status === 'update');
-  const project = `global: ${plans.map((p) => `${formatGlobalPath(home, p.path)} (${GLOBAL_STATUS_LABEL[p.status] || p.status})`).join(', ')}`;
-  // --check は --dry-run より優先する (cross-review.sync.js と同じ規則)。
+  const pending = plans.filter((p) => ['missing', 'stale', 'unreadable'].includes(p.state));
+  const project = `global: ${plans.map((p) => `${formatGlobalPath(home, p.path)} (${GLOBAL_STATE_LABEL[p.state]})`).join(', ')}`;
   if (opts.mode === 'check') {
-    return { kind: 'global', project, status: pending.length ? 'drift' : 'clean', changed: pending.length, plans };
+    return { kind: 'global', project, status: unreadable ? 'error' : (stale.length ? 'drift' : 'clean'), changed: stale.length, plans, report };
   }
   if (opts.dryRun) {
-    return { kind: 'global', project, status: pending.length ? 'would-update' : 'unchanged', changed: pending.length, plans };
+    // 書き込みのモードは unreadable も上書きを試すので、配布予定として数える。
+    return { kind: 'global', project, status: pending.length ? 'would-update' : 'unchanged', changed: pending.length, plans, report };
   }
   let wrote = 0;
   try {
     for (const p of pending) {
       mkdir(path.dirname(p.path));
-      writeFile(p.path, skillText);
+      writeFile(p.path, skillBuffer);
       wrote++;
     }
   } catch (err) {
-    return { ...errorItem(`グローバル SKILL の配布に失敗しました: ${(err && err.message) || 'write error'}`), plans };
+    return errorItem(`グローバル SKILL の配布に失敗しました: ${(err && err.message) || 'write error'}`, project, plans);
   }
-  return { kind: 'global', project, status: wrote > 0 ? 'updated' : 'unchanged', changed: wrote, plans };
+  return { kind: 'global', project, status: wrote > 0 ? 'updated' : 'unchanged', changed: wrote, plans, report };
 }
 
 const STATUS_LABEL = {
@@ -440,8 +478,8 @@ function runAll(opts, deps = {}) {
 
   if (!globalOnly && manifests.length === 0) {
     writeErr(`導入プロジェクト (${SYNC_MANIFEST_FILENAME} を持つディレクトリ) が見つかりません: ${root}\n`);
-    process.exitCode = 1;
-    return { items: [], exitCode: 1 };
+    process.exitCode = 3;
+    return { items: [], exitCode: 3 };
   }
 
   if (opts.list) {
@@ -455,10 +493,9 @@ function runAll(opts, deps = {}) {
     }
     if (opts.globalSkill) {
       const home = deps.home || os.homedir();
-      const exists = deps.exists || ((p) => fs.existsSync(p));
       writeOut(`${listed.length ? '\n' : ''}グローバル SKILL の配布先:\n`);
-      for (const t of resolveGlobalTargets(home, deps.targets, exists)) {
-        writeOut(`  ${formatGlobalPath(home, t.path)}${t.available ? '' : ` (対象外: ${t.reason})`}\n`);
+      for (const t of resolveGlobalTargets(deps)) {
+        writeOut(`  ${formatGlobalPath(home, t.path)}${t.available ? '' : ` (${t.unreadable ? '読めない' : '対象外'}: ${t.reason})`}\n`);
         listed.push({ kind: 'global', project: formatGlobalPath(home, t.path), status: 'listed', changed: 0 });
       }
     }
@@ -471,8 +508,7 @@ function runAll(opts, deps = {}) {
   for (const mp of manifests) {
     const project = projectRootForManifest(mp);
     const kind = classifyManifestRaw(readManifest(mp));
-    // 破損 (読めない / JSON 構文エラー) は正式導入先の設定崩れなので skip せず error/exit 1 にする
-    // (CI の sync-all --check で検出できるようにする)。1 件の error で他プロジェクトは止めない。
+    // 設定崩れを CI で検出するため、破損や読み取り不能は error/exit 3 にする。
     if (kind === 'invalid') {
       items.push({ project, status: 'error', changed: 0, message: `${SYNC_MANIFEST_FILENAME} を読み込めない、または JSON として不正です` });
       anyError = true;
@@ -513,21 +549,25 @@ function runAll(opts, deps = {}) {
     if (globalItem.status === 'drift') anyDrift = true;
   }
 
-  writeOut(formatSummary(globalOnly ? null : root, items));
+  if (opts.json) writeOut(JSON.stringify(items.find((it) => it.kind === 'global').report, null, 2) + '\n');
+  else writeOut(formatSummary(globalOnly ? null : root, items));
 
-  const exitCode = anyError || (opts.mode === 'check' && anyDrift) ? 1 : 0;
+  const exitCode = anyError ? 3 : (opts.mode === 'check' && anyDrift ? 1 : 0);
   process.exitCode = exitCode;
   return { items, exitCode };
 }
 
-function main() {
-  const opts = parseArgs(process.argv.slice(2));
-  if (opts.help) { process.stdout.write(USAGE + '\n'); return; }
-  if (opts.error) { process.stderr.write(`${opts.error}\n\n${USAGE}\n`); process.exitCode = 2; return; }
-  runAll(opts);
+function main(argv = process.argv.slice(2), deps = {}) {
+  const writeOut = deps.out || ((s) => process.stdout.write(s));
+  const writeErr = deps.err || ((s) => process.stderr.write(s));
+  const opts = parseArgs(argv);
+  if (opts.help) { writeOut(USAGE + '\n'); return; }
+  if (opts.error) { writeErr(`${opts.error}\n\n${USAGE}\n`); process.exitCode = 2; return; }
+  runAll(opts, deps);
 }
 
 module.exports = {
+  main,
   parseArgs,
   projectRootForManifest,
   findManifests,

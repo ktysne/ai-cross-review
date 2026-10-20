@@ -134,10 +134,22 @@ Claude Code は、導入先の `.claude/skills/cross-review/SKILL.md` をスキ�
 cd <ai-cross-review の checkout>
 node tools/cross-review.sync-all.js --global-skill --dry-run
 node tools/cross-review.sync-all.js --global-skill
+node tools/cross-review.sync-all.js --global-skill --check
 cd <導入先のルート>
 ```
 
-`~/.claude/skills/cross-review/SKILL.md` に配ります。続く確認は、導入先のルートに戻ってから行います。`~/.codex/skills/` と `~/.codex-subagent/skills/` が既にあるときは、そちらにも配ります。
+Claude のホームは `CLAUDE_CONFIG_DIR`、未設定なら `~/.claude` です。
+ホーム自体があるときだけ、その下の `skills/cross-review/SKILL.md` に配ります。
+Codex のホームは `CODEX_HOME`、未設定なら `~/.codex` です。
+そのホームの `skills/` が既にあるときだけ、同じ相対パスへ配ります。
+サブエージェント用は `~/.codex-subagent` 固定で、`skills/` があるときだけ配ります。
+空文字の環境変数は未設定扱いで、相対パスは作業ディレクトリから絶対化します（`~` は展開しません）。
+bridge で独自の `codex_home` を使う場合や、`CODEX_HOME` を変えた環境で bridge が既定の `~/.codex` を使う場合、その写しは別途管理します。
+
+配布後の `--check` は、0 なら一致または未配置、1 なら古い写しあり、2 なら引数エラー、3 なら配布元や写しを読めないことを示します。
+未配置はドリフトに数えないため、配布済みかどうかは表示された各配布先の状態も確かめます。
+`--json` を追加すると、配布先ごとの状態と SHA-256 を JSON で取得できます（`--root`、`--list`、`--dry-run` は併用不可）。
+続く確認は、導入先のルートに戻ってから行います。
 クラウド実行など、ホームに置けない環境では行いません。導入先の `.claude/skills/cross-review/SKILL.md` がそのまま使われます。
 
 ### 確認
@@ -219,7 +231,9 @@ ai-cross-review 側で追加する設定はありません。`codex` を起動�
 2. `~/.claude/tools/codex-agent.sh`
 
 見つかれば、`bash <スクリプト> codex-review` のように bridge 経由で起動し、モデル、effort、認証ホーム（`CODEX_HOME`）、サンドボックスは bridge の定義ファイルで決まります。
-`CLAUDE_CONFIG_DIR` は見ません。bridge の定義も `~/.claude/tools/` を固定で呼ぶので、bridge は `~/.claude` に置きます。
+bridge の起動スクリプト探索では `CLAUDE_CONFIG_DIR` は見ません。
+bridge の定義も `~/.claude/tools/` を固定で呼ぶので、bridge は `~/.claude` に置きます。
+グローバル SKILL の配布（`--global-skill`）は `CLAUDE_CONFIG_DIR` を見て配布先を決めます。
 
 起動の前に、ai-cross-review は次の 2 点を確かめます。
 
