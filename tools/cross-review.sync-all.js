@@ -31,7 +31,7 @@
 //   検査が回らなかった (雛形が無い / 読めない / 構造不正) ときは集計行にも「マニフェスト検査スキップ」を
 //   出し、未登録 0 件の正常な検査と見分けられるようにする。
 // - --global-skill のホーム解決と配布条件は resolveGlobalTargets に集約する。
-//   Codex はホームがあっても skills を使わない環境があるため、skills があるときだけ配る。
+//   Codex の旧ホームの skills を利用の印にして、共有する .agents へ配る。
 //   Claude はホームがあるときだけ配り、未導入の環境にホームを作らない。
 // - 1 プロジェクトの失敗 (マニフェスト不正、上流取得失敗等) で全体を止めない。各プロジェクトを独立に回し、
 //   最後に集計を出す。検査不能や処理失敗は exit 3、--check のドリフトだけなら exit 1 にする。
@@ -54,13 +54,11 @@ const SKIP_DIRS = new Set(['node_modules', '.git']);
 // --global-skill の配布元 (この checkout のルートからの相対)。一括同期と同じく、配布するのは
 // 各プロジェクトに同梱された版ではなくこの checkout の版とする。
 const SKILL_SOURCE = ['.claude', 'skills', 'cross-review', 'SKILL.md'];
-// bridge の定義ファイルは読まず、サブエージェントのホームは既定の固定パスだけを扱う。
 const GLOBAL_SKILL_TARGETS = [
   { id: 'claude', env: 'CLAUDE_CONFIG_DIR', dir: '.claude', requireSkills: false },
-  { id: 'codex', env: 'CODEX_HOME', dir: '.codex', requireSkills: true },
-  { id: 'codex-subagent', dir: '.codex-subagent', requireSkills: true },
+  { id: 'agents', dir: '.agents', requireSkills: true },
 ];
-const GLOBAL_STATE_LABEL = { match: '一致', stale: '古い', missing: '未配置', unreadable: '読めない', skipped: '対象外' };
+const GLOBAL_STATE_LABEL = { match: '一致', stale: '古い', missing: '未配置', unreadable: '読めない', skipped: '対象外', legacy: '旧配置' };
 
 const USAGE = [
   'ai-cross-review 一括同期ツール (作業ルート配下の導入プロジェクトをまとめて同期する)',
@@ -74,7 +72,7 @@ const USAGE = [
   '  --ref <ref>     取り込む上流 ref を全プロジェクト共通で上書き (ブランチ / タグ / コミット)',
   '  --depth <n>     走査の最大深さ (既定 4)',
   '  --list          検出したプロジェクトを列挙するだけ (同期しない)',
-  '  --global-skill  CLAUDE_CONFIG_DIR / CODEX_HOME (既定 ~/.claude / ~/.codex)、固定 ~/.codex-subagent の skills へ配る',
+  '  --global-skill  Claude のホームと ~/.agents の skills へ配り、配布版と一致する Codex の旧配置を削除する',
   '  --migrate       旧形式を新形式へ移行 (--root 必須。--dry-run / --check [--json] 対応)',
   '  --register      この checkout を ~/.cross-review/engine.json に登録する (--check で照会)',
   '  --json          --global-skill --check または --register --check または --migrate --check の結果を JSON で出す',
@@ -83,7 +81,7 @@ const USAGE = [
   '判定: cross-review.sync.json (同期マニフェスト) を持つディレクトリを導入プロジェクトとみなす。',
   '--check では各プロジェクトのマニフェスト検査 (sync --check-manifest) も併せて回す。',
   '--global-skill は単独 (--root 無し) でも動き、そのときはプロジェクト走査をせずグローバル配布だけを行う。',
-  'Claude はホーム、Codex は <ホーム>/skills が既にあるときだけ配る。',
+  'Claude はホーム、Codex は CODEX_HOME (既定 ~/.codex) または ~/.codex-subagent の skills があるときだけ配る。',
   '終了コード: 0 成功、1 --check のドリフト (未配置を除く)、2 引数エラー、3 検査不能 / 処理失敗 / 導入先無し。3 は 1 に優先する。',
   '',
   '例:',
@@ -305,7 +303,9 @@ function resolveGlobalTargets(deps = {}) {
     const targetHome = path.resolve(override || path.join(home, t.dir));
     const dest = path.join(targetHome, 'skills', 'cross-review', 'SKILL.md');
     const homeFrom = override ? t.env : (t.env ? 'default' : 'fixed');
-    const requireDir = t.requireSkills ? path.join(targetHome, 'skills') : targetHome;
+    const requireDirs = t.requireSkills
+      ? legacyGlobalTargets({ home, env, platform }).map((legacy) => path.join(legacy.home, 'skills'))
+      : [targetHome];
     const keyPath = path.resolve(dest).replace(/[\\/]+$/, '');
     const key = platform === 'win32' ? keyPath.toLowerCase() : keyPath;
     let reason = null;
@@ -314,15 +314,69 @@ function resolveGlobalTargets(deps = {}) {
     else {
       seen.set(key, t.id);
       try {
-        if (!exists(requireDir)) {
-          reason = `${override ? `${t.env} が指すホームの ` : ''}${requireDir} が無いため配布しない`;
+        if (!requireDirs.map((dir) => exists(dir)).some(Boolean)) {
+          reason = `${override ? `${t.env} が指すホームの ` : ''}${requireDirs.join(' または ')} が無いため配布しない`;
         }
       } catch (err) {
         unreadable = true;
-        reason = `${requireDir} を調べられません: ${(err && err.message) || 'stat error'}`;
+        reason = `${requireDirs.join(' または ')} を調べられません: ${(err && err.message) || 'stat error'}`;
       }
     }
     return { id: t.id, path: dest, home: targetHome, homeFrom, available: reason === null, unreadable, reason };
+  });
+}
+
+function legacyGlobalTargets({ home, env, platform }) {
+  const codexHome = env.CODEX_HOME || path.join(home, '.codex');
+  const seen = new Set();
+  return [
+    { id: 'codex-legacy', home: path.resolve(codexHome), homeFrom: env.CODEX_HOME ? 'CODEX_HOME' : 'default' },
+    { id: 'codex-subagent-legacy', home: path.resolve(home, '.codex-subagent'), homeFrom: 'fixed' },
+  ].map((target) => ({ ...target, path: path.join(target.home, 'skills/cross-review/SKILL.md') }))
+    .filter((target) => {
+      const key = platform === 'win32' ? target.path.toLowerCase() : target.path;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function collectSkillVersions(scriptDir, skillBuffer, deps) {
+  const gitRun = deps.gitRun || ((args) => (deps.execFileSync || execFileSync)('git', args, {
+    cwd: path.resolve(scriptDir, '..'), encoding: 'buffer', stdio: ['ignore', 'pipe', 'pipe'],
+  }));
+  const skillPath = SKILL_SOURCE.join('/');
+  try {
+    // 配った版は checkout の HEAD の履歴にある版だけなので、ほかのブランチの版は含めない。
+    const commits = String(gitRun(['log', '--format=%H', '--diff-filter=AM', '--', skillPath])).trim().split(/\s+/).filter(Boolean);
+    if (!commits.length) throw new Error('SKILL の履歴がありません');
+    return { versions: [skillBuffer, ...commits.map((commit) => Buffer.from(gitRun(['show', `${commit}:${skillPath}`])))], reason: null };
+  } catch (err) {
+    return { versions: [], reason: `過去の配布版を集められません: ${err.message}` };
+  }
+}
+
+// 配布先と同じパスに解決された旧配置は旧配置として扱わない。消すと配った写しを消すため。
+function planLegacySkills(deps, skillBuffer, sourcePath, sourceSha256, activePaths = []) {
+  const platform = deps.platform || process.platform;
+  const keyOf = (p) => (platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
+  const active = new Set(activePaths.map(keyOf));
+  const targets = legacyGlobalTargets({ home: deps.home || os.homedir(), env: deps.env || process.env, platform })
+    .filter((target) => !active.has(keyOf(target.path)));
+  let history;
+  const normalize = (buffer) => buffer.toString('latin1').replace(/\r\n/g, '\n');
+  return targets.flatMap((target) => {
+    const base = { ...target, sourcePath, sourceSha256, sha256: null, removable: false };
+    let current;
+    try { current = Buffer.from(deps.readFile(target.path)); }
+    catch (err) {
+      if (err.code === 'ENOENT') return [];
+      return [{ ...base, state: 'unreadable', reason: `写しを読めません: ${err.message}` }];
+    }
+    history ||= collectSkillVersions(deps.scriptDir || __dirname, skillBuffer, deps);
+    const removable = history.versions.some((version) => normalize(version) === normalize(current));
+    return [{ ...base, state: 'legacy', removable, sha256: sha256(current),
+      reason: removable ? null : (history.reason || '過去の配布版および現在の配布元と一致しません') }];
   });
 }
 
@@ -365,7 +419,7 @@ function runGlobalSkill(opts, deps = {}) {
   const mkdir = deps.mkdir || ((d) => fs.mkdirSync(d, { recursive: true }));
   const scriptDir = deps.scriptDir || __dirname;
   const sourcePath = path.join(path.resolve(scriptDir, '..'), ...SKILL_SOURCE);
-  const report = { schemaVersion: 1, result: 'error', source: { path: sourcePath, sha256: null, error: null }, targets: [] };
+  const report = { schemaVersion: 2, result: 'error', source: { path: sourcePath, sha256: null, error: null }, targets: [] };
   const errorItem = (message, project = 'global', plans = []) => ({ kind: 'global', project, status: 'error', changed: 0, message, plans, report });
 
   let skillBuffer;
@@ -377,29 +431,41 @@ function runGlobalSkill(opts, deps = {}) {
   }
   report.source.sha256 = sha256(skillBuffer);
   const plans = planGlobalSkill({ home, env: deps.env, platform: deps.platform, exists, readFile, skillBuffer, sourcePath, sourceSha256: report.source.sha256 });
+  plans.push(...planLegacySkills({ ...deps, home, readFile }, skillBuffer, sourcePath, report.source.sha256, plans.map((p) => p.path)));
   report.targets = plans;
   const unreadable = plans.some((p) => p.state === 'unreadable');
-  const stale = plans.filter((p) => p.state === 'stale');
+  const stale = plans.filter((p) => ['stale', 'legacy'].includes(p.state));
   report.result = unreadable ? 'error' : (stale.length ? 'drift' : 'clean');
   if (!opts.json) writeOut(`グローバル SKILL の配布元: ${sourcePath}\n`);
   for (const p of plans) {
     if (p.state === 'skipped') writeErr(`[cross-review] グローバル SKILL を配布しません: ${formatGlobalPath(home, p.path)} (${p.reason})\n`);
   }
 
-  const pending = plans.filter((p) => ['missing', 'stale', 'unreadable'].includes(p.state));
+  const pending = plans.filter((p) => !p.id.endsWith('-legacy') && ['missing', 'stale', 'unreadable'].includes(p.state));
+  const legacy = plans.filter((p) => p.id.endsWith('-legacy'));
+  for (const p of legacy) {
+    if (opts.dryRun) writeOut(`旧配置を${p.removable ? '削除予定' : '残す'}: ${p.path}${p.reason ? ` (${p.reason})` : ''}\n`);
+    else if (opts.mode !== 'check' && !p.removable) writeErr(`[cross-review] 旧配置を残します: ${p.path} (${p.reason})\n`);
+  }
   const project = `global: ${plans.map((p) => `${formatGlobalPath(home, p.path)} (${GLOBAL_STATE_LABEL[p.state]})`).join(', ')}`;
   if (opts.mode === 'check') {
     return { kind: 'global', project, status: unreadable ? 'error' : (stale.length ? 'drift' : 'clean'), changed: stale.length, plans, report };
   }
   if (opts.dryRun) {
-    // 書き込みのモードは unreadable も上書きを試すので、配布予定として数える。
-    return { kind: 'global', project, status: pending.length ? 'would-update' : 'unchanged', changed: pending.length, plans, report };
+    const changes = pending.length + legacy.filter((p) => p.removable).length;
+    return { kind: 'global', project, status: changes ? 'would-update' : 'unchanged', changed: changes, plans, report };
   }
   let wrote = 0;
   try {
     for (const p of pending) {
       mkdir(path.dirname(p.path));
       writeFile(p.path, skillBuffer);
+      wrote++;
+    }
+    for (const p of legacy.filter((target) => target.removable)) {
+      (deps.unlink || fs.unlinkSync)(p.path);
+      try { (deps.rmdir || fs.rmdirSync)(path.dirname(p.path)); }
+      catch (err) { if (!['ENOTEMPTY', 'EEXIST'].includes(err.code)) throw err; }
       wrote++;
     }
   } catch (err) {
