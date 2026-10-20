@@ -75,8 +75,9 @@ const USAGE = [
   '  --depth <n>     走査の最大深さ (既定 4)',
   '  --list          検出したプロジェクトを列挙するだけ (同期しない)',
   '  --global-skill  CLAUDE_CONFIG_DIR / CODEX_HOME (既定 ~/.claude / ~/.codex)、固定 ~/.codex-subagent の skills へ配る',
+  '  --migrate       旧形式を新形式へ移行 (--root 必須。--dry-run / --check [--json] 対応)',
   '  --register      この checkout を ~/.cross-review/engine.json に登録する (--check で照会)',
-  '  --json          --global-skill --check または --register --check 単独の結果を JSON で出す',
+  '  --json          --global-skill --check または --register --check または --migrate --check の結果を JSON で出す',
   '  -h, --help      このヘルプを表示',
   '',
   '判定: cross-review.sync.json (同期マニフェスト) を持つディレクトリを導入プロジェクトとみなす。',
@@ -107,6 +108,8 @@ function parseArgs(argv) {
       out.list = true;
     } else if (a === '--global-skill') {
       out.globalSkill = true;
+    } else if (a === '--migrate') {
+      out.migrate = true;
     } else if (a === '--register') {
       out.register = true;
     } else if (a === '--json') {
@@ -149,7 +152,13 @@ function parseArgs(argv) {
   if (out.register && (out.root != null || out.globalSkill || out.list || out.dryRun)) {
     out.error = '--register は --root / --global-skill / --list / --dry-run と併用できません';
   }
-  if (out.json && ((!out.globalSkill && !out.register) || (out.globalSkill && out.register) || out.mode !== 'check' || out.root != null || out.list || out.dryRun)) {
+  if (out.migrate) {
+    if (!out.root) out.error = '--migrate には --root または位置引数の走査ルートが必要です';
+    if (out.globalSkill || out.register || out.list || out.ref != null) out.error = '--migrate は --global-skill / --register / --list / --ref と併用できません';
+    if (out.dryRun && out.mode === 'check') out.error = '--migrate では --dry-run と --check を併用できません';
+    if (out.json && out.mode !== 'check') out.error = '--json は --migrate --check と併用してください';
+  }
+  if (out.json && !out.migrate && ((!out.globalSkill && !out.register) || (out.globalSkill && out.register) || out.mode !== 'check' || out.root != null || out.list || out.dryRun)) {
     out.error = '--json は --global-skill --check または --register --check 単独で指定してください (--root / --list / --dry-run は併用不可)';
   }
   return out;
@@ -669,6 +678,248 @@ function runRegister(opts, deps = {}) {
   process.exitCode = 0;
 }
 
+const MIGRATION_SOURCES = new Map([
+  ['tools/cross-review.js', 'tools/cross-review.entry.js'],
+  ['.claude/skills/cross-review/SKILL.md', 'templates/cloud-skill/SKILL.md'],
+  ['docs/cross-review.md', 'templates/docs/cross-review.md'],
+]);
+const MIGRATION_REMOVED = new Set([
+  'tools/cross-review.sync.js', 'tools/cross-review.sync-all.js',
+  'tests/cross-review.test.js', 'tests/cross-review.sync.test.js', 'tests/cross-review.sync-all.test.js',
+]);
+
+function serializeMigrationJson(value, raw) {
+  const indent = /(?:^|\n)(\t+| +)"/.exec(raw)?.[1] || '  ';
+  const eol = raw.includes('\r\n') ? '\r\n' : '\n';
+  return JSON.stringify(value, null, indent).replace(/\n/g, eol) + (/\n$/.test(raw) ? eol : '');
+}
+
+function rewriteMigrationManifest(manifest, example) {
+  const next = structuredClone(manifest);
+  next.files = next.files.filter((entry) => !MIGRATION_REMOVED.has(entry.from))
+    .map((entry) => entry.from === '.claude/skills/cross-review/SKILL.md' && entry.to !== entry.from
+      ? entry : { ...entry, from: MIGRATION_SOURCES.get(entry.from) || entry.from });
+  if (next.excludedFiles) {
+    next.excludedFiles = next.excludedFiles.filter((from) => !MIGRATION_REMOVED.has(from))
+      .map((from) => MIGRATION_SOURCES.get(from) || from);
+  }
+  for (const entry of example.files) {
+    if (!next.files.some((file) => file.from === entry.from) && !next.excludedFiles?.includes(entry.from)) {
+      next.files.push(structuredClone(entry));
+    }
+  }
+  return next;
+}
+
+function inspectMigration(manifestPath, acquire, deps) {
+  const sync = require('./cross-review.sync.js');
+  const project = { root: path.resolve(projectRootForManifest(manifestPath)), manifest: path.resolve(manifestPath),
+    upstream: null, form: 'error', migratable: null, reason: null, message: null };
+  const fail = (reason, message, migratable = false) => {
+    project.reason = reason;
+    project.message = message;
+    project.migratable = project.form === 'legacy' ? migratable : null;
+    return { project };
+  };
+  let raw;
+  let manifest;
+  try {
+    raw = fs.readFileSync(manifestPath, 'utf8');
+    manifest = JSON.parse(raw);
+  } catch (err) {
+    return fail('manifest-unreadable', `マニフェストを読めません: ${err.message}`);
+  }
+  if (manifest?.upstream && typeof manifest.upstream === 'object' && !Array.isArray(manifest.upstream)) {
+    project.upstream = {
+      repo: typeof manifest.upstream.repo === 'string' ? manifest.upstream.repo : null,
+      ref: typeof manifest.upstream.ref === 'string' ? manifest.upstream.ref : null,
+    };
+  }
+  if (classifyManifestRaw(raw) === 'skip') {
+    project.form = 'not-applicable';
+    return { project };
+  }
+  try { sync.validateManifest(manifest, null, deps); } catch (err) {
+    if (Array.isArray(manifest.files)) project.form = 'legacy';
+    return fail('manifest-invalid', err.message);
+  }
+  if (sync.isNewFormManifest(manifest)) {
+    project.form = 'new';
+    return { project };
+  }
+  project.form = 'legacy';
+  let upstream;
+  try { upstream = acquire(manifest.upstream); } catch (err) {
+    return fail('upstream-unavailable', `上流を取得できません: ${err.message}`, null);
+  }
+  try {
+    const entry = fs.readFileSync(path.join(upstream.dir, 'tools/cross-review.entry.js'), 'utf8');
+    const protocol = /^\s*const ENTRY_PROTOCOL = (\d+);\s*$/m.exec(entry);
+    if (!protocol) throw new Error('入口の ENTRY_PROTOCOL を読めません');
+    const engine = probeEngine(path.resolve(upstream.dir, 'tools/cross-review.js'), deps);
+    const range = engine.range;
+    if (!engine.check || !Number.isInteger(range?.min) || !Number.isInteger(range?.max)
+        || Number(protocol[1]) < range.min || Number(protocol[1]) > range.max) {
+      throw new Error('本体が入口の番号を受け付けません');
+    }
+  } catch (err) {
+    return fail('ref-unsupported', `ref ${manifest.upstream.ref} は移行に対応していません。upstream.ref を tools/cross-review.entry.js を含む対応版 (例 main) へ上げてください: ${err.message}`);
+  }
+  let next;
+  if (manifest.files.some((entry) => entry.from === 'tools/cross-review.js' && entry.to !== 'tools/cross-review.js')) {
+    return fail('custom-body-location', '本体の配置が tools/cross-review.js 以外のため移行できません。入口が導入先のルートを解決できる配置へ変更するか判断してください');
+  }
+  try {
+    const example = JSON.parse(fs.readFileSync(path.join(upstream.dir, sync.UPSTREAM_EXAMPLE_MANIFEST), 'utf8'));
+    sync.validateManifest(example, null, deps);
+    if (!sync.NEW_FORM_SOURCES.every((from) => example.files.some((entry) => entry.from === from))) {
+      throw new Error('上流の雛形に新形式の配布物がありません');
+    }
+    next = rewriteMigrationManifest(manifest, { files: example.files.filter((entry) => sync.NEW_FORM_SOURCES.includes(entry.from)) });
+    sync.validateManifest(next, null, deps);
+  } catch (err) {
+    return fail(/to が重複/.test(err.message) ? 'duplicate-destination' : 'manifest-invalid', err.message);
+  }
+  if (manifest.excludedFiles?.includes('tools/cross-review.js')) {
+    return fail('body-excluded', '本体が excludedFiles にあるため移行できません。入口の取り込みを許可するか判断してください');
+  }
+  project.migratable = true;
+  return { project, raw, manifest, next, upstream };
+}
+
+function planMigration(inspection) {
+  const sync = require('./cross-review.sync.js');
+  const { project, manifest, next, upstream } = inspection;
+  const removed = manifest.files.filter((entry) => MIGRATION_REMOVED.has(entry.from)).map((entry) => {
+    const absolute = path.resolve(project.root, entry.to);
+    sync.assertWithinRoot(project.root, absolute, `削除対象 (${entry.to})`);
+    return { to: entry.to, absolute };
+  });
+  const plan = sync.computeSyncPlan(next, upstream.dir, project.root);
+  const packagePath = path.join(project.root, 'package.json');
+  const manual = [];
+  const replacements = [];
+  let packageRaw = null;
+  let packageNext = null;
+  if (pathExists(packagePath)) {
+    packageRaw = fs.readFileSync(packagePath, 'utf8');
+    const value = JSON.parse(packageRaw);
+    for (const [name, command] of Object.entries(value.scripts || {})) {
+      if (typeof command !== 'string') continue;
+      if (command.includes('cross-review.sync-all.js')
+          || manifest.files.some((entry) => MIGRATION_REMOVED.has(entry.from) && entry.from.startsWith('tests/') && command.includes(entry.to))
+          || [...MIGRATION_REMOVED].some((from) => from.startsWith('tests/') && command.includes(from))) {
+        manual.push(`package.json scripts.${name}: ${command}`);
+        continue;
+      }
+      const updated = command.replace(/\bnode tools\/cross-review\.sync\.js(?=\s|$|[;&|])/g, 'node tools/cross-review.js sync');
+      if (updated !== command) {
+        value.scripts[name] = updated;
+        replacements.push(`scripts.${name}: ${command} → ${updated}`);
+      }
+    }
+    if (replacements.length) packageNext = serializeMigrationJson(value, packageRaw);
+  }
+  return { removed, plan, packagePath, packageNext, replacements, manual };
+}
+
+function applyMigration(inspection, plan, opts, deps, out, err) {
+  const sync = require('./cross-review.sync.js');
+  const { project, raw, next, upstream } = inspection;
+  const manifestRaw = serializeMigrationJson(next, raw);
+  out(`  マニフェスト: files ${inspection.manifest.files.length} → ${next.files.length} 件、from と excludedFiles を新形式へ変換\n`);
+  for (const file of plan.removed) out(`  ${opts.dryRun ? '削除予定' : '削除対象'}: ${file.to}\n`);
+  for (const replacement of plan.replacements) out(`  package.json ${replacement}\n`);
+  for (const item of plan.manual) out(`  手で修正: ${item}\n`);
+  if (!opts.dryRun) {
+    fs.writeFileSync(project.manifest, manifestRaw);
+    if (plan.packageNext != null) fs.writeFileSync(plan.packagePath, plan.packageNext);
+    for (const file of plan.removed) {
+      sync.assertWithinRoot(project.root, file.absolute, `削除対象 (${file.to})`);
+      if (pathExists(file.absolute)) {
+        fs.rmSync(file.absolute, { force: true });
+        out(`  削除: ${file.to}\n`);
+      }
+    }
+  }
+  const previousExit = process.exitCode;
+  process.exitCode = 0;
+  try {
+    const result = (deps.runSync || sync.runSync)({ root: project.root, manifestPath: project.manifest,
+      mode: 'sync', dryRun: opts.dryRun }, {
+      out: (s) => out(`  ${s}`), err,
+      readFile: (file) => path.resolve(file) === project.manifest ? manifestRaw : fs.readFileSync(file, 'utf8'),
+      writeFile: (file, content) => {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, path.resolve(file) === project.manifest
+          ? serializeMigrationJson(JSON.parse(content), raw) : content);
+      },
+      prepareUpstream: () => ({ ...upstream, cleanup: () => {} }),
+    });
+    if (!result || process.exitCode) throw new Error('新形式の配布物の同期に失敗しました');
+  } finally {
+    process.exitCode = previousExit;
+  }
+}
+
+function runMigrate(opts, deps = {}) {
+  const out = deps.out || ((s) => process.stdout.write(s));
+  const err = deps.err || ((s) => process.stderr.write(s));
+  const sync = require('./cross-review.sync.js');
+  const cache = new Map();
+  const acquire = (upstream) => {
+    const key = JSON.stringify([upstream.repo, upstream.ref]);
+    if (!cache.has(key)) {
+      try { cache.set(key, { tree: (deps.prepareUpstream || sync.defaultPrepareUpstream)(upstream.repo, upstream.ref, deps) }); }
+      catch (error) { cache.set(key, { error }); }
+    }
+    const value = cache.get(key);
+    if (value.error) throw value.error;
+    return value.tree;
+  };
+  const report = { schemaVersion: 1, subject: 'migrate', result: 'clean', root: path.resolve(opts.root), projects: [] };
+  let failed = false;
+  let pending = false;
+  try {
+    const manifests = (deps.findManifests || findManifests)(report.root, opts.depth, deps);
+    const inspections = manifests.map((file) => inspectMigration(file, acquire, deps))
+      .sort((a, b) => a.project.root < b.project.root ? -1 : a.project.root > b.project.root ? 1 : 0);
+    for (const inspection of inspections) {
+      const project = inspection.project;
+      report.projects.push(project);
+      let status = { new: '新形式', 'not-applicable': '対象外', error: 'エラー', legacy: '旧形式' }[project.form];
+      const details = [];
+      if (opts.mode !== 'check' && project.form === 'legacy' && project.migratable === true) {
+        try {
+          const plan = planMigration(inspection);
+          applyMigration(inspection, plan, opts, deps, (s) => details.push(s), err);
+          status = opts.dryRun ? '移行予定' : '移行した';
+        } catch (error) {
+          failed = true;
+          status = 'エラー';
+          err(`${project.root}: ${error.message}\n`);
+        }
+      } else if (project.form === 'legacy') {
+        pending = true;
+        if (project.migratable !== true) status = '移行できない';
+      }
+      if (project.form === 'error' || (project.form === 'legacy' && project.migratable === null)) failed = true;
+      if (!opts.json) {
+        out(`[${status}] ${project.root}${project.reason ? ` (${project.reason}: ${project.message})` : ''}\n`);
+        for (const detail of details) out(detail);
+      }
+    }
+    report.result = failed ? 'error' : pending ? 'drift' : 'clean';
+    if (opts.json) out(JSON.stringify(report) + '\n');
+    process.exitCode = failed ? 3 : pending ? 1 : 0;
+    return report;
+  } finally {
+    for (const { tree } of cache.values()) {
+      try { tree?.cleanup?.(); } catch (error) { err(`上流の一時ディレクトリを削除できません: ${error.message}\n`); }
+    }
+  }
+}
+
 function main(argv = process.argv.slice(2), deps = {}) {
   const writeOut = deps.out || ((s) => process.stdout.write(s));
   const writeErr = deps.err || ((s) => process.stderr.write(s));
@@ -676,10 +927,12 @@ function main(argv = process.argv.slice(2), deps = {}) {
   if (opts.help) { writeOut(USAGE + '\n'); return; }
   if (opts.error) { writeErr(`${opts.error}\n\n${USAGE}\n`); process.exitCode = 2; return; }
   if (opts.register) return runRegister(opts, deps);
+  if (opts.migrate) return runMigrate(opts, deps);
   runAll(opts, deps);
 }
 
 module.exports = {
+  runMigrate,
   runRegister,
   inspectRegistration,
   probeEngine,

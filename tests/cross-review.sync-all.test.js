@@ -2,12 +2,15 @@
 // 実ディレクトリ走査・実 runSync は外部依存なので、findManifests は listDir を注入し、runAll は
 // findManifests / syncOne を注入して、書き込みや実 I/O 無しで分類と exit コードまで固定する。
 
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 import { createHash } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
+const syncModule = require('../tools/cross-review.sync.js');
 const {
   main,
   parseArgs,
@@ -1079,5 +1082,354 @@ describe('旧形式の一括検査の案内', () => {
     expect(result.items[0].warnings).toEqual([notice]);
     expect(output.join('')).toContain(notice);
     process.exitCode = 0;
+  });
+});
+
+describe('sync-all --migrate', () => {
+  let temp;
+  let upstream;
+  let roots;
+  let output;
+  let errors;
+  let prepared;
+  let cleaned;
+  let range;
+  let hasCheck;
+  const put = (file, content) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, content);
+  };
+  const read = (file) => fs.readFileSync(file, 'utf8');
+  const legacy = () => ({
+    upstream: { repo: 'fixture', ref: 'main' }, lastSyncedCommit: 'before', shownMigrations: [], custom: { keep: true },
+    files: [
+      { from: 'tools/cross-review.js', to: 'tools/cross-review.js' },
+      { from: '.claude/skills/cross-review/SKILL.md', to: '.claude/skills/cross-review/SKILL.md' },
+      { from: 'docs/cross-review.md', to: 'site/review.md', replace: [{ from: 'original', to: 'adapted' }] },
+      { from: '.cross-review.example.md', to: '.cross-review.example.md' },
+      ...['tools/cross-review.sync.js', 'tools/cross-review.sync-all.js', 'tests/cross-review.test.js',
+        'tests/cross-review.sync.test.js', 'tests/cross-review.sync-all.test.js'].map((from) => ({ from, to: from })),
+    ],
+  });
+  const project = (name, manifest = legacy(), indent = 2, eol = '\n', newline = true) => {
+    const root = path.join(roots, name);
+    for (const entry of manifest.files || []) if (entry?.to && !entry.to.includes('..')) put(path.join(root, entry.to), `old ${entry.from}`);
+    const manifestPath = path.join(root, 'tools/cross-review.sync.json');
+    put(manifestPath, JSON.stringify(manifest, null, indent).replace(/\n/g, eol) + (newline ? eol : ''));
+    return { root, manifestPath };
+  };
+  const snapshot = (root) => {
+    const files = {};
+    const walk = (dir) => {
+      for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+        const file = path.join(dir, item.name);
+        if (item.isDirectory()) walk(file);
+        else files[path.relative(root, file)] = read(file);
+      }
+    };
+    walk(root);
+    return files;
+  };
+  const run = (args = [], extra = {}) => {
+    output = '';
+    errors = '';
+    main(['--migrate', '--root', roots, ...args], {
+      out: (s) => { output += s; }, err: (s) => { errors += s; },
+      prepareUpstream: () => { prepared++; return { dir: upstream, commit: 'after', cleanup: () => { cleaned++; } }; },
+      execFileSync: () => JSON.stringify({ range, check: hasCheck }), ...extra,
+    });
+    return process.exitCode;
+  };
+  beforeEach(() => {
+    temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-review-migrate-'));
+    upstream = path.join(temp, 'upstream');
+    roots = path.join(temp, 'projects');
+    fs.mkdirSync(roots);
+    const example = JSON.parse(read(path.resolve('tools/cross-review.sync.example.json')));
+    put(path.join(upstream, 'tools/cross-review.sync.example.json'), JSON.stringify(example));
+    put(path.join(upstream, 'tools/cross-review.entry.js'), 'const ENTRY_PROTOCOL = 1;\n');
+    put(path.join(upstream, 'tools/cross-review.js'), 'exports.ENTRY_PROTOCOL_RANGE = { min: 1, max: 1 }; exports.checkEntryProtocol = () => ({ ok: true });\n');
+    put(path.join(upstream, 'templates/cloud-skill/SKILL.md'), 'cloud skill\n');
+    put(path.join(upstream, 'templates/docs/cross-review.md'), 'original guide\n');
+    put(path.join(upstream, '.cross-review.example.md'), 'checklist\n');
+    prepared = 0;
+    cleaned = 0;
+    range = { min: 1, max: 1 };
+    hasCheck = true;
+  });
+  afterEach(() => {
+    fs.rmSync(temp, { recursive: true, force: true });
+    process.exitCode = 0;
+  });
+
+  it('旧形式を移行し、別配置と置換と独自キーを保ち、不要な写しと scripts を整理する', () => {
+    const p = project('legacy');
+    put(path.join(p.root, 'package.json'), JSON.stringify({ scripts: { sync: 'node tools/cross-review.sync.js --check' } }));
+    expect(run()).toBe(0);
+    const manifest = JSON.parse(read(p.manifestPath));
+    expect(syncModule.isNewFormManifest(manifest)).toBe(true);
+    expect(manifest.custom).toEqual({ keep: true });
+    expect(manifest.upstream).toEqual({ repo: 'fixture', ref: 'main' });
+    expect(manifest.files.find((f) => f.from === 'templates/docs/cross-review.md')).toEqual({
+      from: 'templates/docs/cross-review.md', to: 'site/review.md', replace: [{ from: 'original', to: 'adapted' }],
+    });
+    expect(manifest.files).toContainEqual({ from: '.cross-review.example.md', to: '.cross-review.example.md' });
+    expect(read(path.join(p.root, 'site/review.md'))).toBe('adapted guide\n');
+    expect(read(path.join(p.root, 'tools/cross-review.js'))).toContain('ENTRY_PROTOCOL');
+    expect(read(path.join(p.root, '.claude/skills/cross-review/SKILL.md'))).toBe('cloud skill\n');
+    for (const from of ['tools/cross-review.sync.js', 'tools/cross-review.sync-all.js', 'tests/cross-review.test.js',
+      'tests/cross-review.sync.test.js', 'tests/cross-review.sync-all.test.js']) expect(fs.existsSync(path.join(p.root, from))).toBe(false);
+    expect(JSON.parse(read(path.join(p.root, 'package.json'))).scripts.sync).toBe('node tools/cross-review.js sync --check');
+    expect(output).toContain('削除: tests/cross-review.test.js');
+    expect(prepared).toBe(1);
+    expect(cleaned).toBe(1);
+    const before = snapshot(p.root);
+    expect(run()).toBe(0);
+    expect(snapshot(p.root)).toEqual(before);
+    expect(prepared).toBe(1);
+  });
+
+  it('除外を変換して SKILL と手順書を足さず、古いテストの除外を消す', () => {
+    const m = legacy();
+    m.files = m.files.filter((f) => !['.claude/skills/cross-review/SKILL.md', 'docs/cross-review.md'].includes(f.from));
+    m.excludedFiles = ['.claude/skills/cross-review/SKILL.md', 'docs/cross-review.md', 'tests/cross-review.test.js', 'other'];
+    const p = project('excluded', m);
+    expect(run()).toBe(0);
+    const next = JSON.parse(read(p.manifestPath));
+    expect(next.excludedFiles).toEqual(['templates/cloud-skill/SKILL.md', 'templates/docs/cross-review.md', 'other']);
+    expect(next.files.some((f) => f.from.startsWith('templates/'))).toBe(false);
+  });
+
+  it('独自配置の SKILL と置換を残し、クラウド向け SKILL を雛形の配置へ足す', () => {
+    const m = legacy();
+    const skill = m.files.find((entry) => entry.from === '.claude/skills/cross-review/SKILL.md');
+    skill.to = '.agents/skills/cross-review/SKILL.md';
+    skill.replace = [{ from: 'local', to: 'custom' }];
+    put(path.join(upstream, skill.from), 'local skill\n');
+    const p = project('custom-skill', m);
+    expect(run()).toBe(0);
+    const next = JSON.parse(read(p.manifestPath));
+    expect(next.files).toContainEqual(skill);
+    expect(next.files).toContainEqual({ from: 'templates/cloud-skill/SKILL.md', to: '.claude/skills/cross-review/SKILL.md' });
+    expect(read(path.join(p.root, skill.to))).toBe('custom skill\n');
+    expect(read(path.join(p.root, '.claude/skills/cross-review/SKILL.md'))).toBe('cloud skill\n');
+    expect(syncModule.isNewFormManifest(next)).toBe(true);
+    const before = snapshot(p.root);
+    expect(run()).toBe(0);
+    expect(snapshot(p.root)).toEqual(before);
+  });
+
+  it.each([{ args: [] }, { args: ['--dry-run'] }, { args: ['--check', '--json'] }])('独自配置の本体は custom-body-location として変更しない (%j)', ({ args }) => {
+    const m = legacy();
+    m.files[0].to = 'lib/cross-review.js';
+    const p = project('custom-body', m);
+    put(path.join(p.root, 'package.json'), JSON.stringify({ scripts: { sync: 'node tools/cross-review.sync.js' } }));
+    const before = snapshot(p.root);
+    expect(run(args)).toBe(1);
+    expect(snapshot(p.root)).toEqual(before);
+    expect(output).toContain('custom-body-location');
+    if (args.includes('--json')) expect(JSON.parse(output)).toMatchObject({ result: 'drift', projects: [
+      { form: 'legacy', migratable: false, reason: 'custom-body-location' },
+    ] });
+  });
+
+  it('不足する新形式の配布物だけ雛形の配置で足し、未知の配布物を残す', () => {
+    const m = legacy();
+    m.files = [m.files[0], { from: 'custom.txt', to: 'own.txt' }];
+    put(path.join(upstream, 'custom.txt'), 'custom');
+    const p = project('missing', m);
+    expect(run()).toBe(0);
+    expect(read(path.join(p.root, 'docs/cross-review.md'))).toBe('original guide\n');
+    expect(read(path.join(p.root, 'own.txt'))).toBe('custom');
+  });
+
+  it.each([{ args: [] }, { args: ['--dry-run'] }])('入口の無い固定 ref は何も変えない (%j)', ({ args }) => {
+    fs.rmSync(path.join(upstream, 'tools/cross-review.entry.js'));
+    const p = project('old');
+    const before = snapshot(p.root);
+    expect(run(args)).toBe(1);
+    expect(snapshot(p.root)).toEqual(before);
+    expect(output).toContain('ref-unsupported');
+    expect(output).toContain('upstream.ref');
+  });
+
+  it.each(['range', 'missing-export', 'unreadable-protocol'])('対応外の入口または本体は移行しない (%s)', (kind) => {
+    if (kind === 'range') range = { min: 2, max: 2 };
+    if (kind === 'missing-export') hasCheck = false;
+    if (kind === 'unreadable-protocol') put(path.join(upstream, 'tools/cross-review.entry.js'), 'const ENTRY_PROTOCOL = unknown;');
+    project('unsupported');
+    expect(run(['--check', '--json'])).toBe(1);
+    expect(JSON.parse(output).projects[0].reason).toBe('ref-unsupported');
+  });
+
+  it('dry-run は同期対象と削除と scripts を表示し、全ファイルを変更しない', () => {
+    const p = project('dry');
+    put(path.join(p.root, 'package.json'), JSON.stringify({ scripts: { sync: 'node tools/cross-review.sync.js' } }));
+    const before = snapshot(p.root);
+    expect(run(['--dry-run'])).toBe(0);
+    expect(snapshot(p.root)).toEqual(before);
+    expect(output).toContain('削除予定');
+    expect(output).toContain('scripts.sync');
+    expect(output).toContain('tools/cross-review.js');
+  });
+
+  it('最新の本体の写しでも旧形式を drift として照会し、同じ上流は一度だけ取得する', () => {
+    const p = project('z');
+    put(path.join(p.root, 'tools/cross-review.js'), read(path.join(upstream, 'tools/cross-review.js')));
+    project('a');
+    const before = snapshot(roots);
+    expect(run(['--check', '--json'])).toBe(1);
+    const report = JSON.parse(output);
+    expect(Object.keys(report)).toEqual(['schemaVersion', 'subject', 'result', 'root', 'projects']);
+    expect(report).toMatchObject({ schemaVersion: 1, subject: 'migrate', result: 'drift', root: roots });
+    expect(Object.keys(report.projects[0])).toEqual(['root', 'manifest', 'upstream', 'form', 'migratable', 'reason', 'message']);
+    expect(report.projects.map((p) => path.basename(p.root))).toEqual(['a', 'z']);
+    expect(report.projects[0]).toMatchObject({ form: 'legacy', migratable: true, reason: null, message: null });
+    expect(report.projects.map((p) => p.upstream)).toEqual([{ repo: 'fixture', ref: 'main' }, { repo: 'fixture', ref: 'main' }]);
+    expect(prepared).toBe(1);
+    expect(cleaned).toBe(1);
+    expect(snapshot(roots)).toEqual(before);
+  });
+
+  it('新形式と対象外だけなら clean で、取得も書き込みもしない', () => {
+    project('new', JSON.parse(read(path.join(upstream, 'tools/cross-review.sync.example.json'))));
+    project('skip', { source: 'other' });
+    const before = snapshot(roots);
+    expect(run(['--check', '--json'])).toBe(0);
+    expect(JSON.parse(output).result).toBe('clean');
+    expect(JSON.parse(output).projects.map((p) => p.form)).toEqual(['new', 'not-applicable']);
+    expect(run()).toBe(0);
+    expect(prepared).toBe(0);
+    expect(snapshot(roots)).toEqual(before);
+  });
+
+  it('導入先が無ければ clean の空配列を返す', () => {
+    expect(run(['--check', '--json'])).toBe(0);
+    expect(JSON.parse(output).projects).toEqual([]);
+    expect(prepared).toBe(0);
+  });
+
+  it('壊れたマニフェストがあれば error を優先する', () => {
+    const p = project('broken');
+    put(p.manifestPath, '{');
+    project('legacy');
+    expect(run(['--check', '--json'])).toBe(3);
+    expect(JSON.parse(output)).toMatchObject({ result: 'error', projects: [
+      { upstream: null, form: 'error', migratable: null, reason: 'manifest-unreadable' }, { form: 'legacy' },
+    ] });
+  });
+
+  it.each([true, false])('不正なマニフェストは files の配列の有無で形式を分ける (%s)', (hasFiles) => {
+    project('invalid', { upstream: {}, ...(hasFiles ? { files: [] } : {}) });
+    expect(run(['--check', '--json'])).toBe(hasFiles ? 1 : 3);
+    expect(JSON.parse(output).projects[0]).toMatchObject({ form: hasFiles ? 'legacy' : 'error',
+      migratable: hasFiles ? false : null, reason: 'manifest-invalid' });
+  });
+
+  it.each([{ args: [] }, { args: ['--dry-run'] }, { args: ['--check', '--json'] }])('上流取得失敗は error として集計し、変更も同じ失敗の再取得もしない (%j)', ({ args }) => {
+    project('a'); project('b');
+    const before = snapshot(roots);
+    let calls = 0;
+    expect(run(args, { prepareUpstream: () => { calls++; throw new Error('offline'); } })).toBe(3);
+    if (args.includes('--json')) expect(JSON.parse(output)).toMatchObject({ result: 'error', projects: [
+      { upstream: { repo: 'fixture', ref: 'main' }, form: 'legacy', migratable: null, reason: 'upstream-unavailable' },
+      { form: 'legacy', migratable: null, reason: 'upstream-unavailable' },
+    ] });
+    else expect(output).toContain('upstream-unavailable');
+    expect(snapshot(roots)).toEqual(before);
+    expect(calls).toBe(1);
+  });
+
+  it.each([
+    { upstream: undefined, expected: null },
+    { upstream: 'invalid', expected: null },
+    { upstream: [], expected: null },
+    { upstream: {}, expected: { repo: null, ref: null } },
+    { upstream: { repo: 1, ref: 'pinned' }, expected: { repo: null, ref: 'pinned' } },
+    { upstream: { repo: 'fixture', ref: false }, expected: { repo: 'fixture', ref: null } },
+  ])('不正な upstream の文字列以外の値は null として照会する (%j)', ({ upstream: value, expected }) => {
+    project('invalid', { upstream: value });
+    expect(run(['--check', '--json'])).toBe(value === undefined ? 0 : 3);
+    expect(JSON.parse(output).projects[0].upstream).toEqual(expected);
+  });
+
+  it('追加した入口の配置が衝突すれば duplicate-destination で拒否する', () => {
+    const p = project('duplicate', { upstream: { repo: 'fixture', ref: 'main' }, files: [{ from: 'custom', to: 'tools/cross-review.js' }] });
+    const before = snapshot(p.root);
+    expect(run()).toBe(1);
+    expect(output).toContain('duplicate-destination');
+    expect(snapshot(p.root)).toEqual(before);
+  });
+
+  it('本体を除外している導入先には入口を足さない', () => {
+    const m = legacy();
+    m.files = m.files.filter((f) => f.from !== 'tools/cross-review.js');
+    m.excludedFiles = ['tools/cross-review.js'];
+    const p = project('excluded', m);
+    const before = snapshot(p.root);
+    expect(run()).toBe(1);
+    expect(output).toContain('body-excluded');
+    expect(snapshot(p.root)).toEqual(before);
+  });
+
+  it.each([[4, '\r\n', false], ['\t', '\n', true], [2, '\r\n', true]])('JSON の書式を同期後も保ち、手動修正する scripts はそのまま報告する (%j)', (indent, eol, newline) => {
+    const p = project('format', legacy(), indent, eol, newline);
+    const pkg = { scripts: { sync: 'node tools/cross-review.sync.js --check && echo ok',
+      all: 'node tools/cross-review.sync-all.js', test: 'vitest tests/cross-review.test.js',
+      mixed: 'node tools/cross-review.sync.js && vitest tests/cross-review.test.js' } };
+    put(path.join(p.root, 'package.json'), JSON.stringify(pkg, null, indent).replace(/\n/g, eol) + (newline ? eol : ''));
+    expect(run()).toBe(0);
+    for (const file of [p.manifestPath, path.join(p.root, 'package.json')]) {
+      const raw = read(file);
+      expect(raw.endsWith(eol)).toBe(newline);
+      expect(raw).toContain(`${eol}${typeof indent === 'number' ? ' '.repeat(indent) : indent}"`);
+      if (eol === '\r\n') expect(raw.replace(/\r\n/g, '')).not.toContain('\n');
+    }
+    expect(JSON.parse(read(path.join(p.root, 'package.json'))).scripts).toEqual({ ...pkg.scripts,
+      sync: 'node tools/cross-review.js sync --check && echo ok' });
+    expect(output).toContain('手で修正: package.json scripts.all');
+    expect(output).toContain('手で修正: package.json scripts.test');
+    expect(output).toContain('手で修正: package.json scripts.mixed');
+  });
+
+  it('削除対象がルート外なら書き換える前に拒否し、次の導入先は移行する', () => {
+    const m = legacy(); m.files.push({ from: 'tests/cross-review.test.js', to: '../outside.txt' });
+    const p = project('a', m); project('b');
+    const before = read(p.manifestPath);
+    expect(run()).toBe(3);
+    expect(read(p.manifestPath)).toBe(before);
+    expect(errors).toContain('ルートの外');
+    expect(output).toContain('[移行した]');
+  });
+
+  it('package.json の読み込み失敗は書き換える前に検出し、次の導入先へ進む', () => {
+    const p = project('a'); project('b');
+    put(path.join(p.root, 'package.json'), '{');
+    const before = snapshot(p.root);
+    expect(run()).toBe(3);
+    expect(snapshot(p.root)).toEqual(before);
+    expect(output).toContain('[移行した]');
+  });
+
+  it('同期の失敗を error として集計する', () => {
+    project('sync-error');
+    expect(run([], { runSync: () => { process.exitCode = 1; return null; } })).toBe(3);
+    expect(errors).toContain('同期に失敗');
+  });
+
+  it.each([
+    ['--migrate'], ['--migrate', '--root', '.', '--json'],
+    ['--migrate', '--root', '.', '--dry-run', '--check'],
+    ...['--global-skill', '--register', '--list', '--ref=main'].map((flag) => ['--migrate', '--root', '.', flag]),
+  ].map((args) => ({ args })))('不正な組み合わせは引数エラーで JSON を出さない (%j)', ({ args }) => {
+    let stdout = ''; let stderr = '';
+    main(args, { out: (s) => { stdout += s; }, err: (s) => { stderr += s; } });
+    expect(process.exitCode).toBe(2);
+    expect(stdout).toBe('');
+    expect(stderr).toContain('--migrate');
+  });
+
+  it('位置引数と depth を移行の照会に使える', () => {
+    expect(parseArgs(['--migrate', roots, '--check', '--json', '--depth=2'])).toMatchObject({ migrate: true, root: roots, depth: 2, error: null });
   });
 });
