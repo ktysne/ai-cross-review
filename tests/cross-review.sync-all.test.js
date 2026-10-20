@@ -1063,3 +1063,21 @@ describe('本体の登録と照会', () => {
     expect(calls[0][2].timeout).toBeGreaterThan(0);
   });
 });
+
+
+describe('旧形式の一括検査の案内', () => {
+  it('旧形式の移行案内を集計へ残す', () => {
+    const output = [];
+    const notice = '[cross-review] このマニフェストは旧形式。新形式の配布物は files[] に足さず、node <checkout>/tools/cross-review.sync-all.js --migrate でまとめて移行する';
+    const result = runAll(parseArgs(['--root', '/projects', '--check']), {
+      findManifests: () => ['/projects/a/tools/cross-review.sync.json'],
+      readManifest: () => CONFORMING_MANIFEST,
+      syncOne: () => ({ code: 0, result: { drift: false, results: [], legacyForm: true }, err: notice + '\n' }),
+      out: (value) => output.push(value), err: () => {},
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.items[0].warnings).toEqual([notice]);
+    expect(output.join('')).toContain(notice);
+    process.exitCode = 0;
+  });
+});

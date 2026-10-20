@@ -42,25 +42,26 @@ agent-cockpit の導入手順は、最初に claude-codex-bridge と ai-cross-re
 - レビュアーの CLI（`codex --version`、`claude --version`）。どちらも VS Code 拡張やデスクトップアプリとは別の、スタンドアロンの CLI です。CLI が無い環境では、後述の `subagent` モードでレビューできるので、導入そのものは進めて構いません。
 - 本体は外部パッケージを使わないので、導入先で `npm install` は要りません。
 
-### 1. 同期マニフェストを作る
+### 1. checkout を登録して入口を置く
 
-導入先に ai-cross-review のファイルを取り込む同期スクリプトと、取り込むファイルを書いたマニフェストを置きます。
+上流の checkout を clone し、ローカルの本体として登録します。
+登録する checkout は main に保ち、上流の開発には別の worktree を使います。
 
 ```bash
 git clone https://github.com/ktysne/ai-cross-review.git <ai-cross-review の checkout>
+node <ai-cross-review の checkout>/tools/cross-review.sync-all.js --register
 mkdir -p tools
-cp <ai-cross-review の checkout>/tools/cross-review.sync.js tools/
+cp <ai-cross-review の checkout>/tools/cross-review.entry.js tools/cross-review.js
 cp <ai-cross-review の checkout>/tools/cross-review.sync.example.json tools/cross-review.sync.json
 ```
 
-`tools/cross-review.sync.json` の `files` を、導入先に合わせて直します。
+導入先で上のコピー操作を行います。
+マニフェストの3件は、入口、クラウド向けの SKILL、手順書の案内版です。
+本体、同期スクリプト、テストはコピーしません。
+`.cross-review.md` など導入先が編集するファイルを `files[]` に入れると、同期で上書きされるので入れません。
+登録の無い端末では、入口がマニフェストの上流からキャッシュへ本体を取得します。
 
-- テストの 3 件（`tests/cross-review*.test.js`）は、導入先のテストランナーが vitest のときだけ残します。残すときは、`to` と `replace` を導入先のテストの置き場に合わせます。vitest でなければ、3 件とも消します。
-- 一括同期ツール（`tools/cross-review.sync-all.js`）は、複数の導入先をまとめて更新する人だけが使います。要らなければ消して構いません。テストを残しているときは、そのテスト（`tests/cross-review.sync-all.test.js`）のエントリも一緒に消します。残すと、テストが消したツールを読み込めずに失敗します。
-- 意図して消したファイルは、更新のときの `--check-manifest` で毎回「未登録」と出ます。消したと分かっているものは足し戻さずに無視します。
-- `.cross-review.md`、`CLAUDE.md`、`AGENTS.md` など、導入先で編集するファイルは `files` に入れません。同期で上書きされて消えます。
-
-導入先のルートの `package.json` が `"type": "module"` のときは、同期の前に `tools/package.json` に次の内容を置きます。`tools/*.js`（同期スクリプトを含む）は CommonJS なので、これが無いと `require is not defined` で止まります。
+導入先のルートの `package.json` が `"type": "module"` の場合は、実行前に `tools/package.json` を次の内容で作ります。
 
 ```json
 { "type": "commonjs" }
@@ -69,18 +70,18 @@ cp <ai-cross-review の checkout>/tools/cross-review.sync.example.json tools/cro
 ### 2. 上流から取り込む
 
 ```bash
-node tools/cross-review.sync.js
+node tools/cross-review.js sync
 ```
 
-`files` に書いたファイルが「[新規]」として取り込まれ（手順 1 で手で置いた `tools/cross-review.sync.js` は「[一致]」）、最後に「同期しました」と出ます。取り込んだ上流のコミットが、マニフェストの `lastSyncedCommit` に記録されます。
-初回の同期では、過去の移行ノートは表示せずに既読として記録します。新しく導入する場合は、過去の移行作業は要りません。
+入口以外の2件が新規に取り込まれ、`lastSyncedCommit` に上流のコミットが記録されます。
+初回は過去の移行ノートを既読として記録します。
 
 ### 3. レビュー観点を書く
 
 観点のテンプレートをコピーし、導入先で壊れやすい点を書き足します。
 
 ```bash
-cp .cross-review.example.md .cross-review.md
+cp <ai-cross-review の checkout>/.cross-review.example.md .cross-review.md
 ```
 
 `.cross-review.md` はレビュアーへ渡すプロンプトの先頭に付きます。プロジェクトの説明、守るべき不変条件、重点的に見る観点を書きます。テンプレートにある「指摘の出し方」の項は残します。
@@ -95,8 +96,8 @@ cp .cross-review.example.md .cross-review.md
     "review:codex": "node tools/cross-review.js codex",
     "review:codex:fix": "node tools/cross-review.js codex --fix",
     "review:claude": "node tools/cross-review.js claude",
-    "sync:cross-review": "node tools/cross-review.sync.js",
-    "sync:cross-review:check": "node tools/cross-review.sync.js --check"
+    "sync:cross-review": "node tools/cross-review.js sync",
+    "sync:cross-review:check": "node tools/cross-review.js sync --check"
   }
 }
 ```
@@ -121,7 +122,8 @@ cp .cross-review.example.md .cross-review.md
 ### 6. `CLAUDE.md` / `AGENTS.md` に節を足す
 
 AI が実装を一区切りしたときにレビューを回すよう、導入先の `CLAUDE.md`（Claude Code 向け）と `AGENTS.md`（Codex 向け）に相互レビューの節を足します。
-節の雛形は、取り込んだ `docs/cross-review.md` の「取り込み先の CLAUDE.md / AGENTS.md に書くこと（テンプレート）」にあります。検証コマンドと、同期の scripts の名前（手順 4）を導入先に合わせて書き換えます。
+節の雛形は、`docs/cross-review.md` の「取り込み先の CLAUDE.md / AGENTS.md に書くこと（テンプレート）」からリンクした上流の正本にあります。
+検証コマンドと、同期の scripts の名前（手順 4）を導入先に合わせて書き換えます。
 雛形はグローバル SKILL（手順 7）を前提にしています。グローバル SKILL を配らないときは、正本の行の SKILL のパスを、取り込んだ `.claude/skills/cross-review/SKILL.md` に書き換えます。
 
 Claude Code は、導入先の `.claude/skills/cross-review/SKILL.md` をスキルとして読みます。この SKILL は同期で上書きされるので、直接編集しません。プロジェクト固有の運用は `.cross-review.md` と `CLAUDE.md` に書きます。
@@ -159,7 +161,7 @@ agent-cockpit を導入していて、レビュアーの経路を選んでいる
 1. 取り込んだファイルが上流と一致していることを確かめます。
 
    ```bash
-   node tools/cross-review.sync.js --check
+   node tools/cross-review.js sync --check
    ```
 
    「ドリフトはありません (上流と一致)。」と出て、終了コードが 0 なら成功です。
@@ -297,11 +299,16 @@ ai-cross-review 側で追加する設定はありません。次の点だけ合�
 
 ## 更新するとき
 
+新形式では、登録した checkout を `git pull` すると本体が更新されます。
+入口と案内の写しは、次の同期手順で更新します。
+旧形式は引き続き `node tools/cross-review.sync.js` を使えます。
+旧形式からの移行は、新形式への移行ノート（別途追加予定）を参照してください。
+
 上流の更新を取り込むときは、導入先のルートで次の順に進めます。
 
-1. `node tools/cross-review.sync.js` で同期します。差分のあるファイルだけを上書きします。
+1. `node tools/cross-review.js sync` で同期します。差分のあるファイルだけを上書きします。
 2. stderr に移行ノートが出たら、その「取り込み先で必要な作業」を行います。同期では直せない、導入先で持つファイル（`.gitignore`、`package.json` の scripts、`CLAUDE.md` / `AGENTS.md` の節、`.cross-review.md`）の作業です。
-3. `node tools/cross-review.sync.js --check-manifest` で、上流が配り始めたファイルの取りこぼしを確かめます。要るものだけ `files` に足して、もう一度同期します。
+3. `node tools/cross-review.js sync --check-manifest` で、上流が配り始めたファイルの取りこぼしを確かめます。新形式で未登録のものは、要るものだけ `files` に足して、もう一度同期します。旧形式には入口を足さず、まとめて移行します。
 4. 導入先の検証コマンド（lint、テスト）を流します。
 
 移行ノートを表示する機能より前のバージョンから更新するときは、1 回目の同期では古いスクリプトが動くのでノートが出ません。同期をもう一度実行してください。
