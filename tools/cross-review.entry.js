@@ -49,6 +49,7 @@ function resolveRemoteSha(output, ref) {
     const row = lines.find(([sha, target]) => target === name && SHA_PATTERN.test(sha));
     return row ? row[0].toLowerCase() : null;
   };
+  if (ref.startsWith('refs/')) return find(ref + '^{}') || find(ref);
   return find('refs/heads/' + ref) || find('refs/tags/' + ref + '^{}') || find('refs/tags/' + ref);
 }
 

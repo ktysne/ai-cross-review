@@ -106,6 +106,13 @@ describe('キャッシュの取得と再利用', () => {
     expect(entry.resolveRemoteSha(sha + '\trefs/tags/v1\n', 'v1')).toBe(sha);
     expect(entry.resolveRemoteSha(sha + '\trefs/heads/other\n', 'v1')).toBeNull();
   });
+  it('完全な名前の ref は、その名前とだけ照合する', () => {
+    const tags = sha + '\trefs/tags/v1\n' + otherSha + '\trefs/tags/v1^{}\n';
+    expect(entry.resolveRemoteSha(sha + '\trefs/heads/main\n', 'refs/heads/main')).toBe(sha);
+    expect(entry.resolveRemoteSha(tags, 'refs/tags/v1')).toBe(otherSha);
+    expect(entry.resolveRemoteSha(sha + '\trefs/tags/v1\n', 'refs/tags/v1')).toBe(sha);
+    expect(entry.resolveRemoteSha(sha + '\trefs/heads/v1\n', 'refs/tags/v1')).toBeNull();
+  });
   it.each(['1', 'true', ' yes '])('NO_FETCH=%s なら最後の SHA を使い git を呼ばない', (value) => {
     manifest();
     cacheEngine();
