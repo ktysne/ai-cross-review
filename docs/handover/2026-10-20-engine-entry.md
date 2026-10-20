@@ -23,6 +23,8 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 | 入口と本体の分け方(2026-10-20 開発者決定) | 上流では本体を `tools/cross-review.js` のまま置き、入口を別のファイル `tools/cross-review.entry.js` として持つ。導入先のマニフェストは `{ "from": "tools/cross-review.entry.js", "to": "tools/cross-review.js" }` で入口を写す | 導入先の `tools/cross-review.js` の置き場所と名前が変わらない。agent-cockpit の判定、`package.json` の `review:*`、SKILL の手順を書き換えずに済む。本体の場所が変わらないので、上流の checkout をそのまま本体として使える。古い `cross-review.sync.js` でも、`from` と `to` が違う写しは扱える |
 | 本体の探し方(2026-10-20 開発者決定) | 入口は、1. 環境変数 `CROSS_REVIEW_ENGINE`(checkout のパス)、2. ホームの登録ファイル `~/.cross-review/engine.json`(`{ "checkout": "<パス>" }`)、3. git の shallow fetch で取ったキャッシュ、4. 明示のエラー、の順に探す。1 を指定して解決できないときは、警告で次へ進まずにエラーにする | 登録ファイルは checkout を指すだけなので、checkout の `git pull` や agent-cockpit の `apply.js --update-checkouts` だけで全リポジトリの CLI が新しくなる。本体の写しをホームに配ると、配り直しの手順が増える。明示の指定が外れたときに黙って別の本体で動くと、どの版で動いたかが分からなくなる |
 | 登録の手段 | 上流の checkout の `tools/cross-review.sync-all.js` に `--register` を足し、その checkout のパスを登録ファイルへ書く | 既存の `--global-skill` と同じく、上流の checkout からホームへ配る流儀にそろえる |
+| 登録先が使えないとき | 登録ファイルはあるが、指す checkout が無い、本体を読めない、または読めない登録ファイルのときは、キャッシュへ進まずにエラーにする。登録ファイルが無いときだけキャッシュへ進む | 環境変数の明示の指定と同じく、登録した本体の代わりに黙って別の版で動くと、どの版で動いたかが分からなくなる |
+| 登録の照会(agent-cockpit の #673 を受けて追加) | `--register --check` を足し、`--json` で次を返す。登録の有無、登録した checkout のパス、そのパスがあるか、HEAD が既定のブランチか、未コミットの変更があるか、本体が受け付ける `ENTRY_PROTOCOL` の範囲。どの ai-cross-review の checkout から実行しても、登録ファイルの内容を調べる。JSON の形と終了コードは `--global-skill --check --json` にそろえる(`schemaVersion`、`result` が `clean` / `drift` / `error`、終了コード 0 / 1 / 3、引数エラーは 2)。登録が無いのと、登録先が正常なのは `clean`、HEAD が既定のブランチでないのと未コミットの変更があるのは `drift`、登録先が使えないのは `error` にする | agent-cockpit の update-tools と診断は、連携ツールの状態を、各ツールの照会の結果を写して表示する方針である。照会が無いと、agent-cockpit が `~/.cross-review/engine.json` を自分で読んで解釈することになる。登録が無い端末もキャッシュの経路で動くので、未登録はドリフトに数えない(`--global-skill` の `missing` と同じ扱い) |
 | 手元に本体が無い環境(2026-10-20 開発者決定) | 入口が、マニフェストの `upstream.repo` と `upstream.ref` を git の shallow fetch で取り、解決したコミットの SHA ごとのキャッシュに置いて使う。取得したことと SHA を stderr に 1 行出す。#89 の本文の推奨だった `npx github:` は採らない | クラウド、別の端末、登録していない端末を 1 つの経路で扱える。git だけを使うので、npm のレジストリとインストール処理に依存しない。取得の方式は `cross-review.sync.js` と同じで、リポジトリは公開なので認証が要らない |
 | キャッシュの置き場と鮮度 | 置き場は `XDG_CACHE_HOME`、Windows では `LOCALAPPDATA`、`~/.cache`、`os.tmpdir()` の順で、その下の `ai-cross-review/engines/<sha>/` に置く。TTL は持たず、ref がブランチなら毎回 `git ls-remote` で SHA を解決する。`ls-remote` が失敗したときと `CROSS_REVIEW_NO_FETCH` が有効なときは、最後に解決した SHA(`refs.json`)のキャッシュで動き、それも無ければエラーにする。取得は一時名のディレクトリへ展開してから rename し、rename が失敗しても目的のディレクトリがあれば成功とする。取得に成功したら、直近 3 個より古い SHA のディレクトリを消す(失敗は無視する) | クラウドは毎回空から始まるので TTL に意味が無い。TTL を持つと、どれだけ古い本体で動いたかを利用者が推定することになる。`CROSS_REVIEW_NO_FETCH` は既存の「オフラインで作業する」という意味を保ち、既にあるキャッシュの利用までは止めない。同じ SHA を 2 つのプロセスが同時に取ると、Windows では rename が失敗するためである |
 | 取得する範囲 | 本体の 1 ファイルではなく、shallow fetch した木の全体をキャッシュに置く | 本体は上流の `tools/package.json`(`type: commonjs`)と一緒に置かないと、ESM の場所で CJS として読めない。`sync` サブコマンドは `tools/cross-review.sync.js` も使う |
@@ -36,6 +38,9 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 | `sync` サブコマンド | 入口の `node tools/cross-review.js sync [--check|--dry-run|--check-manifest]` は、本体の側の `tools/cross-review.sync.js` の `runSync` を、導入先のルートとマニフェストを指定して呼ぶ | 導入先から同期スクリプトの写しを無くしても、同期の入口が残る。同期の処理は常に本体の版で動くので、古い同期スクリプトがファイルを消せない問題が新形式では起きない |
 | 移行の方式(2026-10-20 開発者決定) | 上流の checkout の `tools/cross-review.sync-all.js` に `--migrate` を足す。`--dry-run` と `--check` を持たせる。1 プロジェクトについて、マニフェストの `files[]` の新形式への書き換え(既存の `to` は保つ)、要らなくなったファイルの削除、`package.json` の `scripts` の `node tools/cross-review.sync.js` を `node tools/cross-review.js sync` へ置き換える。ブランチ、コミット、PR は作らない。書き換えの前に、マニフェストの `upstream.ref` が `tools/cross-review.entry.js` を含み、入口の `ENTRY_PROTOCOL` を受け付ける版かを確かめ、対応していなければ何も変えずに止めて、`ref` を対応版へ上げるよう案内する(`--dry-run` でも同じく止める)。`--migrate --check` は書き込まず、旧形式の導入先が 1 件でもあれば終了コード 1 にする | 導入先の古い `cross-review.sync.js` は写しを上書きするだけで、ファイルを消せず、移行ノートも出ないことがある。上流の checkout の同期処理で回せば、導入先の版に左右されない。手元の 21 の導入先は、すべて `package.json` から `node tools/cross-review.sync.js` を呼んでいる(2026-10-20 に確認)。#89 より前のコミットに `ref` を固定した導入先を移行すると、キャッシュの経路と `sync` が、そのコミットに無い入口を取りに行って失敗する。固定を黙って外さず、利用者に上げてもらう。既存の `--check` は未登録の配布物を終了コードに含めないので、旧形式のまま最新に同期した導入先を移行漏れとして拾えない |
 | 新形式の判定 | `files[]` に `tools/cross-review.sync.js` が無く、`tools/cross-review.js` の `from` が `tools/cross-review.entry.js` であることで判定する。マニフェストに版のフィールドは足さない | 判定に必要な情報は `files[]` で足りる。`--migrate` を同じリポジトリへ 2 回回しても、この判定で何もしない |
+| 移行の照会(agent-cockpit の #673 を受けて追加) | `--migrate --check` に `--json` を足し、導入先ごとの形式(旧形式、新形式、対象外、エラー)の一覧を返す。JSON の形と終了コードは `--global-skill --check --json` にそろえ、旧形式が 1 件でもあれば `drift`(終了コード 1)、検査できない導入先があれば `error`(終了コード 3)にする | 登録の照会と同じく、agent-cockpit が導入先のマニフェストを自分で解釈しなくて済むようにする |
+| 同じ `to` への重複 | 上流の `tools/cross-review.sync.js` のマニフェストの検証で、`files[]` に同じ `to` が 2 つ以上あればエラーにして、何も書かない。`to` はパスを正規化してから比べ、Windows では大文字と小文字を区別しない | 旧形式のマニフェストに新形式の入口を足すと、本体の写しと入口の写しが同じ `tools/cross-review.js` を指す。今の検証には重複の検査が無く、後のものが上書きするので、同期スクリプトの写しが残ったまま入口だけが入る(2026-10-20 に main で確認)。導入先にある古い同期スクリプトは直せないので、上流の checkout から回す `sync-all` と、新形式の `sync` サブコマンドで効けば足りる |
+| 旧形式でのマニフェスト検査 | `--check-manifest` は、旧形式の導入先では新形式だけの配布物(入口、クラウド向けの SKILL、`docs/cross-review.md` の案内版)を未登録として列挙しない。代わりに、`--migrate` で移行するよう 1 行案内する。新形式で雛形から外れた配布物(`cross-review.sync.js` など)を `excludedFiles` に持つ旧形式の導入先にも、古い除外の警告は出さない | 3 つとも `from` が新しく、`to` は旧形式の写しと同じである。今の検査は `from` だけで照合するので、未登録と報告し、文書は「必要なものだけ `files[]` に足す」と案内している。案内どおりに足すと同じ `to` への写しが 2 つになる。移行は `files[]` の一部だけを足しても成り立たず、`--migrate` でまとめて行う必要がある |
 | 旧形式との共存 | 旧形式の導入先は、本体の写しで今までどおり動く。本体は `projectRoot` が渡されないときの動きを変えない。旧形式の導入先が古い同期スクリプトで新しい本体を取り込んでも動くことを、テストで固定する | 移行していないリポジトリと、移行済みのリポジトリが混在する期間がある。旧形式は本体の写しの中で完結し、checkout の本体を参照しないので、互いに干渉しない |
 | #85 との重なり:状態ファイルの場所(2026-10-20 開発者決定) | #85 では `resolveStatePath` の場所の決め方を変えない。#89 で、上の「プロジェクトのルートの解決」のヘルパーに寄せる | #85 のパーサーはテキストを受けて解釈し、ファイルの読み書きは入口側で行う分担である。場所の決め方と解釈が分かれているので、#85 と #89 の変更が重ならない |
 | #85 との重なり:検証データの置き場(2026-10-20 開発者決定) | #85 の契約の文書と検証データは、導入先へ写さず、上流のリポジトリにだけ置く。agent-cockpit は、上流の revision を固定して取り込む。#85 の項目 6(雛形のマニフェストへの追加)は外すよう、#85 の Issue にコメントで伝える | 導入先は検証データを使わないので、写すと #89 で減らす写しが増える。#86 で bridge を revision を固定して確かめるのと同じ考え方である。#85 の項目 6 の後段(実行用のモジュールを別ファイルへ分けるときの配布手順)は、#89 の新形式で解決する |
@@ -47,13 +52,16 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 
 | 順 | 対象 | 主な変更先 | 委譲の区分 | PR | base | 状態 |
 |---|---|---|---|---|---|---|
-| 0 | この計画 | `docs/handover/2026-10-20-engine-entry.md` | なし | #90 | main | レビュー待ち(2026-10-20) |
-| 1 | 本体の `projectRoot` 対応と版の照合、入口、探し方、キャッシュ、`--register`、`sync` サブコマンド | `tools/cross-review.js`、`tools/cross-review.entry.js`(新規)、`tools/cross-review.sync-all.js`、`tests/` | hard | 未作成 | main | 未着手 |
-| 2 | クラウド向けの SKILL、`docs/cross-review.md` の案内版、新形式の雛形のマニフェスト、文書 | `templates/`(新規)、`tools/cross-review.sync.example.json`、`docs/cross-review.md`、`docs/setup.md`、`.claude/skills/cross-review/SKILL.md` | standard | 未作成 | 1 段目 | 未着手 |
-| 3 | `sync-all --migrate` と移行ノート | `tools/cross-review.sync-all.js`、`docs/migrations/`(新規ノート)、`tests/` | hard | 未作成 | 2 段目 | 未着手 |
+| 0 | この計画 | `docs/handover/2026-10-20-engine-entry.md` | なし | #90 | main | マージ済み(2026-10-20) |
+| 0 | この計画の改訂(agent-cockpit の指摘の反映) | `docs/handover/2026-10-20-engine-entry.md` | なし | 未作成 | main | 未作成(2026-10-20) |
+| 1 | 本体の `projectRoot` 対応と版の照合、入口、探し方、キャッシュ、`--register` と `--register --check --json`、`sync` サブコマンド | `tools/cross-review.js`、`tools/cross-review.entry.js`(新規)、`tools/cross-review.sync-all.js`、`tests/` | hard | 未作成 | main | 未着手 |
+| 2 | 同じ `to` への重複の検査、旧形式でのマニフェスト検査、クラウド向けの SKILL、`docs/cross-review.md` の案内版、新形式の雛形のマニフェスト、文書 | `tools/cross-review.sync.js`、`templates/`(新規)、`tools/cross-review.sync.example.json`、`docs/cross-review.md`、`docs/setup.md`、`.claude/skills/cross-review/SKILL.md`、`tests/` | hard | 未作成 | 1 段目 | 未着手 |
+| 3 | `sync-all --migrate`、`--migrate --check --json`、移行ノート | `tools/cross-review.sync-all.js`、`docs/migrations/`(新規ノート)、`tests/` | hard | 未作成 | 2 段目 | 未着手 |
 
 - 1 段目は、入口が無いと本体の `projectRoot` 対応を確かめられないので、本体と入口を 1 つの PR にする。
-- 2 段目は、1 段目の入口と `sync` サブコマンドを前提に、写す物と文書を新形式にする。
+- 1 段目のテストには、登録が無い、登録先が正常、HEAD が既定のブランチでない、未コミットの変更がある、登録先が無い、本体が照合用の export を持たない、の各場合の `--register --check --json` の `result` と終了コードを入れる。
+- 2 段目は、1 段目の入口と `sync` サブコマンドを前提に、写す物と文書を新形式にする。重複の検査と旧形式でのマニフェスト検査は、雛形に新形式の配布物を入れるのと同じ段に入れる。雛形を先に変えると、その間に旧形式の導入先が `--check-manifest` の案内どおりに入口を足せてしまうためである。区分は、検査の変更が加わり誤りに気づきにくいので hard にする。
+- 2 段目のテストには、同じ `to` が 2 つあるマニフェストで同期と検査がエラーになり何も書かないこと(大文字と小文字だけが違う場合を含む)と、旧形式の導入先の `--check-manifest` が新形式だけの配布物を列挙せずに `--migrate` を案内することを入れる。
 - 3 段目は、2 段目の雛形のマニフェストを移行の行き先として使う。
 - 3 段がすべてマージされるまでは、導入先を移行しない。
 
@@ -72,7 +80,7 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 4. #86 で bridge の照会に cwd を渡すようになっていれば、入口から呼ぶときの cwd が今と同じ(利用者が起動した場所)になることを確かめる。
 5. 手元の導入先の数と構成を数え直す。`docs/cross-review.md` を別のパスへ写している導入先(2026-10-20 には session-score-player)の `to` を、`--migrate` が保つことを 3 段目のテストに入れる。3 段目のテストには、ほかに次の 2 つを入れる。
    - `upstream.ref` が #89 より前のコミットを指す導入先で、`--migrate` と `--migrate --dry-run` が何も変えずに止まる。
-   - 中身は最新だが旧形式の導入先で、`--migrate --check` が終了コード 1 を返す。
+   - 中身は最新だが旧形式の導入先で、`--migrate --check` が終了コード 1 を返し、`--json` の一覧にその導入先が旧形式として出る。
 
 ## 移行を全リポジトリへ反映する手順
 
