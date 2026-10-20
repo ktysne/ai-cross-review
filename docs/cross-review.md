@@ -846,31 +846,54 @@ node tools/cross-review.sync-all.js --global-skill             # グローバル
 相互レビューの汎用ルール（3 択、サーキットブレーカー、PR 運用）を各リポジトリの `CLAUDE.md` へ写して回ると、改訂のたびに全プロジェクトを書き換えることになります。  
 `--global-skill` は、この checkout の `.claude/skills/cross-review/SKILL.md` をホームの共通配置へ配り、各リポジトリにはそのプロジェクト固有の事情だけを残せるようにします（残す内容は次節のテンプレート）。
 
-配布先は次の 3 つです。
+配布先は次の 2 つです。
 表中の `<home>` は OS のユーザーホームです。
 各ホームの下の `skills/cross-review/SKILL.md` に配ります。
 
-| id | ホームの解決規則 | 配布条件（requireDir） | homeFrom |
+| id | ホームの解決規則 | 配布条件 | homeFrom |
 |---|---|---|---|
 | `claude` | `CLAUDE_CONFIG_DIR`、未設定なら `<home>/.claude` | ホーム自体が既にある | `CLAUDE_CONFIG_DIR` / `default` |
-| `codex` | `CODEX_HOME`、未設定なら `<home>/.codex` | `<ホーム>/skills` が既にある | `CODEX_HOME` / `default` |
-| `codex-subagent` | `<home>/.codex-subagent` 固定 | `<ホーム>/skills` が既にある | `fixed` |
+| `agents` | `<home>/.agents` 固定 | Codex のホームの `skills`、`<home>/.codex-subagent/skills`、配った写し（`<home>/.agents/skills/cross-review/SKILL.md`）のどれかがある | `fixed` |
 
+Codex のホームは `CODEX_HOME`、未設定なら `<home>/.codex` です。
 空文字の環境変数は未設定として扱い、相対パスは実行時の作業ディレクトリから絶対化します。
 `~` は展開しません。
 解決後の配布先パスが重複したときは、表の順で先の配布先だけを扱い、後の要素を「対象外」にします（Windows では大文字と小文字を区別しません）。
-条件を満たさない配布先も削除せず「対象外」とし、理由を stderr に出します。
+配布条件を調べられなければ `unreadable`、条件を満たさなければ `skipped` とし、対象外の理由を stderr に出します。
+Codex を使う印があれば、`<home>/.agents/skills` が無くても作って配ります。
 
-Claude はホームがあるか、Codex は `<ホーム>/skills` があるかで条件が異なります。
-Codex のホームがあっても skills を使わない環境に、新たにディレクトリを作らないためです。
-Codex はレビュー時に、Codex のサブエージェントは修正適用や実装委譲の際に、それぞれのホームにある写しを読みます。
-
+Codex 向けの写しは `CODEX_HOME` に関係なく `<home>/.agents/skills/cross-review/SKILL.md` にまとめます。
+通常の Codex とサブエージェントが同じ写しを読みます。
+[Codex の公式資料](https://developers.openai.com/codex/skills)で利用者の置き場は `$HOME/.agents/skills` です。
+[Codex の host_roots.rs](https://github.com/openai/codex/blob/e1b9c9457ceca75a99b034a5df39ac48c3998d15/codex-rs/ext/skills/src/host_roots.rs#L95-L114)（2026-10-20 の main）は `$CODEX_HOME/skills` を「Deprecated user skills location, kept for backward compatibility」とし、`$HOME/.agents/skills` は `CODEX_HOME` と独立して追加します。
+同じ name のスキルは統合されず両方が選択肢に出るため、旧配置の写しを片付けます。
 bridge の定義ファイルは読みません。
-定義で `codex_home` を既定以外にした場合、その独自ホームの写しは検査も配布もしません。
-また、`CODEX_HOME` を `~/.codex` 以外に設定した環境では、bridge の既定ホーム `~/.codex` の写しは検査も配布もしません。
-bridge の設定と異なる場合は、必要な写しを別途管理してください。
 
-配布先ごとの状態は次の 5 種類です。
+旧配置（legacy）は次の 2 つです。
+解決したパスが同じなら 1 件にまとめ、Windows では大文字と小文字を区別しません。
+配布先（`claude` か `agents`）と実体が同じ旧配置は、旧配置として扱いません（`CODEX_HOME` を `<home>/.agents` にした場合や、`skills` をシンボリックリンクやジャンクションで共有した場合など）。削除すると、配ったばかりの写しを消すためです。
+実体は、`SKILL.md` の親から見て存在する最も近いディレクトリを実体のパスへ解決し、ファイル名を足して比べます。
+`SKILL.md` 自体のリンクは追いません（削除で消えるのはリンクだけなので、リンク先の旧配置も別に片付けます）。
+ただし配布先の `SKILL.md` がリンクのときは、書き込みがリンク先へ届くので、リンク先の旧配置は消しません。実体を確かめられない旧配置は `removable: false` とし、`reason` に理由を入れます。
+
+| id | ホーム | homeFrom |
+|---|---|---|
+| `codex-legacy` | `CODEX_HOME`、未設定なら `<home>/.codex` | `CODEX_HOME` / `default` |
+| `codex-subagent-legacy` | `<home>/.codex-subagent` 固定 | `fixed` |
+
+旧配置の `skills/cross-review/SKILL.md` は、存在するときだけ照会の `targets` に加わります。
+読める旧配置は `state: legacy` とし、その内容がこの checkout の HEAD の Git 履歴にある正本のいずれかの版（ほかのブランチの版は含めません）、または現在の配布元と一致するときだけ `removable: true` にします。
+この照合では CRLF を LF にそろえますが、`sha256` は観測したバイト列のハッシュです。
+Git が使えない、履歴を集められない、内容が一致しない場合は `removable: false` とし、`reason` に理由を入れます。
+読めない旧配置は `unreadable` です。
+
+書き込みの実行では、正本を配った後に `removable: true` の旧配置の SKILL.md を削除し、空になった `cross-review` ディレクトリも削除します。
+`skills` 自体や、別のファイルがある `cross-review` ディレクトリは残します。
+`removable: false` の旧配置は削除せず、stderr に理由を警告します。
+旧配置を残したことだけでは、書き込みの実行を失敗にしません。
+利用者が編集した旧配置は、必要な内容を確認して手で片付けてください。
+
+配布先と旧配置の状態は次の 6 種類です。
 「古い」は更新時刻ではなく、正本と写しのバイト列が一致しないことを表します。
 行末だけが違う写しも「古い」になります。
 正本が端末の `core.autocrlf` で変わらないよう、`.gitattributes` で正本の SKILL を LF に固定しています。
@@ -882,10 +905,11 @@ bridge の設定と異なる場合は、必要な写しを別途管理してく�
 | `missing` | 未配置 | 配布条件を満たすが写しが無い |
 | `unreadable` | 読めない | 写し、または配布条件のディレクトリを権限などで調べられず比較できない |
 | `skipped` | 対象外 | 配布条件を満たさない、または先の要素と同じパス |
+| `legacy` | 旧配置 | 旧配置に読める SKILL.md が残っている |
 
-- `--check` は書き込まず検査します。`stale` はドリフト、`unreadable` は検査不能です。`missing` はドリフトに数えません。
-- `--dry-run` は書き込まず、配布前の状態と配布予定を表示します。
-- 書き込みモードは `missing`、`stale`、`unreadable` に正本を配ります。`unreadable` でも上書きに成功すればエラーにしません。
+- `--check` は書き込まず検査します。`stale` と `legacy` はドリフト、`unreadable` は検査不能です。`missing` はドリフトに数えません。
+- `--dry-run` は書き込みも削除もせず、配布前の状態、配布予定、削除する旧配置、残す旧配置と理由を表示します。
+- 書き込みモードは配布先の `missing`、`stale`、`unreadable` に正本を配ります。`unreadable` でも上書きに成功すればエラーにしません。
 - `--root`（位置引数を含む）を付けなければ、プロジェクト走査をせずグローバル配布だけを行います。
 - `--list` は同じホーム解決規則で配布先と対象外の理由を列挙します。
 - 人向けの集計には `global:` の行が加わり、配布先ごとの検査時の状態が並びます。
@@ -895,9 +919,9 @@ bridge の設定と異なる場合は、必要な写しを別途管理してく�
 | 終了コード | 意味 |
 |---|---|
 | 0 | 差分なし、または処理成功。グローバル SKILL が未配置だけの場合も含む |
-| 1 | `--check` でプロジェクトのドリフト、またはグローバル SKILL の `stale` がある |
+| 1 | `--check` でプロジェクトのドリフト、またはグローバル SKILL の `stale` または `legacy` がある |
 | 2 | 引数エラー |
-| 3 | 検査不能または処理失敗。配布元を読めない、`--check` の `unreadable`、配布先への書き込み失敗、プロジェクトの error（マニフェスト破損、上流取得失敗など）、導入プロジェクトが見つからない場合 |
+| 3 | 検査不能または処理失敗。配布元を読めない、`--check` の `unreadable`、配布先への書き込みや旧配置の削除の失敗、プロジェクトの error（マニフェスト破損、上流取得失敗など）、導入プロジェクトが見つからない場合 |
 
 検査不能とドリフトが混在するときは、3 が 1 に優先します。
 
@@ -920,8 +944,8 @@ JSON は次の形です（パスとハッシュは例示用の値です）。
 
 ```json
 {
-  "schemaVersion": 1,
-  "result": "clean",
+  "schemaVersion": 2,
+  "result": "drift",
   "source": {
     "path": "/repo/.claude/skills/cross-review/SKILL.md",
     "sha256": "<正本のSHA-256 hex>",
@@ -938,18 +962,42 @@ JSON は次の形です（パスとハッシュは例示用の値です）。
       "sourcePath": "/repo/.claude/skills/cross-review/SKILL.md",
       "sourceSha256": "<正本のSHA-256 hex>",
       "reason": null
+    },
+    {
+      "id": "agents",
+      "path": "/home/u/.agents/skills/cross-review/SKILL.md",
+      "home": "/home/u/.agents",
+      "homeFrom": "fixed",
+      "state": "match",
+      "sha256": "<観測した写しのSHA-256 hex>",
+      "sourcePath": "/repo/.claude/skills/cross-review/SKILL.md",
+      "sourceSha256": "<正本のSHA-256 hex>",
+      "reason": null
+    },
+    {
+      "id": "codex-legacy",
+      "path": "/home/u/.codex/skills/cross-review/SKILL.md",
+      "home": "/home/u/.codex",
+      "homeFrom": "default",
+      "state": "legacy",
+      "removable": true,
+      "sha256": "<旧配置の写しのSHA-256 hex>",
+      "sourcePath": "/repo/.claude/skills/cross-review/SKILL.md",
+      "sourceSha256": "<正本のSHA-256 hex>",
+      "reason": null
     }
   ]
 }
 ```
 
 - `source.path`、各 `path`、`home`、`sourcePath` は絶対パスです。
-- `targets` は表の順に 3 要素で、各 `id` と `homeFrom` は表の値です。ただし配布元を読めない場合は空配列です。
+- `targets` は `claude`、`agents` の順で、存在する旧配置の項目がその後に表の順で加わります。各 `id` と `homeFrom` は表の値です。ただし配布元を読めない場合は空配列です。
 - `source.sha256` は正本のバイト列の SHA-256 です。正本を読めない場合だけ null になり、`source.error` に理由が入ります。読めた場合の `source.error` は null です。
 - 各 `sourcePath` と `sourceSha256` は常にトップの `source.path` と `source.sha256` と同値です。
-- 各 `sha256` は `match` / `stale` なら観測した写しのハッシュ、`missing` / `unreadable` / `skipped` なら null です。
-- `reason` は `skipped` / `unreadable` なら必ず文字列、それ以外は null です。重複の場合は「`<先の id> と同じパス`」です。
-- `result` は正本を読めないか `unreadable` があれば `error`、それ以外で `stale` があれば `drift`、それ以外は `clean` です。終了コードはそれぞれ 3 / 1 / 0 です。
+- 各 `sha256` は `match` / `stale` / `legacy` なら観測した写しのハッシュ、`missing` / `unreadable` / `skipped` なら null です。
+- `reason` は `skipped` / `unreadable`、または `legacy` で `removable: false` なら必ず文字列、それ以外は null です。重複の場合は「`<先の id> と同じパス`」です。
+- `result` は正本を読めないか `unreadable` があれば `error`、それ以外で `stale` または `legacy` があれば `drift`、それ以外は `clean` です。終了コードはそれぞれ 3 / 1 / 0 です。
+- `removable` は旧配置の項目だけにあり、削除できるときだけ true です。`unreadable` の旧配置では false です。
 
 > 引数解析、プロジェクト走査、結果分類、集計、一括同期の配線は `tests/cross-review.sync-all.test.js`（vitest）が担保します（上流で検証し、新形式の導入先へは配りません）。
 

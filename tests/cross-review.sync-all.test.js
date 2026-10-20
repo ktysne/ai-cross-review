@@ -492,6 +492,7 @@ const skillPath = (dir) => path.join(HOME, dir, 'skills', 'cross-review', 'SKILL
 const CLAUDE = skillPath('.claude');
 const CODEX = skillPath('.codex');
 const CODEX_SUBAGENT = skillPath('.codex-subagent');
+const AGENTS = skillPath('.agents');
 
 function globalDeps(homeFiles = {}, overrides = {}) {
   const fsx = makeHomeFs({ [SOURCE]: SKILL, [path.join(HOME, '.claude')]: '', ...homeFiles });
@@ -502,6 +503,13 @@ function globalDeps(homeFiles = {}, overrides = {}) {
     deps: {
       scriptDir: path.resolve('/repo/tools'), home: HOME, env: {}, platform: 'linux',
       exists: fsx.exists, readFile: fsx.readFile, writeFile: fsx.writeFile, mkdir: fsx.mkdir,
+      gitRun: (args) => args[0] === 'log' ? 'abc\n' : Buffer.from('過去の版\n'),
+      realpath: (p) => path.resolve(p),
+      unlink: (p) => fsx.store.delete(path.resolve(p)),
+      rmdir: (p) => {
+        if ([...fsx.store.keys()].some((key) => key.startsWith(path.resolve(p) + path.sep))) throw Object.assign(new Error('not empty'), { code: 'ENOTEMPTY' });
+        fsx.store.delete(path.resolve(p));
+      },
       findManifests: () => { throw new Error('走査してはいけない'); },
       out: (s) => sink.out.push(s), err: (s) => sink.err.push(s), ...overrides,
     },
@@ -513,27 +521,26 @@ function globalOptions(extra = {}) {
 }
 
 describe('resolveGlobalTargets', () => {
-  it('既定ホームと固定ホームを識別し、配布先を常に3要素返す', () => {
+  it('既定ホームと固定ホームを識別し、配布先を常に2要素返す', () => {
     const h = globalDeps();
     const targets = resolveGlobalTargets(h.deps);
     expect(targets.map((t) => [t.id, t.homeFrom, t.path])).toEqual([
-      ['claude', 'default', CLAUDE], ['codex', 'default', CODEX], ['codex-subagent', 'fixed', CODEX_SUBAGENT],
+      ['claude', 'default', CLAUDE], ['agents', 'fixed', AGENTS],
     ]);
-    expect(targets.map((t) => t.available)).toEqual([true, false, false]);
+    expect(targets.map((t) => t.available)).toEqual([true, false]);
   });
 
   it('環境変数の相対パスは絶対化し、~ は展開しない', () => {
     const h = globalDeps({}, { env: { CLAUDE_CONFIG_DIR: 'custom/claude', CODEX_HOME: '~/codex' } });
     const targets = resolveGlobalTargets(h.deps);
     expect(targets[0]).toMatchObject({ home: path.resolve('custom/claude'), homeFrom: 'CLAUDE_CONFIG_DIR', path: path.resolve('custom/claude/skills/cross-review/SKILL.md') });
-    expect(targets[1]).toMatchObject({ home: path.resolve('~/codex'), homeFrom: 'CODEX_HOME', path: path.resolve('~/codex/skills/cross-review/SKILL.md') });
-    expect(targets[2].homeFrom).toBe('fixed');
+    expect(targets[1]).toMatchObject({ home: path.join(HOME, '.agents'), homeFrom: 'fixed', path: AGENTS });
   });
 
   it('空文字の環境変数は未設定として既定を使う', () => {
     const h = globalDeps({}, { env: { CLAUDE_CONFIG_DIR: '', CODEX_HOME: '' } });
-    expect(resolveGlobalTargets(h.deps).map((t) => t.homeFrom)).toEqual(['default', 'default', 'fixed']);
-    expect(resolveGlobalTargets(h.deps).map((t) => t.path)).toEqual([CLAUDE, CODEX, CODEX_SUBAGENT]);
+    expect(resolveGlobalTargets(h.deps).map((t) => t.homeFrom)).toEqual(['default', 'fixed']);
+    expect(resolveGlobalTargets(h.deps).map((t) => t.path)).toEqual([CLAUDE, AGENTS]);
   });
 
   it('Claude のホームが無ければ環境変数名を理由に含めて対象外にする', () => {
@@ -541,29 +548,15 @@ describe('resolveGlobalTargets', () => {
     expect(resolveGlobalTargets(h.deps)[0]).toMatchObject({ available: false, reason: expect.stringMatching(/CLAUDE_CONFIG_DIR.*無いため配布しない/) });
   });
 
-  it.each(['linux', 'win32'])('%s: CODEX_HOME と固定ホームの重複は後の要素を対象外にする', (platform) => {
-    const h = globalDeps({}, { env: { CODEX_HOME: path.join(HOME, '.codex-subagent') + path.sep }, platform });
-    expect(resolveGlobalTargets(h.deps)[2]).toMatchObject({ id: 'codex-subagent', available: false, reason: 'codex と同じパス' });
-  });
 
-  it('win32 の重複判定は大文字と小文字を区別しない', () => {
-    const h = globalDeps({}, { env: { CODEX_HOME: path.join(HOME, '.CODEX-SUBAGENT') }, platform: 'win32' });
-    expect(resolveGlobalTargets(h.deps)[2].reason).toBe('codex と同じパス');
-    expect(resolveGlobalTargets({ ...h.deps, platform: 'linux' })[2].reason).not.toBe('codex と同じパス');
-  });
-
-  it('Claude と Codex の重複も先の id を理由に残す', () => {
-    const h = globalDeps({}, { env: { CODEX_HOME: path.join(HOME, '.claude') } });
-    expect(resolveGlobalTargets(h.deps)[1].reason).toBe('claude と同じパス');
-  });
 });
 
 describe('planGlobalSkill', () => {
   it('未配置、古い、一致をバイト比較で区別する', () => {
-    const h = globalDeps({ [path.join(HOME, '.codex/skills')]: '', [CODEX]: '古い', [path.join(HOME, '.codex-subagent/skills')]: '', [CODEX_SUBAGENT]: SKILL });
+    const h = globalDeps({ [path.join(HOME, '.codex/skills')]: '', [AGENTS]: '古い' });
     const plans = planGlobalSkill({ ...h.deps, skillBuffer: SKILL, sourcePath: SOURCE, sourceSha256: digest(SKILL) });
-    expect(plans.map((p) => p.state)).toEqual(['missing', 'stale', 'match']);
-    expect(plans.map((p) => p.sha256)).toEqual([null, digest('古い'), digest(SKILL)]);
+    expect(plans.map((p) => p.state)).toEqual(['missing', 'stale']);
+    expect(plans.map((p) => p.sha256)).toEqual([null, digest('古い')]);
     expect(plans.every((p) => p.reason === null)).toBe(true);
   });
 
@@ -585,16 +578,16 @@ describe('runAll の --global-skill', () => {
   beforeEach(() => { process.exitCode = 0; });
   afterAll(() => { process.exitCode = 0; });
 
-  it('書き込みモードは missing、stale、unreadable をすべて配る', () => {
-    const h = globalDeps({ [path.join(HOME, '.codex/skills')]: '', [CODEX]: '古い', [path.join(HOME, '.codex-subagent/skills')]: '', [CODEX_SUBAGENT]: new Error('EACCES') });
+  it('書き込みモードは missing と unreadable に配る', () => {
+    const h = globalDeps({ [path.join(HOME, '.codex/skills')]: '', [AGENTS]: new Error('EACCES') });
     const r = runAll(globalOptions({ mode: 'sync' }), h.deps);
     expect(r.exitCode).toBe(0);
-    expect(r.items[0]).toMatchObject({ kind: 'global', status: 'updated', changed: 3 });
-    expect(r.items[0].plans.map((p) => p.state)).toEqual(['missing', 'stale', 'unreadable']);
-    expect(h.fsx.writes.map((w) => w.path)).toEqual([CLAUDE, CODEX, CODEX_SUBAGENT]);
+    expect(r.items[0]).toMatchObject({ kind: 'global', status: 'updated', changed: 2 });
+    expect(r.items[0].plans.map((p) => p.state)).toEqual(['missing', 'unreadable']);
+    expect(h.fsx.writes.map((w) => w.path)).toEqual([CLAUDE, AGENTS]);
     expect(h.fsx.writes.every((w) => w.content.equals(SKILL))).toBe(true);
     expect(h.sink.out.join('')).not.toMatch(/走査ルート/);
-    expect(h.sink.out.join('')).toMatch(/未配置.*古い.*読めない/);
+    expect(h.sink.out.join('')).toMatch(/未配置.*読めない/);
   });
 
   it('Claude のホームも Codex の skills も無い環境は作らず対象外にする', () => {
@@ -602,10 +595,10 @@ describe('runAll の --global-skill', () => {
     h.fsx.store.delete(path.join(HOME, '.claude'));
     const r = runAll(globalOptions({ mode: 'sync' }), h.deps);
     expect(r.exitCode).toBe(0);
-    expect(r.items[0].plans.map((p) => p.state)).toEqual(['skipped', 'skipped', 'skipped']);
+    expect(r.items[0].plans.map((p) => p.state)).toEqual(['skipped', 'skipped']);
     expect(h.fsx.writes).toEqual([]);
     expect(h.fsx.mkdirs).toEqual([]);
-    expect(h.sink.err).toHaveLength(3);
+    expect(h.sink.err).toHaveLength(2);
   });
 
   it('Codex のホームだけあっても skills を作らない', () => {
@@ -633,7 +626,7 @@ describe('runAll の --global-skill', () => {
       const report = JSON.parse(output);
       expect(output).toBe(JSON.stringify(report, null, 2) + '\n');
       expect(report).toEqual({
-        schemaVersion: 1, result,
+        schemaVersion: 2, result,
         source: { path: SOURCE, sha256: digest(SKILL), error: null },
         targets: [
           {
@@ -641,9 +634,9 @@ describe('runAll の --global-skill', () => {
             sha256: ['match', 'stale'].includes(state) ? digest(content) : null,
             sourcePath: SOURCE, sourceSha256: digest(SKILL), reason: state === 'unreadable' ? expect.any(String) : null,
           },
-          ...['codex', 'codex-subagent'].map((id) => ({
-            id, path: id === 'codex' ? CODEX : CODEX_SUBAGENT, home: path.join(HOME, `.${id}`),
-            homeFrom: id === 'codex' ? 'default' : 'fixed', state: 'skipped', sha256: null,
+          ...['agents'].map((id) => ({
+            id, path: AGENTS, home: path.join(HOME, '.agents'),
+            homeFrom: 'fixed', state: 'skipped', sha256: null,
             sourcePath: SOURCE, sourceSha256: digest(SKILL), reason: expect.any(String),
           })),
         ],
@@ -667,7 +660,7 @@ describe('runAll の --global-skill', () => {
       else h.fsx.store.set(SOURCE, new Error('EACCES'));
       const r = runAll(globalOptions({ json }), h.deps);
       expect(r.exitCode).toBe(3);
-      if (json) expect(JSON.parse(h.sink.out.join(''))).toEqual({ schemaVersion: 1, result: 'error', source: { path: SOURCE, sha256: null, error: expect.stringMatching(/配布元の SKILL を読めません/) }, targets: [] });
+      if (json) expect(JSON.parse(h.sink.out.join(''))).toEqual({ schemaVersion: 2, result: 'error', source: { path: SOURCE, sha256: null, error: expect.stringMatching(/配布元の SKILL を読めません/) }, targets: [] });
       else expect(h.sink.out.join('')).toMatch(/エラー/);
       expect(h.fsx.writes).toEqual([]);
     }
@@ -694,7 +687,7 @@ describe('runAll の --global-skill', () => {
     expect(r.exitCode).toBe(0);
     const output = h.sink.out.join('');
     expect(output).toContain(path.resolve('/custom/claude/skills/cross-review/SKILL.md'));
-    expect(output).toContain(path.resolve('/custom/codex/skills/cross-review/SKILL.md'));
+    expect(output).toContain(`~${path.sep}.agents${path.sep}skills${path.sep}cross-review${path.sep}SKILL.md`);
     expect(output).toContain('対象外');
     expect(h.fsx.writes).toEqual([]);
   });
@@ -705,9 +698,9 @@ describe('runAll の --global-skill', () => {
     const h = globalDeps({ [customClaude]: '', [path.join(customCodex, 'skills')]: '' }, { env: { CLAUDE_CONFIG_DIR: customClaude, CODEX_HOME: customCodex } });
     const r = runAll(globalOptions({ mode: check ? 'check' : 'sync' }), h.deps);
     expect(r.items[0].plans.slice(0, 2).map((p) => [p.home, p.homeFrom, p.state])).toEqual([
-      [customClaude, 'CLAUDE_CONFIG_DIR', 'missing'], [customCodex, 'CODEX_HOME', 'missing'],
+      [customClaude, 'CLAUDE_CONFIG_DIR', 'missing'], [path.join(HOME, '.agents'), 'fixed', 'missing'],
     ]);
-    expect(h.fsx.writes.map((w) => w.path)).toEqual(check ? [] : [path.join(customClaude, 'skills/cross-review/SKILL.md'), path.join(customCodex, 'skills/cross-review/SKILL.md')]);
+    expect(h.fsx.writes.map((w) => w.path)).toEqual(check ? [] : [path.join(customClaude, 'skills/cross-review/SKILL.md'), AGENTS]);
   });
 
   it('--root 併用でもプロジェクトの error はグローバルの stale に優先する', () => {
@@ -721,6 +714,259 @@ describe('runAll の --global-skill', () => {
     expect(r.items.map((i) => i.status)).toEqual(['error', 'drift']);
     expect(h.sink.out.join('')).toMatch(/検出した導入プロジェクト: 1 件/);
   });
+});
+
+describe('agents への配布と旧配置の片付け', () => {
+  beforeEach(() => { process.exitCode = 0; });
+  afterAll(() => { process.exitCode = 0; });
+
+  it.each(['.codex', '.codex-subagent'])('%s の印があれば agents の skills が無くても作って配る', (dir) => {
+    const h = globalDeps({ [path.join(HOME, dir, 'skills')]: '' });
+    expect(h.fsx.exists(path.join(HOME, '.agents/skills'))).toBe(false);
+    expect(runAll(globalOptions({ mode: 'sync' }), h.deps).exitCode).toBe(0);
+    expect(h.fsx.writes.map((w) => w.path)).toEqual([CLAUDE, AGENTS]);
+  });
+
+  it('旧ホームの skills が無くても、配った写しがあれば古さを検出して書き込みで更新する', () => {
+    const h = globalDeps({ [AGENTS]: '古い' });
+    const checked = runAll(globalOptions({ json: true }), h.deps);
+    expect(checked.exitCode).toBe(1);
+    expect(checked.items[0].plans.find((p) => p.id === 'agents').state).toBe('stale');
+    expect(runAll(globalOptions({ mode: 'sync' }), h.deps).exitCode).toBe(0);
+    expect(h.fsx.writes.find((w) => w.path === AGENTS).content.equals(SKILL)).toBe(true);
+  });
+
+  it('CODEX_HOME を印と旧配置に使い、配布先は agents に固定する', () => {
+    const custom = path.resolve('/custom/codex');
+    const old = path.join(custom, 'skills/cross-review/SKILL.md');
+    const h = globalDeps({ [path.join(custom, 'skills')]: '', [old]: SKILL }, { env: { CODEX_HOME: custom } });
+    const result = runAll(globalOptions({ json: true }), h.deps);
+    expect(result.exitCode).toBe(1);
+    expect(result.items[0].plans[1]).toMatchObject({ id: 'agents', path: AGENTS, state: 'missing', homeFrom: 'fixed' });
+    expect(result.items[0].plans[2]).toMatchObject({ id: 'codex-legacy', home: custom, homeFrom: 'CODEX_HOME', path: old, removable: true });
+    expect(h.fsx.writes).toEqual([]);
+  });
+
+  it.each([
+    ['agents', () => path.join(HOME, '.agents'), {}],
+    ['claude', () => path.resolve('/custom/shared'), { CLAUDE_CONFIG_DIR: path.resolve('/custom/shared') }],
+  ])('CODEX_HOME が %s の配布先と同じパスなら旧配置として扱わず、配った写しを消さない', (_name, codexHome, env) => {
+    const home = codexHome();
+    const shared = path.join(home, 'skills/cross-review/SKILL.md');
+    const h = globalDeps({ [home]: '', [path.join(home, 'skills')]: '', [shared]: SKILL }, { env: { ...env, CODEX_HOME: home } });
+    const result = runAll(globalOptions({ mode: 'sync' }), h.deps);
+    expect(result.exitCode).toBe(0);
+    expect(result.items[0].plans.some((p) => p.id === 'codex-legacy')).toBe(false);
+    expect(h.fsx.exists(shared)).toBe(true);
+  });
+
+  it('旧配置の skills が agents の skills へのリンクなら、実体が同じなので消さない', () => {
+    const codexSkills = path.join(HOME, '.codex/skills');
+    const agentsSkills = path.join(HOME, '.agents/skills');
+    const realpath = (p) => {
+      const resolved = path.resolve(p);
+      return resolved.startsWith(codexSkills) ? agentsSkills + resolved.slice(codexSkills.length) : resolved;
+    };
+    const h = globalDeps({ [codexSkills]: '', [agentsSkills]: '', [CODEX]: SKILL, [AGENTS]: SKILL }, { realpath });
+    const result = runAll(globalOptions({ mode: 'sync' }), h.deps);
+    expect(result.exitCode).toBe(0);
+    expect(result.items[0].plans.some((p) => p.id === 'codex-legacy')).toBe(false);
+    expect(h.fsx.exists(CODEX)).toBe(true);
+  });
+
+  it('旧配置の SKILL.md がもう一方の旧配置へのファイルのリンクでも、両方を片付ける', () => {
+    const realpath = (p) => (path.resolve(p) === path.resolve(CODEX) ? path.resolve(CODEX_SUBAGENT) : path.resolve(p));
+    const h = globalDeps({ [path.join(HOME, '.codex/skills')]: '', [CODEX]: SKILL, [CODEX_SUBAGENT]: SKILL }, { realpath });
+    expect(runAll(globalOptions({ mode: 'sync' }), h.deps).exitCode).toBe(0);
+    expect(h.fsx.exists(CODEX)).toBe(false);
+    expect(h.fsx.exists(CODEX_SUBAGENT)).toBe(false);
+    expect(runAll(globalOptions({ json: true }), h.deps).exitCode).toBe(0);
+  });
+
+  it('配布先の SKILL.md が旧配置へのファイルのリンクなら、リンク先の旧配置を消さない', () => {
+    const realpath = (p) => (path.resolve(p) === path.resolve(AGENTS) ? path.resolve(CODEX) : path.resolve(p));
+    const h = globalDeps({ [path.join(HOME, '.codex/skills')]: '', [CODEX]: SKILL, [AGENTS]: SKILL }, { realpath });
+    expect(runAll(globalOptions({ mode: 'sync' }), h.deps).exitCode).toBe(0);
+    expect(h.fsx.exists(CODEX)).toBe(true);
+  });
+
+  it('旧配置の実体を確かめられなければ removable: false にして消さない', () => {
+    const realpath = (p) => {
+      if (path.resolve(p).startsWith(path.join(HOME, '.codex'))) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      return path.resolve(p);
+    };
+    const h = globalDeps({ [path.join(HOME, '.codex/skills')]: '', [CODEX]: SKILL }, { realpath });
+    const check = runAll(globalOptions({ json: true }), h.deps);
+    expect(check.exitCode).toBe(1);
+    expect(check.items[0].plans.find((p) => p.id === 'codex-legacy')).toMatchObject({ state: 'legacy', removable: false, reason: expect.stringContaining('実体のパス') });
+    runAll(globalOptions({ mode: 'sync' }), h.deps);
+    expect(h.fsx.exists(CODEX)).toBe(true);
+  });
+
+  it('CODEX_HOME が変われば既定の codex の印は使わない', () => {
+    const h = globalDeps({ [path.join(HOME, '.codex/skills')]: '' }, { env: { CODEX_HOME: '/custom/absent' } });
+    expect(resolveGlobalTargets(h.deps)[1]).toMatchObject({ available: false, reason: expect.any(String) });
+  });
+
+  it.each(['過去の版\n', '過去の版\r\n', SKILL])('配布版と一致する旧配置を削除し、空の cross-review だけ片付ける: %s', (content) => {
+    const dir = path.dirname(CODEX);
+    const skills = path.dirname(dir);
+    const h = globalDeps({ [CODEX]: content, [dir]: '', [skills]: '' });
+    const result = runAll(globalOptions({ mode: 'sync' }), h.deps);
+    expect(result.exitCode).toBe(0);
+    expect(result.items[0].plans.at(-1)).toMatchObject({ state: 'legacy', removable: true, reason: null });
+    expect(h.fsx.exists(CODEX)).toBe(false);
+    expect(h.fsx.exists(dir)).toBe(false);
+    expect(h.fsx.exists(skills)).toBe(true);
+    expect(h.fsx.exists(AGENTS)).toBe(true);
+  });
+
+  it('別ファイルのある cross-review ディレクトリは残す', () => {
+    const dir = path.dirname(CODEX);
+    const other = path.join(dir, 'custom.md');
+    const h = globalDeps({ [CODEX]: SKILL, [dir]: '', [other]: '独自設定' });
+    expect(runAll(globalOptions({ mode: 'sync' }), h.deps).exitCode).toBe(0);
+    expect(h.fsx.exists(CODEX)).toBe(false);
+    expect(h.fsx.exists(dir)).toBe(true);
+    expect(h.fsx.exists(other)).toBe(true);
+  });
+
+  it('一致しない旧配置を残して stderr に理由を警告する', () => {
+    const h = globalDeps({ [CODEX]: '利用者の編集' });
+    const result = runAll(globalOptions({ mode: 'sync' }), h.deps);
+    expect(result.exitCode).toBe(0);
+    expect(result.items[0].plans.at(-1)).toMatchObject({ removable: false, reason: expect.stringContaining('一致しません') });
+    expect(h.fsx.store.get(CODEX)).toBe('利用者の編集');
+    expect(h.sink.err.join('')).toContain('旧配置を残します');
+  });
+
+  it.each(['log', 'show'])('git %s が失敗したら現在版と一致しても削除しない', (failure) => {
+    const h = globalDeps({ [CODEX]: SKILL }, { gitRun: (args) => {
+      if (args[0] === failure) throw new Error('git failed');
+      return 'abc';
+    } });
+    const result = runAll(globalOptions({ mode: 'sync' }), h.deps);
+    expect(result.exitCode).toBe(0);
+    expect(result.items[0].plans.at(-1)).toMatchObject({ removable: false, reason: expect.stringContaining('git failed') });
+    expect(h.fsx.exists(CODEX)).toBe(true);
+  });
+
+  it('--dry-run は削除予定と残す理由を表示し、どちらも削除しない', () => {
+    const h = globalDeps({ [CODEX]: SKILL, [CODEX_SUBAGENT]: '独自版' });
+    runAll(globalOptions({ mode: 'sync', dryRun: true }), h.deps);
+    expect(h.sink.out.join('')).toContain('旧配置を削除予定');
+    expect(h.sink.out.join('')).toMatch(/旧配置を残す: .*一致しません/);
+    expect(h.fsx.exists(CODEX)).toBe(true);
+    expect(h.fsx.exists(CODEX_SUBAGENT)).toBe(true);
+    expect(h.fsx.writes).toEqual([]);
+  });
+
+  it.each([false, true])('--check は legacy を drift として返し、削除しない (json=%s)', (json) => {
+    const h = globalDeps({ [CLAUDE]: SKILL, [CODEX]: SKILL });
+    main(['--global-skill', '--check', ...(json ? ['--json'] : [])], h.deps);
+    expect(process.exitCode).toBe(1);
+    if (json) {
+      const report = JSON.parse(h.sink.out.join(''));
+      expect(report).toMatchObject({ schemaVersion: 2, result: 'drift' });
+      expect(report.targets.at(-1)).toEqual({ id: 'codex-legacy', path: CODEX, home: path.join(HOME, '.codex'), homeFrom: 'default',
+        state: 'legacy', removable: true, sha256: digest(SKILL), reason: null, sourcePath: SOURCE, sourceSha256: digest(SKILL) });
+    } else expect(h.sink.out.join('')).toContain('旧配置');
+    expect(h.fsx.exists(CODEX)).toBe(true);
+    expect(h.fsx.writes).toEqual([]);
+  });
+
+  it('旧配置が無ければ JSON は clean で終了コード 0 にする', () => {
+    const h = globalDeps({ [CLAUDE]: SKILL });
+    main(['--global-skill', '--check', '--json'], h.deps);
+    expect(process.exitCode).toBe(0);
+    expect(JSON.parse(h.sink.out.join(''))).toMatchObject({ schemaVersion: 2, result: 'clean', targets: [{ id: 'claude' }, { id: 'agents' }] });
+  });
+
+  it('読めない旧配置は drift に優先して error と終了コード 3 を返す', () => {
+    const h = globalDeps({ [CODEX]: SKILL, [CODEX_SUBAGENT]: new Error('EACCES') });
+    main(['--global-skill', '--check', '--json'], h.deps);
+    expect(process.exitCode).toBe(3);
+    const report = JSON.parse(h.sink.out.join(''));
+    expect(report.result).toBe('error');
+    expect(report.targets.at(-1)).toMatchObject({ id: 'codex-subagent-legacy', state: 'unreadable', removable: false, sha256: null, reason: expect.stringContaining('EACCES') });
+  });
+
+  it.each(['linux', 'win32'])('%s: 同じパスに解決した旧配置を 1 件にする', (platform) => {
+    const h = globalDeps({ [CODEX_SUBAGENT]: SKILL }, { platform, env: { CODEX_HOME: path.join(HOME, '.codex-subagent') + path.sep } });
+    expect(runAll(globalOptions(), h.deps).items[0].plans.filter((p) => p.state === 'legacy')).toHaveLength(1);
+  });
+
+  it('win32 の旧配置の重複判定は大文字と小文字を区別しない', () => {
+    const upper = skillPath('.CODEX-SUBAGENT');
+    const h = globalDeps({ [upper]: SKILL, [CODEX_SUBAGENT]: SKILL }, { platform: 'win32', env: { CODEX_HOME: path.join(HOME, '.CODEX-SUBAGENT') } });
+    expect(runAll(globalOptions(), h.deps).items[0].plans.filter((p) => p.state === 'legacy')).toHaveLength(1);
+    h.deps.platform = 'linux';
+    expect(runAll(globalOptions(), h.deps).items[0].plans.filter((p) => p.state === 'legacy')).toHaveLength(2);
+  });
+
+  it('過去版はこの checkout の Git から全件取得し、2 つの旧配置で共有する', () => {
+    const calls = [];
+    const h = globalDeps({ [CODEX]: '最初の版\r\n', [CODEX_SUBAGENT]: '次の版\n' }, {
+      gitRun: undefined,
+      execFileSync: (command, args, options) => {
+        calls.push({ command, args, options });
+        if (args[0] === 'log') return Buffer.from('first\nsecond\n');
+        return Buffer.from(args[1].startsWith('first:') ? '最初の版\n' : '次の版\n');
+      },
+    });
+    const result = runAll(globalOptions(), h.deps);
+    expect(result.items[0].plans.slice(-2).every((p) => p.removable)).toBe(true);
+    expect(calls.map((c) => c.args)).toEqual([
+      ['log', '--format=%H', '--diff-filter=AM', '--', '.claude/skills/cross-review/SKILL.md'],
+      ['show', 'first:.claude/skills/cross-review/SKILL.md'],
+      ['show', 'second:.claude/skills/cross-review/SKILL.md'],
+    ]);
+    expect(calls.every((c) => c.command === 'git' && c.options.cwd === path.resolve('/repo'))).toBe(true);
+  });
+
+  it('履歴が空なら削除できない理由を記録する', () => {
+    const h = globalDeps({ [CODEX]: SKILL }, { gitRun: () => '' });
+    const result = runAll(globalOptions(), h.deps);
+    expect(result.items[0].plans.at(-1)).toMatchObject({ removable: false, reason: expect.stringContaining('履歴がありません') });
+  });
+
+  it('旧配置が無ければ Git を起動しない', () => {
+    const h = globalDeps({}, { gitRun: () => { throw new Error('Git を起動してはいけない'); } });
+    expect(runAll(globalOptions(), h.deps).exitCode).toBe(0);
+  });
+
+  it('旧配置のハッシュは改行を正規化する前のバイト列から計算する', () => {
+    const content = Buffer.from('過去の版\r\n');
+    const h = globalDeps({ [CODEX]: content });
+    const result = runAll(globalOptions(), h.deps);
+    expect(result.items[0].plans.at(-1)).toMatchObject({ removable: true, sha256: digest(content) });
+  });
+
+  it('異なる不正バイトを同じ文字へ置換して一致させない', () => {
+    const h = globalDeps({ [CODEX]: Buffer.from([0xff]) }, { gitRun: (args) => args[0] === 'log' ? 'abc' : Buffer.from([0xfe]) });
+    expect(runAll(globalOptions(), h.deps).items[0].plans.at(-1).removable).toBe(false);
+  });
+
+  it.each(['unlink', 'rmdir'])('%s の失敗を終了コード 3 で報告する', (operation) => {
+    const h = globalDeps({ [CODEX]: SKILL }, { [operation]: () => { throw new Error('EACCES cleanup'); } });
+    const result = runAll(globalOptions({ mode: 'sync' }), h.deps);
+    expect(result.exitCode).toBe(3);
+    expect(result.items[0].message).toContain('EACCES cleanup');
+  });
+
+  it('新しい配布先への書き込みが失敗したときは旧配置を削除しない', () => {
+    const h = globalDeps({ [CODEX]: SKILL }, { writeFile: () => { throw new Error('write failed'); } });
+    expect(runAll(globalOptions({ mode: 'sync' }), h.deps).exitCode).toBe(3);
+    expect(h.fsx.exists(CODEX)).toBe(true);
+  });
+
+  it('削除だけを予定するときも dry-run を更新予定として数える', () => {
+    const h = globalDeps({ [CLAUDE]: SKILL, [CODEX]: SKILL });
+    const result = runAll(globalOptions({ mode: 'sync', dryRun: true }), h.deps);
+    expect(result.items[0]).toMatchObject({ status: 'would-update', changed: 1 });
+    expect(h.fsx.exists(CODEX)).toBe(true);
+  });
+
 });
 
 describe('--json の引数', () => {
@@ -770,7 +1016,7 @@ describe('配布条件のディレクトリを調べられないとき', () => {
     expect(r.exitCode).toBe(3);
     const report = JSON.parse(h.sink.out.join(''));
     expect(report.result).toBe('error');
-    expect(report.targets[1]).toMatchObject({ id: 'codex', state: 'unreadable', sha256: null });
+    expect(report.targets[1]).toMatchObject({ id: 'agents', state: 'unreadable', sha256: null });
     expect(report.targets[1].reason).toMatch(/EACCES/);
   });
 

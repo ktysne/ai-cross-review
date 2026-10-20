@@ -171,7 +171,12 @@ PR があるときに省略した場合、`cockpit_skip_review` ツール (agent
 
 複数の導入プロジェクトへまとめて反映するときは、`/Develop` 等の作業ルート配下を走査して一括同期する `tools/cross-review.sync-all.js` を使う（詳細は `docs/cross-review.md`「複数プロジェクトへ一括反映」）。app-owned / vendored の区分は `docs/cross-review.md` と各リポの doc を参照。
 
-この SKILL 自体をホームの共通配置へ配るときは `node tools/cross-review.sync-all.js --global-skill`（`--check` で古さの検査、`--dry-run` で確認、`--check --json` で配布先ごとの状態を JSON で取得）。配布先は `CLAUDE_CONFIG_DIR`（未設定なら `~/.claude`）、`CODEX_HOME`（未設定なら `~/.codex`）、`~/.codex-subagent` の各ホームの `skills/cross-review/SKILL.md`。Codex はレビュー時に、Codex のサブエージェントは修正適用や実装委譲の際に、それぞれのホームの写しを読むので、古いままだと旧ルールで動く。`--check` の終了コードは古い写しがあれば 1、読めないものがあれば 3、未配置だけなら 0。解決規則と JSON の形は `docs/cross-review.md`「グローバル SKILL の配布」。
+この SKILL 自体をホームの共通配置へ配るときは `node tools/cross-review.sync-all.js --global-skill`（`--check` で検査、`--dry-run` で予定確認、`--check --json` で schemaVersion 2 の JSON を取得）。
+Claude 向けは `CLAUDE_CONFIG_DIR`（未設定なら `~/.claude`）の `skills/cross-review/SKILL.md`、Codex 向けは `CODEX_HOME` に関係なく `~/.agents/skills/cross-review/SKILL.md` に配る。
+Codex のホームの `skills/`、`~/.codex-subagent/skills/`、既に配った写しのどれかがあれば、通常の Codex とサブエージェントが共有する写しを配る。
+旧配置は、履歴の配布版または現在の配布元と一致するものだけ削除し、独自編集のあるものや履歴を調べられないものは警告して残す。
+`--check` の終了コードは古い写しまたは旧配置があれば 1、読めないものがあれば 3、未配置だけなら 0。
+解決規則と JSON の形は `docs/cross-review.md`「グローバル SKILL の配布」。
 
 上流が配り始めたファイルを取り込み先が取りこぼしていないかは `node tools/cross-review.js sync --check-manifest`（上流の雛形にあって `files[]` に無いエントリを列挙するだけ。`--check` を含意するので書き込みは起きない）。
 
