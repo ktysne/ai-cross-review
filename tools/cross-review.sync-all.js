@@ -374,6 +374,18 @@ function realPathKey(p, realpath, platform) {
   }
 }
 
+// 配布先がファイルのリンクなら、書き込みはリンク先へ届くので、リンク先の旧配置も配布先として守る。
+function activePathKeys(p, realpath, platform) {
+  const keys = [realPathKey(p, realpath, platform)];
+  try {
+    const real = realpath(path.resolve(p));
+    keys.push(platform === 'win32' ? real.toLowerCase() : real);
+  } catch (err) {
+    if (!err || err.code !== 'ENOENT') throw err;
+  }
+  return keys;
+}
+
 // 配布先と実体が同じ旧配置は旧配置として扱わない。実体を確かめられない旧配置は消さない。
 function planLegacySkills(deps, skillBuffer, sourcePath, sourceSha256, activePaths = []) {
   const platform = deps.platform || process.platform;
@@ -381,7 +393,7 @@ function planLegacySkills(deps, skillBuffer, sourcePath, sourceSha256, activePat
   const keyOf = (p) => realPathKey(p, realpath, platform);
   let active;
   let activeError = null;
-  try { active = new Set(activePaths.map(keyOf)); }
+  try { active = new Set(activePaths.flatMap((p) => activePathKeys(p, realpath, platform))); }
   catch (err) { active = new Set(); activeError = err; }
   const seen = new Set();
   const targets = legacyGlobalTargets({ home: deps.home || os.homedir(), env: deps.env || process.env, platform })
