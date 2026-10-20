@@ -34,7 +34,7 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 | SKILL の写し(2026-10-20 開発者決定) | リポジトリの `.claude/skills/cross-review/SKILL.md` を、クラウドのセッション向けの写しにする。クラウドでは別ベンダーの CLI が無いので、レビューは常に同じベンダーのサブエージェントで回すことを前提に書く。正本は上流の別のファイル(例 `templates/cloud-skill/SKILL.md`)に置き、マニフェストの `from` で写す。`name` と `description` は今のものを据え置く | 公式ドキュメントでは、同名のスキルは `~/.claude/skills` が project より優先される(https://code.claude.com/docs/en/skills.md 「Resolve skills that share a name」)。ローカルではホームの SKILL が使われるので、リポジトリの写しが効くのはクラウドだけである。クラウドの手順はローカルより単純で変わりにくいので、写しを更新する PR の頻度が下がる。Claude のクラウドには Codex CLI が無く、Codex のクラウドには Claude CLI が無いことを開発者から聞いている |
 | 写す物を絞る | 新形式のマニフェストの `files[]` は、入口、クラウド向けの SKILL、`docs/cross-review.md` の案内版の 3 つにする。`.cross-review.example.md` は導入先が持っていれば残す。`cross-review.sync.js`、`cross-review.sync-all.js`、上流のテストは写さない | 導入先の CLAUDE.md の記載と、`docs/cross-review.md` を自前のパスへ写して HTML を生成している導入先があるので、`docs/cross-review.md` はパスを保った案内版にする。同期は入口の `sync` サブコマンドから本体の側の同期処理を呼ぶ |
 | `sync` サブコマンド | 入口の `node tools/cross-review.js sync [--check|--dry-run|--check-manifest]` は、本体の側の `tools/cross-review.sync.js` の `runSync` を、導入先のルートとマニフェストを指定して呼ぶ | 導入先から同期スクリプトの写しを無くしても、同期の入口が残る。同期の処理は常に本体の版で動くので、古い同期スクリプトがファイルを消せない問題が新形式では起きない |
-| 移行の方式(2026-10-20 開発者決定) | 上流の checkout の `tools/cross-review.sync-all.js` に `--migrate` を足す。`--dry-run` と `--check` を持たせる。1 プロジェクトについて、マニフェストの `files[]` の新形式への書き換え(既存の `to` は保つ)、要らなくなったファイルの削除、`package.json` の `scripts` の `node tools/cross-review.sync.js` を `node tools/cross-review.js sync` へ置き換える。ブランチ、コミット、PR は作らない | 導入先の古い `cross-review.sync.js` は写しを上書きするだけで、ファイルを消せず、移行ノートも出ないことがある。上流の checkout の同期処理で回せば、導入先の版に左右されない。手元の 21 の導入先は、すべて `package.json` から `node tools/cross-review.sync.js` を呼んでいる(2026-10-20 に確認) |
+| 移行の方式(2026-10-20 開発者決定) | 上流の checkout の `tools/cross-review.sync-all.js` に `--migrate` を足す。`--dry-run` と `--check` を持たせる。1 プロジェクトについて、マニフェストの `files[]` の新形式への書き換え(既存の `to` は保つ)、要らなくなったファイルの削除、`package.json` の `scripts` の `node tools/cross-review.sync.js` を `node tools/cross-review.js sync` へ置き換える。ブランチ、コミット、PR は作らない。書き換えの前に、マニフェストの `upstream.ref` が `tools/cross-review.entry.js` を含み、入口の `ENTRY_PROTOCOL` を受け付ける版かを確かめ、対応していなければ何も変えずに止めて、`ref` を対応版へ上げるよう案内する(`--dry-run` でも同じく止める)。`--migrate --check` は書き込まず、旧形式の導入先が 1 件でもあれば終了コード 1 にする | 導入先の古い `cross-review.sync.js` は写しを上書きするだけで、ファイルを消せず、移行ノートも出ないことがある。上流の checkout の同期処理で回せば、導入先の版に左右されない。手元の 21 の導入先は、すべて `package.json` から `node tools/cross-review.sync.js` を呼んでいる(2026-10-20 に確認)。#89 より前のコミットに `ref` を固定した導入先を移行すると、キャッシュの経路と `sync` が、そのコミットに無い入口を取りに行って失敗する。固定を黙って外さず、利用者に上げてもらう。既存の `--check` は未登録の配布物を終了コードに含めないので、旧形式のまま最新に同期した導入先を移行漏れとして拾えない |
 | 新形式の判定 | `files[]` に `tools/cross-review.sync.js` が無く、`tools/cross-review.js` の `from` が `tools/cross-review.entry.js` であることで判定する。マニフェストに版のフィールドは足さない | 判定に必要な情報は `files[]` で足りる。`--migrate` を同じリポジトリへ 2 回回しても、この判定で何もしない |
 | 旧形式との共存 | 旧形式の導入先は、本体の写しで今までどおり動く。本体は `projectRoot` が渡されないときの動きを変えない。旧形式の導入先が古い同期スクリプトで新しい本体を取り込んでも動くことを、テストで固定する | 移行していないリポジトリと、移行済みのリポジトリが混在する期間がある。旧形式は本体の写しの中で完結し、checkout の本体を参照しないので、互いに干渉しない |
 | #85 との重なり:状態ファイルの場所(2026-10-20 開発者決定) | #85 では `resolveStatePath` の場所の決め方を変えない。#89 で、上の「プロジェクトのルートの解決」のヘルパーに寄せる | #85 のパーサーはテキストを受けて解釈し、ファイルの読み書きは入口側で行う分担である。場所の決め方と解釈が分かれているので、#85 と #89 の変更が重ならない |
@@ -70,7 +70,9 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 2. #85 で足したファイルが、雛形のマニフェスト `tools/cross-review.sync.example.json` に入っていないかを確かめる。入っていれば、2 段目の雛形と 3 段目の `--migrate` の削除の対象に加える。
 3. #85 で状態ファイルの読み書きの入口が変わっていれば、「プロジェクトのルートの解決」の決定がそのまま当てはまるかを確かめる。
 4. #86 で bridge の照会に cwd を渡すようになっていれば、入口から呼ぶときの cwd が今と同じ(利用者が起動した場所)になることを確かめる。
-5. 手元の導入先の数と構成を数え直す。`docs/cross-review.md` を別のパスへ写している導入先(2026-10-20 には session-score-player)の `to` を、`--migrate` が保つことを 3 段目のテストに入れる。
+5. 手元の導入先の数と構成を数え直す。`docs/cross-review.md` を別のパスへ写している導入先(2026-10-20 には session-score-player)の `to` を、`--migrate` が保つことを 3 段目のテストに入れる。3 段目のテストには、ほかに次の 2 つを入れる。
+   - `upstream.ref` が #89 より前のコミットを指す導入先で、`--migrate` と `--migrate --dry-run` が何も変えずに止まる。
+   - 中身は最新だが旧形式の導入先で、`--migrate --check` が終了コード 1 を返す。
 
 ## 移行を全リポジトリへ反映する手順
 
@@ -84,7 +86,7 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
    - `node tools/cross-review.js route` と `node tools/cross-review.js state` が、登録した checkout の本体で動く。
    - `node tools/cross-review.js sync --check` がドリフト無しを返す。
    - 導入先の lint とテストが通る。
-5. 全導入先の PR がマージされたら、`node tools/cross-review.sync-all.js --root D:\Desktop\Develop --check` で、旧形式が残っていないことを確かめる。
+5. 全導入先の PR がマージされたら、`node tools/cross-review.sync-all.js --root D:\Desktop\Develop --migrate --check` が終了コード 0 を返すことで、旧形式が残っていないことを確かめる。既存の `--check` は旧形式のまま最新に同期した導入先を拾えないので、この確認には使わない。
 6. 作業ルートの外の導入先と、別の端末の導入先は、移行ノートの手順で移行する。上流を clone し、`node <checkout>/tools/cross-review.sync-all.js --register` と `--migrate --root <導入先>` を回す手順である。移行ノートは、旧形式の導入先が同期したときに表示される。
 
 ## 判断待ち
