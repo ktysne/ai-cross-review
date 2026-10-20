@@ -16,6 +16,7 @@ node tools/cross-review.sync-all.js --global-skill
 ```
 
 Codex のホームの `skills`、または `~/.codex-subagent/skills` があれば、新しい配布先が無くても作ります。
+旧配置を片付けて旧ホームの `skills` を消した後も、配った写しがあれば更新と検査を続けます。
 旧配置（Codex のホームおよび `~/.codex-subagent` の `skills/cross-review/SKILL.md`）は、Git 履歴の配布版または現在の配布元と一致するときだけ削除します。
 照合では CRLF と LF の違いを吸収します。
 利用者が書き換えた写しは削除せず、警告して残します。

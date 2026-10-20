@@ -143,7 +143,7 @@ cd <導入先のルート>
 Claude のホームは `CLAUDE_CONFIG_DIR`、未設定なら `~/.claude` です。
 ホーム自体があるときだけ、その下の `skills/cross-review/SKILL.md` に配ります。
 Codex 向けは `CODEX_HOME` に関係なく `~/.agents/skills/cross-review/SKILL.md` に配ります。
-Codex のホーム（`CODEX_HOME`、未設定なら `~/.codex`）の `skills/`、または `~/.codex-subagent/skills/` があるときに配り、`~/.agents/skills/` が無くても作ります。
+Codex のホーム（`CODEX_HOME`、未設定なら `~/.codex`）の `skills/`、または `~/.codex-subagent/skills/`、既に配った `~/.agents/skills/cross-review/SKILL.md` のどれかがあるときに配り、`~/.agents/skills/` が無くても作ります。
 空文字の環境変数は未設定扱いで、相対パスは作業ディレクトリから絶対化します（`~` は展開しません）。
 通常の Codex とサブエージェントが同じ写しを読みます。
 旧配置のうち、Git 履歴の配布版または現在の配布元と一致する写しだけを削除します。

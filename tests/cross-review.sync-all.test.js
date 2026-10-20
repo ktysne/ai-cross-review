@@ -727,6 +727,15 @@ describe('agents への配布と旧配置の片付け', () => {
     expect(h.fsx.writes.map((w) => w.path)).toEqual([CLAUDE, AGENTS]);
   });
 
+  it('旧ホームの skills が無くても、配った写しがあれば古さを検出して書き込みで更新する', () => {
+    const h = globalDeps({ [AGENTS]: '古い' });
+    const checked = runAll(globalOptions({ json: true }), h.deps);
+    expect(checked.exitCode).toBe(1);
+    expect(checked.items[0].plans.find((p) => p.id === 'agents').state).toBe('stale');
+    expect(runAll(globalOptions({ mode: 'sync' }), h.deps).exitCode).toBe(0);
+    expect(h.fsx.writes.find((w) => w.path === AGENTS).content.equals(SKILL)).toBe(true);
+  });
+
   it('CODEX_HOME を印と旧配置に使い、配布先は agents に固定する', () => {
     const custom = path.resolve('/custom/codex');
     const old = path.join(custom, 'skills/cross-review/SKILL.md');

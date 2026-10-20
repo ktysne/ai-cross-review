@@ -173,7 +173,7 @@ PR があるときに省略した場合、`cockpit_skip_review` ツール (agent
 
 この SKILL 自体をホームの共通配置へ配るときは `node tools/cross-review.sync-all.js --global-skill`（`--check` で検査、`--dry-run` で予定確認、`--check --json` で schemaVersion 2 の JSON を取得）。
 Claude 向けは `CLAUDE_CONFIG_DIR`（未設定なら `~/.claude`）の `skills/cross-review/SKILL.md`、Codex 向けは `CODEX_HOME` に関係なく `~/.agents/skills/cross-review/SKILL.md` に配る。
-Codex のホームの `skills/` か `~/.codex-subagent/skills/` があれば、通常の Codex とサブエージェントが共有する写しを配る。
+Codex のホームの `skills/`、`~/.codex-subagent/skills/`、既に配った写しのどれかがあれば、通常の Codex とサブエージェントが共有する写しを配る。
 旧配置は、履歴の配布版または現在の配布元と一致するものだけ削除し、独自編集のあるものや履歴を調べられないものは警告して残す。
 `--check` の終了コードは古い写しまたは旧配置があれば 1、読めないものがあれば 3、未配置だけなら 0。
 解決規則と JSON の形は `docs/cross-review.md`「グローバル SKILL の配布」。

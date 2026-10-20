@@ -31,7 +31,7 @@
 //   検査が回らなかった (雛形が無い / 読めない / 構造不正) ときは集計行にも「マニフェスト検査スキップ」を
 //   出し、未登録 0 件の正常な検査と見分けられるようにする。
 // - --global-skill のホーム解決と配布条件は resolveGlobalTargets に集約する。
-//   Codex の旧ホームの skills を利用の印にして、共有する .agents へ配る。
+//   Codex の旧ホームの skills か、配った写しを利用の印にして、共有する .agents へ配る。
 //   Claude はホームがあるときだけ配り、未導入の環境にホームを作らない。
 // - 1 プロジェクトの失敗 (マニフェスト不正、上流取得失敗等) で全体を止めない。各プロジェクトを独立に回し、
 //   最後に集計を出す。検査不能や処理失敗は exit 3、--check のドリフトだけなら exit 1 にする。
@@ -81,7 +81,7 @@ const USAGE = [
   '判定: cross-review.sync.json (同期マニフェスト) を持つディレクトリを導入プロジェクトとみなす。',
   '--check では各プロジェクトのマニフェスト検査 (sync --check-manifest) も併せて回す。',
   '--global-skill は単独 (--root 無し) でも動き、そのときはプロジェクト走査をせずグローバル配布だけを行う。',
-  'Claude はホーム、Codex は CODEX_HOME (既定 ~/.codex) または ~/.codex-subagent の skills があるときだけ配る。',
+  'Claude はホーム、Codex は CODEX_HOME (既定 ~/.codex) か ~/.codex-subagent の skills、または ~/.agents に配った写しがあるときだけ配る。',
   '終了コード: 0 成功、1 --check のドリフト (未配置を除く)、2 引数エラー、3 検査不能 / 処理失敗 / 導入先無し。3 は 1 に優先する。',
   '',
   '例:',
@@ -303,8 +303,9 @@ function resolveGlobalTargets(deps = {}) {
     const targetHome = path.resolve(override || path.join(home, t.dir));
     const dest = path.join(targetHome, 'skills', 'cross-review', 'SKILL.md');
     const homeFrom = override ? t.env : (t.env ? 'default' : 'fixed');
+    // 旧ホームの skills を片付けた後も、配った写しを更新と検査の対象に残す。
     const requireDirs = t.requireSkills
-      ? legacyGlobalTargets({ home, env, platform }).map((legacy) => path.join(legacy.home, 'skills'))
+      ? [...legacyGlobalTargets({ home, env, platform }).map((legacy) => path.join(legacy.home, 'skills')), dest]
       : [targetHome];
     const keyPath = path.resolve(dest).replace(/[\\/]+$/, '');
     const key = platform === 'win32' ? keyPath.toLowerCase() : keyPath;

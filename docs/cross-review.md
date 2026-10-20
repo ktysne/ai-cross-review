@@ -853,7 +853,7 @@ node tools/cross-review.sync-all.js --global-skill             # グローバル
 | id | ホームの解決規則 | 配布条件 | homeFrom |
 |---|---|---|---|
 | `claude` | `CLAUDE_CONFIG_DIR`、未設定なら `<home>/.claude` | ホーム自体が既にある | `CLAUDE_CONFIG_DIR` / `default` |
-| `agents` | `<home>/.agents` 固定 | Codex のホームの `skills`、または `<home>/.codex-subagent/skills` がある | `fixed` |
+| `agents` | `<home>/.agents` 固定 | Codex のホームの `skills`、`<home>/.codex-subagent/skills`、配った写し（`<home>/.agents/skills/cross-review/SKILL.md`）のどれかがある | `fixed` |
 
 Codex のホームは `CODEX_HOME`、未設定なら `<home>/.codex` です。
 空文字の環境変数は未設定として扱い、相対パスは実行時の作業ディレクトリから絶対化します。
