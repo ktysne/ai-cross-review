@@ -504,6 +504,7 @@ function globalDeps(homeFiles = {}, overrides = {}) {
       scriptDir: path.resolve('/repo/tools'), home: HOME, env: {}, platform: 'linux',
       exists: fsx.exists, readFile: fsx.readFile, writeFile: fsx.writeFile, mkdir: fsx.mkdir,
       gitRun: (args) => args[0] === 'log' ? 'abc\n' : Buffer.from('過去の版\n'),
+      realpath: (p) => path.resolve(p),
       unlink: (p) => fsx.store.delete(path.resolve(p)),
       rmdir: (p) => {
         if ([...fsx.store.keys()].some((key) => key.startsWith(path.resolve(p) + path.sep))) throw Object.assign(new Error('not empty'), { code: 'ENOTEMPTY' });
@@ -748,6 +749,33 @@ describe('agents への配布と旧配置の片付け', () => {
     expect(result.exitCode).toBe(0);
     expect(result.items[0].plans.some((p) => p.id === 'codex-legacy')).toBe(false);
     expect(h.fsx.exists(shared)).toBe(true);
+  });
+
+  it('旧配置の skills が agents の skills へのリンクなら、実体が同じなので消さない', () => {
+    const codexSkills = path.join(HOME, '.codex/skills');
+    const agentsSkills = path.join(HOME, '.agents/skills');
+    const realpath = (p) => {
+      const resolved = path.resolve(p);
+      return resolved.startsWith(codexSkills) ? agentsSkills + resolved.slice(codexSkills.length) : resolved;
+    };
+    const h = globalDeps({ [codexSkills]: '', [agentsSkills]: '', [CODEX]: SKILL, [AGENTS]: SKILL }, { realpath });
+    const result = runAll(globalOptions({ mode: 'sync' }), h.deps);
+    expect(result.exitCode).toBe(0);
+    expect(result.items[0].plans.some((p) => p.id === 'codex-legacy')).toBe(false);
+    expect(h.fsx.exists(CODEX)).toBe(true);
+  });
+
+  it('旧配置の実体を確かめられなければ removable: false にして消さない', () => {
+    const realpath = (p) => {
+      if (path.resolve(p).startsWith(path.join(HOME, '.codex'))) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      return path.resolve(p);
+    };
+    const h = globalDeps({ [path.join(HOME, '.codex/skills')]: '', [CODEX]: SKILL }, { realpath });
+    const check = runAll(globalOptions({ json: true }), h.deps);
+    expect(check.exitCode).toBe(1);
+    expect(check.items[0].plans.find((p) => p.id === 'codex-legacy')).toMatchObject({ state: 'legacy', removable: false, reason: expect.stringContaining('実体のパス') });
+    runAll(globalOptions({ mode: 'sync' }), h.deps);
+    expect(h.fsx.exists(CODEX)).toBe(true);
   });
 
   it('CODEX_HOME が変われば既定の codex の印は使わない', () => {

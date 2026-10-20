@@ -356,17 +356,58 @@ function collectSkillVersions(scriptDir, skillBuffer, deps) {
   }
 }
 
-// 配布先と同じパスに解決された旧配置は旧配置として扱わない。消すと配った写しを消すため。
+// 存在する最も近い親を実体へ解決したパス。リンクで共有した置き場を別物とみなすと、配った写しを消すため。
+function realPathKey(p, realpath, platform) {
+  const rest = [];
+  let dir = path.resolve(p);
+  for (;;) {
+    try {
+      const real = path.join(realpath(dir), ...rest);
+      return platform === 'win32' ? real.toLowerCase() : real;
+    } catch (err) {
+      const parent = path.dirname(dir);
+      if (!err || err.code !== 'ENOENT' || parent === dir) throw err;
+      rest.unshift(path.basename(dir));
+      dir = parent;
+    }
+  }
+}
+
+// 配布先と実体が同じ旧配置は旧配置として扱わない。実体を確かめられない旧配置は消さない。
 function planLegacySkills(deps, skillBuffer, sourcePath, sourceSha256, activePaths = []) {
   const platform = deps.platform || process.platform;
-  const keyOf = (p) => (platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
-  const active = new Set(activePaths.map(keyOf));
+  const realpath = deps.realpath || fs.realpathSync.native;
+  const keyOf = (p) => realPathKey(p, realpath, platform);
+  let active;
+  let activeError = null;
+  try { active = new Set(activePaths.map(keyOf)); }
+  catch (err) { active = new Set(); activeError = err; }
+  const seen = new Set();
   const targets = legacyGlobalTargets({ home: deps.home || os.homedir(), env: deps.env || process.env, platform })
-    .filter((target) => !active.has(keyOf(target.path)));
+    .map((target) => {
+      if (activeError) return { ...target, realError: activeError };
+      try { return { ...target, realKey: keyOf(target.path) }; }
+      catch (err) { return { ...target, realError: err }; }
+    })
+    .filter((target) => {
+      if (target.realError) return true;
+      if (active.has(target.realKey) || seen.has(target.realKey)) return false;
+      seen.add(target.realKey);
+      return true;
+    });
   let history;
   const normalize = (buffer) => buffer.toString('latin1').replace(/\r\n/g, '\n');
-  return targets.flatMap((target) => {
+  return targets.flatMap(({ realKey, realError, ...target }) => {
     const base = { ...target, sourcePath, sourceSha256, sha256: null, removable: false };
+    if (realError) {
+      let content;
+      try { content = Buffer.from(deps.readFile(target.path)); }
+      catch (err) {
+        if (err.code === 'ENOENT') return [];
+        return [{ ...base, state: 'unreadable', reason: `写しを読めません: ${err.message}` }];
+      }
+      return [{ ...base, state: 'legacy', sha256: sha256(content), reason: `実体のパスを確かめられません: ${realError.message}` }];
+    }
     let current;
     try { current = Buffer.from(deps.readFile(target.path)); }
     catch (err) {
