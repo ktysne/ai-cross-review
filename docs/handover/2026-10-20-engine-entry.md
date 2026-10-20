@@ -9,12 +9,9 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 
 ## 現在地と次にやること
 
-- 設計の判断は、開発者の決定を受けて「決定済みの判断」にまとめた。実装はまだ何も始めていない。
-- 着手の条件は、#85 と #86 の両方がマージされていることである。どちらも `tools/cross-review.js` を変えるので、先に入れると競合し、計画の前提も変わり得る。
-- 次のセッションが最初にやることは次のとおりである。
-  1. `gh issue view 85` と `gh issue view 86` で、両方が閉じていることと、それぞれを閉じた PR がマージ済みであることを確かめる。どちらかが開いていれば、何もせずに状態を報告して止まる。
-  2. 「着手前の点検」の手順を行い、結果を開発者へ報告する。前提が崩れていれば、この計画を直してから実装に入る。
-  3. 「対応順序、ブランチ、PR」の 1 段目から始める。
+- 3 段の実装は終わった。1 段目(#95)と 2 段目(#96)はマージ済みで、3 段目(#97)はレビューを終えてマージを待っている。
+- #97 のマージの後に、「移行を全リポジトリへ反映する手順」を始める。手順の 1 と 2(`--register` と `--global-skill`)は、ホームのファイルを書くので、開発者の確認を得てから行う。
+- 開発者の判断を待っている事項は「判断待ち」にある。
 
 ## 決定済みの判断
 
@@ -55,9 +52,9 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 |---|---|---|---|---|---|---|
 | 0 | この計画 | `docs/handover/2026-10-20-engine-entry.md` | なし | #90 | main | マージ済み(2026-10-20) |
 | 0 | この計画の改訂(agent-cockpit の指摘の反映) | `docs/handover/2026-10-20-engine-entry.md` | なし | #91 | main | マージ済み(2026-10-20) |
-| 1 | 本体の `projectRoot` 対応と版の照合、入口、探し方、キャッシュ、`--register` と `--register --check --json`、`sync` サブコマンド | `tools/cross-review.js`、`tools/cross-review.entry.js`(新規)、`tools/cross-review.sync-all.js`、`tests/` | hard | 未作成 | main | 未着手 |
-| 2 | 同じ `to` への重複の検査、旧形式でのマニフェスト検査、クラウド向けの SKILL、`docs/cross-review.md` の案内版、新形式の雛形のマニフェスト、文書 | `tools/cross-review.sync.js`、`templates/`(新規)、`tools/cross-review.sync.example.json`、`docs/cross-review.md`、`docs/setup.md`、`.claude/skills/cross-review/SKILL.md`、`tests/` | hard | 未作成 | 1 段目 | 未着手 |
-| 3 | `sync-all --migrate`、`--migrate --check --json`、移行ノート | `tools/cross-review.sync-all.js`、`docs/migrations/`(新規ノート)、`tests/` | hard | 未作成 | 2 段目 | 未着手 |
+| 1 | 本体の `projectRoot` 対応と版の照合、入口、探し方、キャッシュ、`--register` と `--register --check --json`、`sync` サブコマンド | `tools/cross-review.js`、`tools/cross-review.entry.js`(新規)、`tools/cross-review.sync-all.js`、`tests/` | hard | #95 | main | マージ済み(2026-10-20) |
+| 2 | 同じ `to` への重複の検査、旧形式でのマニフェスト検査、クラウド向けの SKILL、`docs/cross-review.md` の案内版、新形式の雛形のマニフェスト、文書 | `tools/cross-review.sync.js`、`templates/`(新規)、`tools/cross-review.sync.example.json`、`docs/cross-review.md`、`docs/setup.md`、`.claude/skills/cross-review/SKILL.md`、`tests/` | hard | #96 | main(1 段目のマージ後) | マージ済み(2026-10-20) |
+| 3 | `sync-all --migrate`、`--migrate --check --json`、移行ノート | `tools/cross-review.sync-all.js`、`docs/migrations/`(新規ノート)、`tests/` | hard | #97 | main(2 段目のマージ後) | レビュー済み、マージ待ち |
 
 - 1 段目は、入口が無いと本体の `projectRoot` 対応を確かめられないので、本体と入口を 1 つの PR にする。
 - 1 段目のテストには、登録が無い、登録先が正常、HEAD が既定のブランチでない、未コミットの変更がある、登録先が無い、本体が照合用の export を持たない、の各場合の `--register --check --json` の `result` と終了コードを入れる。
@@ -100,7 +97,9 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 
 ## 判断待ち
 
-- ホームの SKILL を配っていないローカルの端末では、クラウド向けの SKILL の写しが使われる。写しの冒頭に「ローカルで読まれたら `--global-skill` で配る」案内を書く方針で 2 段目を進める。不足があれば開発者が判断する。
+- SKILL を `.agents/skills/cross-review/SKILL.md` へ写している導入先(2026-10-20 には blade-preset-maker と ktysne-top)の扱い。`--migrate` はこの項目を書き換えずに残し(ローカル向けの全手順の SKILL を写し続ける)、クラウド向けの SKILL を `.claude/skills/` に別に足す。Codex のクラウドの手順を決めるときに、あわせて決める。
+- Codex のクラウドでレビューを回す手段の確認と、その Issue の起票は、まだ行っていない(「決定済みの判断」の「Codex のクラウドの手順」の行)。
+- ホームの SKILL を配っていないローカルの端末では、クラウド向けの SKILL の写しが使われる。写しの冒頭に「ローカルで読まれたら `--global-skill` で配る」案内を書いた。不足があれば開発者が判断する。
 
 ## 落とし穴
 
