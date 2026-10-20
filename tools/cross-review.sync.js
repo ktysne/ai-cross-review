@@ -188,7 +188,7 @@ const LEGACY_FORM_SOURCES = Object.freeze([
   'tests/cross-review.sync.test.js',
   'tests/cross-review.sync-all.test.js',
 ]);
-const LEGACY_FORM_NOTICE = 'このマニフェストは旧形式。新形式の配布物は files[] に足さず、node <checkout>/tools/cross-review.sync-all.js --migrate でまとめて移行する';
+const LEGACY_FORM_NOTICE = 'このマニフェストは旧形式。新形式の配布物は files[] に足さない (足すと to が重なり同期が止まる)。旧形式のまま同期を続けられ、新形式への移行の手順は上流の移行ノートで案内する';
 
 function isNewFormManifest(manifest) {
   const files = manifest && manifest.files;
@@ -261,7 +261,7 @@ function validateManifest(manifest, refOverride, deps = {}) {
     const destination = normalizeDestination(entry.to, platform);
     if (destinations.has(destination)) {
       const previous = destinations.get(destination);
-      throw new Error(`to が重複しています: ${entry.to} (files[${previous}].to: ${manifest.files[previous].to}, files[${idx}].to: ${entry.to})。node <checkout>/tools/cross-review.sync-all.js --migrate でまとめて移行する`);
+      throw new Error(`to が重複しています: ${entry.to} (files[${previous}].to: ${manifest.files[previous].to}, files[${idx}].to: ${entry.to})。旧形式のマニフェストに入口だけを足した場合は、その項目を files[] から外す`);
     }
     destinations.set(destination, idx);
     if (entry.replace != null) {
@@ -516,7 +516,7 @@ function isUsableExampleManifest(example) {
 
 // 上流の雛形と照合し { legacyForm, entries, excludedEntries, staleExcludedFiles, warning } を返す。雛形が無い / 読めない / 不正なら
 // entries を空にし warning に理由を入れる (雛形を持たない古い ref でも同期そのものは通す)。legacyForm のときは新形式だけの
-// 配布物を未登録に、旧形式の配布物の除外を古い除外に数えない (--migrate でまとめて移すため)。
+// 配布物を未登録に、旧形式の配布物の除外を古い除外に数えない (新形式へは files[] の一部でなく、まとめて移す必要があるため)。
 function collectMissingManifestEntries(upstreamDir, manifest, deps = {}) {
   const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
   const exists = deps.exists || ((p) => fs.existsSync(p));

@@ -1202,7 +1202,7 @@ describe('新形式の配布と旧形式との共存', () => {
     ['tools/sub/../cross-review.js/', 'tools//cross-review.js'],
   ])('正規化して同じ to を拒否する: %s / %s', (first, second) => {
     const m = manifest([{ ...legacy, to: first }, { ...entry, to: second }]);
-    expect(() => validateManifest(m)).toThrow(/files\[0\].*files\[1\].*--migrate/);
+    expect(() => validateManifest(m)).toThrow(/files\[0\].*files\[1\].*入口だけを足した場合/);
   });
 
   it('Windows のときだけ to の大文字と小文字を区別しない', () => {
@@ -1226,7 +1226,7 @@ describe('新形式の配布と旧形式との共存', () => {
     expect(process.exitCode).toBe(2);
     expect(prepared).toBe(false);
     expect(writes).toEqual([]);
-    expect(errors.join('')).toContain('--migrate');
+    expect(errors.join('')).toContain('入口だけを足した場合');
   });
 
   const collect = (m) => collectMissingManifestEntries('/up', m, {
@@ -1262,7 +1262,7 @@ describe('新形式の配布と旧形式との共存', () => {
       out: () => {}, err: (value) => errors.push(value),
     });
     expect(result).toMatchObject({ legacyForm: true, missingManifestEntries: [] });
-    expect(errors.join('')).toMatch(/旧形式.*files\[\].*--migrate/);
+    expect(errors.join('')).toMatch(/旧形式.*files\[\].*移行ノート/);
     expect(process.exitCode).toBe(0);
   });
 

@@ -692,7 +692,7 @@ JSON は schemaVersion、subject（engine）、engineSource（env / registry / c
 同じ to が複数ある場合は、同期、check、dry-run、check-manifest のすべてで、何も書かず終了コード2で止まります。
 比較はバックスラッシュをスラッシュへそろえ、POSIX のパス正規化を行い、先頭の ./ と末尾の / を除き、Windows では大文字と小文字を区別しません。
 エラーには重なる to と files の添字を表示します。
-旧形式の files に入口だけを足すとこの重複になるため、`node <checkout>/tools/cross-review.sync-all.js --migrate` でまとめて移行します（移行コマンドは別途追加予定）。
+旧形式の files に入口だけを足すとこの重複になるため、エラーではその項目を files から外すよう案内します。新形式への移行は、files の一部を足すのでなく、まとめて行う必要があります。
 
 旧形式の check-manifest は新形式専用の3配布物を未登録に数えず、files に足さずまとめて移行するよう案内します。
 戻り値の legacyForm でも区別でき、一括検査の集計にも案内を残します。
