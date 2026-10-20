@@ -19,8 +19,9 @@ bash ~/.claude/tools/codex-agent.sh --describe codex-review
 `--fix` 用の `codex-subagent` は `workspace-write` が必要です。
 定義が無ければ直接起動し、無効化やモデル未設定なら終了コード 75 の代替プロンプトへ進みます。
 
-照会の時間切れ、不正な JSON、protocol の不一致、拒否された設定などは、起動せず終了コード 1 で止まります。
-直接起動を選ぶ場合は `--no-codex-agent` を指定してください。
+定義の不正や読取失敗、サンドボックスや承認方針の食い違いは、起動せず終了コード 2 で止まります(今までと同じ)。
+照会の時間切れ、不正な JSON、protocol の不一致などは、起動せず終了コード 1 で止まります。
+照会の失敗で直接起動を選ぶ場合は `--no-codex-agent` を指定してください。
 bridge や bash が無い場合の直接起動は従来どおりです。
 
 `--describe` に未対応の旧 bridge は互換処理で判定します。
