@@ -176,4 +176,4 @@ PR があるときに省略した場合、`cockpit_skip_review` ツール (agent
 上流が配り始めたファイルを取り込み先が取りこぼしていないかは `node tools/cross-review.js sync --check-manifest`（上流の雛形にあって `files[]` に無いエントリを列挙するだけ。`--check` を含意するので書き込みは起きない）。
 
 旧形式の検査は `node tools/cross-review.sync.js --check-manifest` を使う。
-旧形式に新形式の配布物を足さない。足すと `to` が重なり、同期が止まる。新形式への移行の手順は、上流の移行ノートで案内する。
+旧形式に新形式の配布物を足さない。足すと `to` が重なり、同期が止まる。新形式へは `node <checkout>/tools/cross-review.sync-all.js --migrate --root <導入先>` でまとめて移行する。

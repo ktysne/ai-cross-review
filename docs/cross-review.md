@@ -692,7 +692,7 @@ JSON は schemaVersion、subject（engine）、engineSource（env / registry / c
 同じ to が複数ある場合は、同期、check、dry-run、check-manifest のすべてで、何も書かず終了コード2で止まります。
 比較はバックスラッシュをスラッシュへそろえ、POSIX のパス正規化を行い、先頭の ./ と末尾の / を除き、Windows では大文字と小文字を区別しません。
 エラーには重なる to と files の添字を表示します。
-旧形式の files に入口だけを足すとこの重複になるため、エラーではその項目を files から外すよう案内します。新形式への移行は、files の一部を足すのでなく、まとめて行う必要があります。
+旧形式の files に入口だけを足すとこの重複になるため、エラーではその項目を files から外すよう案内します。新形式へは `node <checkout>/tools/cross-review.sync-all.js --migrate --root <導入先>` でまとめて移行します。
 
 旧形式の check-manifest は新形式専用の3配布物を未登録に数えず、files に足さずまとめて移行するよう案内します。
 戻り値の legacyForm でも区別でき、一括検査の集計にも案内を残します。
@@ -964,6 +964,105 @@ node tools/cross-review.js sync --check-manifest  # 未登録配布物と古い�
 > 取り込み元の取得は git のネットワークアクセスを使います。  
 > サンドボックス内では fetch に失敗することがあるため、必要に応じてネットワークを許可して実行してください。  
 > 引数解析、マニフェスト検証、置換、同期プラン算出、同期/検査の配線は `tests/cross-review.sync.test.js`（vitest）が担保します（上流で検証し、新形式の導入先へは配りません）。
+
+### 旧形式からの一括移行
+
+上流の checkout で次を実行します。
+移行の前に差分を確認し、移行後は導入先の lint とテストを実行してください。
+個別の手順は [移行ノート](migrations/2026-10-engine-entry.md) にあります。
+
+```bash
+node tools/cross-review.sync-all.js --migrate --dry-run --root /Develop
+node tools/cross-review.sync-all.js --migrate --root /Develop
+node tools/cross-review.sync-all.js --migrate --check --root /Develop
+node tools/cross-review.sync-all.js --migrate --check --json --root /Develop
+```
+
+`--migrate` は走査ルートを必須とし、`--depth`、`--dry-run`、`--check`、`--json` と併用できます。
+`--json` は `--check` と組み合わせる場合だけ指定できます。
+`--dry-run` と `--check` の併用、および `--global-skill`、`--register`、`--list`、`--ref` との併用は引数エラーです。
+ブランチ、コミット、PR は作りません。
+新形式と対象外の導入先には何もせず、同じ導入先への 2 回目の実行も何もしません。
+
+旧形式の本体、SKILL、手順書の `from` を、それぞれ入口、クラウド向けの SKILL、案内版へ変更します。
+既存の `to` と `replace` は保ち、`.cross-review.example.md` と独自の項目も残します。
+本体の `to` が `tools/cross-review.js` 以外の場合は、`custom-body-location` として移行しません。
+マニフェストが `tools/cross-review.sync.json` 以外(導入先のルート直下など)にある場合は、`custom-manifest-location` として移行しません。
+入口と `sync` サブコマンドは、この場所のマニフェストだけを読むためです。
+SKILL の `to` が `.claude/skills/cross-review/SKILL.md` 以外の場合は項目をそのまま残し、クラウド向けの SKILL を雛形の配置へ足します。
+同期スクリプトと上流テストの項目およびその写しを削除し、除外項目も同じ対応で変換します。
+不足する新形式の配布物は雛形の配置で足しますが、SKILL と手順書を除外していた場合は足しません。
+本体を除外している場合は移行できません。
+`upstream.ref` を変更せず、その ref の入口と本体が互換であることを確認してから書き換えます。
+`package.json` の scripts にある `node tools/cross-review.sync.js` は、引数を保って `node tools/cross-review.js sync` に置き換えます。
+一括同期や削除するテストを呼ぶ scripts、独自の場所へ写した同期スクリプトを呼ぶ scripts、`--root` か `--manifest` を付けた同期の scripts は変更せず、「手で修正」として出力します。
+`sync` サブコマンドは `--root` と `--manifest` を受け付けないためです。
+マニフェストと `package.json` のインデント、行末、末尾の改行の有無を保ちます。
+先に同期で入口、SKILL、案内版を書き、それが成功してからマニフェストと `package.json` を書き換えて、古い写しを消します。
+同期が途中で失敗しても、マニフェストは旧形式のまま残るので、`--migrate --check` で見つかり、もう一度 `--migrate` を回せば続きから移行できます。
+途中で書き込みが失敗した導入先はエラーとして報告し、次へ進みます。
+途中の変更は自動では戻さないため、必要なら導入先の git の差分を確認して復旧してください。
+
+`--migrate --check` は書き込まず、導入先ごとに形式と移行可否を照会します。
+通常の `--check` は同期内容のドリフトを調べるため、旧形式のまま最新に同期した導入先を拾えません。
+移行漏れの確認には `--migrate --check` を使います。
+`--json` の stdout は、終了コード 0、1、3 のいずれでも次の形の JSON 1 個です。
+引数エラー (終了コード 2) では JSON を出しません。
+警告と案内は stderr に出します。
+
+```json
+{
+  "schemaVersion": 1,
+  "subject": "migrate",
+  "result": "drift",
+  "root": "/Develop",
+  "projects": [
+    {
+      "root": "/Develop/app",
+      "manifest": "/Develop/app/tools/cross-review.sync.json",
+      "upstream": { "repo": "https://github.com/ktysne/ai-cross-review.git", "ref": "main" },
+      "form": "legacy",
+      "migratable": true,
+      "reason": null,
+      "message": null
+    }
+  ]
+}
+```
+
+`root` と `manifest` は絶対パスで、`projects` は導入先の `root` の昇順です。
+`upstream` はマニフェストの `repo` と `ref` をそのまま返し、文字列でない値はキーごとに `null` とします。
+マニフェストを読めない場合や `upstream` がオブジェクトでない場合は、`upstream` 全体が `null` です。
+`form` は `legacy`、`new`、`not-applicable`、`error` のいずれかです。
+`migratable` は旧形式の場合に `true` (移行可能)、`false` (移行不可)、`null` (上流を取得できず不明) を取り、それ以外の形式では `null` です。
+`reason` は理由が無ければ `null`、あれば次のコードです。
+`message` は理由があるときの日本語の説明で、それ以外は `null` です。
+
+| reason | 意味 |
+|---|---|
+| `manifest-unreadable` | マニフェストの読み込みまたは JSON 解析に失敗 |
+| `manifest-invalid` | マニフェストまたは書き換え結果の検証に失敗 |
+| `upstream-unavailable` | 上流を取得できない (旧形式として扱う) |
+| `ref-unsupported` | 指定 ref の入口と本体が移行に対応しない |
+| `duplicate-destination` | 書き換え後の `to` が重複する |
+| `body-excluded` | 本体を除外しており、入口を自動では足せない |
+| `custom-body-location` | 本体の配置が `tools/cross-review.js` 以外で、入口が導入先のルートを解決できない |
+| `custom-manifest-location` | マニフェストが `tools/cross-review.sync.json` 以外にあり、入口が読めない |
+
+照会の `result` は、`form: error` または `migratable: null` の旧形式があれば `error`、そうでなく旧形式があれば `drift`、それ以外は `clean` です。
+導入先が 0 件の場合は `clean`、`projects: []` になります。
+files が配列として読める不正マニフェストは、修正してから移行する必要があるため `legacy`、`migratable: false` として報告します。
+
+| 終了コード | 照会 (`--check`) | 移行または dry-run |
+|---|---|---|
+| 0 | `clean` | 全導入先が移行済み、移行可能、または対象外 |
+| 1 | `drift` | 移行可否が false の旧形式がある |
+| 2 | 引数エラー | 引数エラー |
+| 3 | `error` | 検査または処理のエラー、または移行可否が null の旧形式がある |
+
+終了コード 3 は 1 に優先します。
+JSON を付けない照会でも同じ判定と終了コードを使い、導入先ごとに 1 行で出力します。
+
 
 ## 取り込み先の CLAUDE.md / AGENTS.md に書くこと（テンプレート）
 

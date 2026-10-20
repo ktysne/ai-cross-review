@@ -188,7 +188,7 @@ const LEGACY_FORM_SOURCES = Object.freeze([
   'tests/cross-review.sync.test.js',
   'tests/cross-review.sync-all.test.js',
 ]);
-const LEGACY_FORM_NOTICE = 'このマニフェストは旧形式。新形式の配布物は files[] に足さない (足すと to が重なり同期が止まる)。旧形式のまま同期を続けられ、新形式への移行の手順は上流の移行ノートで案内する';
+const LEGACY_FORM_NOTICE = 'このマニフェストは旧形式。新形式の配布物は files[] に足さない (足すと to が重なり同期が止まる)。旧形式のまま同期を続けられ、新形式へは node <checkout>/tools/cross-review.sync-all.js --migrate --root <導入先> で移行する';
 
 function isNewFormManifest(manifest) {
   const files = manifest && manifest.files;
@@ -261,7 +261,7 @@ function validateManifest(manifest, refOverride, deps = {}) {
     const destination = normalizeDestination(entry.to, platform);
     if (destinations.has(destination)) {
       const previous = destinations.get(destination);
-      throw new Error(`to が重複しています: ${entry.to} (files[${previous}].to: ${manifest.files[previous].to}, files[${idx}].to: ${entry.to})。旧形式のマニフェストに入口だけを足した場合は、その項目を files[] から外す`);
+      throw new Error(`to が重複しています: ${entry.to} (files[${previous}].to: ${manifest.files[previous].to}, files[${idx}].to: ${entry.to})。旧形式のマニフェストに入口だけを足した場合は、その項目を files[] から外し、node <checkout>/tools/cross-review.sync-all.js --migrate --root <導入先> で移行する`);
     }
     destinations.set(destination, idx);
     if (entry.replace != null) {

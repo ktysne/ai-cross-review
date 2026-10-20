@@ -1227,6 +1227,7 @@ describe('新形式の配布と旧形式との共存', () => {
     expect(prepared).toBe(false);
     expect(writes).toEqual([]);
     expect(errors.join('')).toContain('入口だけを足した場合');
+    expect(errors.join('')).toContain('--migrate');
   });
 
   const collect = (m) => collectMissingManifestEntries('/up', m, {
@@ -1262,7 +1263,7 @@ describe('新形式の配布と旧形式との共存', () => {
       out: () => {}, err: (value) => errors.push(value),
     });
     expect(result).toMatchObject({ legacyForm: true, missingManifestEntries: [] });
-    expect(errors.join('')).toMatch(/旧形式.*files\[\].*移行ノート/);
+    expect(errors.join('')).toMatch(/旧形式.*files\[\].*--migrate/);
     expect(process.exitCode).toBe(0);
   });
 
