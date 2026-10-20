@@ -1209,6 +1209,7 @@ describe('cross-review resolveReviewerCommandForSpawn', () => {
     expect(resolved).toEqual({
       cmd: 'claude',
       shell: true,
+      notFound: true,
     });
   });
 
@@ -1221,6 +1222,7 @@ describe('cross-review resolveReviewerCommandForSpawn', () => {
     expect(resolved).toEqual({
       cmd: 'C:\\Users\\me\\AppData\\Roaming\\npm\\codex.ps1',
       shell: true,
+      notFound: false,
     });
   });
 
