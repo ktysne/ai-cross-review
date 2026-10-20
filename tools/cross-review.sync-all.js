@@ -842,17 +842,9 @@ function applyMigration(inspection, plan, opts, deps, out, err) {
   for (const file of plan.removed) out(`  ${opts.dryRun ? '削除予定' : '削除対象'}: ${file.to}\n`);
   for (const replacement of plan.replacements) out(`  package.json ${replacement}\n`);
   for (const item of plan.manual) out(`  手で修正: ${item}\n`);
-  if (!opts.dryRun) {
-    fs.writeFileSync(project.manifest, manifestRaw);
-    if (plan.packageNext != null) fs.writeFileSync(plan.packagePath, plan.packageNext);
-    for (const file of plan.removed) {
-      sync.assertWithinRoot(project.root, file.absolute, `削除対象 (${file.to})`);
-      if (pathExists(file.absolute)) {
-        fs.rmSync(file.absolute, { force: true });
-        out(`  削除: ${file.to}\n`);
-      }
-    }
-  }
+  // 新形式の配布物を書き終えてから、マニフェストを新形式にする。途中で失敗しても旧形式のまま残り、
+  // --migrate --check で見つかり、もう一度 --migrate で続きから移せるようにするため。
+  let manifestNext = manifestRaw;
   const previousExit = process.exitCode;
   process.exitCode = 0;
   try {
@@ -861,15 +853,29 @@ function applyMigration(inspection, plan, opts, deps, out, err) {
       out: (s) => out(`  ${s}`), err,
       readFile: (file) => path.resolve(file) === project.manifest ? manifestRaw : fs.readFileSync(file, 'utf8'),
       writeFile: (file, content) => {
+        if (path.resolve(file) === project.manifest) {
+          manifestNext = serializeMigrationJson(JSON.parse(content), raw);
+          return;
+        }
         fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, path.resolve(file) === project.manifest
-          ? serializeMigrationJson(JSON.parse(content), raw) : content);
+        fs.writeFileSync(file, content);
       },
       prepareUpstream: () => ({ ...upstream, cleanup: () => {} }),
     });
     if (!result || process.exitCode) throw new Error('新形式の配布物の同期に失敗しました');
   } finally {
     process.exitCode = previousExit;
+  }
+  if (!opts.dryRun) {
+    fs.writeFileSync(project.manifest, manifestNext);
+    if (plan.packageNext != null) fs.writeFileSync(plan.packagePath, plan.packageNext);
+    for (const file of plan.removed) {
+      sync.assertWithinRoot(project.root, file.absolute, `削除対象 (${file.to})`);
+      if (pathExists(file.absolute)) {
+        fs.rmSync(file.absolute, { force: true });
+        out(`  削除: ${file.to}\n`);
+      }
+    }
   }
 }
 

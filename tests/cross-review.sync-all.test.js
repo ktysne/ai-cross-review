@@ -1281,6 +1281,19 @@ describe('sync-all --migrate', () => {
     expect(output).toContain(`手で修正: package.json scripts.sync: ${command}`);
   });
 
+  it('同期が失敗すると、マニフェストと package.json と古い写しを変えず、旧形式として見つけられる', () => {
+    const p = project('sync-fails');
+    put(path.join(p.root, 'package.json'), JSON.stringify({ scripts: { sync: 'node tools/cross-review.sync.js' } }, null, 2) + '\n');
+    const manifestBefore = read(p.manifestPath);
+    const packageBefore = read(path.join(p.root, 'package.json'));
+    expect(run([], { runSync: () => { process.exitCode = 1; return null; } })).toBe(3);
+    expect(read(p.manifestPath)).toBe(manifestBefore);
+    expect(read(path.join(p.root, 'package.json'))).toBe(packageBefore);
+    expect(fs.existsSync(path.join(p.root, 'tools/cross-review.sync.js'))).toBe(true);
+    expect(run(['--check', '--json'])).toBe(1);
+    expect(JSON.parse(output).projects[0]).toMatchObject({ form: 'legacy', migratable: true });
+  });
+
   it('不足する新形式の配布物だけ雛形の配置で足し、未知の配布物を残す', () => {
     const m = legacy();
     m.files = [m.files[0], { from: 'custom.txt', to: 'own.txt' }];
