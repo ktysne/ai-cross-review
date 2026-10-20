@@ -20,7 +20,12 @@ bridge の独自ホームは解決しません。`CODEX_HOME` を変えた場合
 引数エラー（exit 2）以外では、正本を読めない場合も JSON を返します。
 フィールドの契約は `docs/cross-review.md` の「グローバル SKILL の配布」を参照してください。
 
+上流の checkout では、`.gitattributes` で `.claude/skills/cross-review/SKILL.md` を LF に固定しました。
+`core.autocrlf=true` の端末で CRLF の正本から配った写しは、`--check` で「古い」になります。
+
 ## 取り込み先で必要な作業
+
+- グローバル SKILL を配っている上流の checkout では、取り込んだ後に `--global-skill` を 1 回実行して配り直す。checkout の中の SKILL が CRLF のまま残っていれば、そのファイルを削除してから `git checkout -- .claude/skills/cross-review/SKILL.md` で取り出し直す。
 
 - 一括同期の終了コード 1 をエラー全般とみなす CI やスクリプトがあれば、検査不能と処理失敗を示す 3 も扱うよう見直す。
 - ホームを変更した環境では、`--global-skill --check --json` で配布先と状態を確認する。未配置は終了コード 0 なので、配置が必要なら `--global-skill` で配る。

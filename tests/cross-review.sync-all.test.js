@@ -569,6 +569,13 @@ describe('planGlobalSkill', () => {
     const plans = planGlobalSkill({ ...h.deps, skillBuffer: Buffer.from([0xfe]), sourcePath: SOURCE, sourceSha256: digest(Buffer.from([0xfe])) });
     expect(plans[0].state).toBe('stale');
   });
+
+  it('行末だけが違う写し (CRLF の正本と LF の写し) も stale にする', () => {
+    const crlf = Buffer.from('# SKILL\r\n本文\r\n');
+    const h = globalDeps({ [CLAUDE]: Buffer.from('# SKILL\n本文\n') });
+    const plans = planGlobalSkill({ ...h.deps, skillBuffer: crlf, sourcePath: SOURCE, sourceSha256: digest(crlf) });
+    expect(plans[0].state).toBe('stale');
+  });
 });
 
 describe('runAll の --global-skill', () => {
