@@ -11,7 +11,8 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 
 - 3 段(#95、#96、#97)はすべてマージ済みである。
 - 「移行を全リポジトリへ反映する手順」の 1 から 4 を、開発者の承認を得て 2026-10-20 に行った。手元の 22 の導入先は、すべて移行できる判定で、導入先ごとの PR を出した(「移行の PR」)。
-- 次は、各導入先の PR のマージを待ち、手順の 5(`--migrate --check` が終了コード 0 を返すこと)を確かめる。#89 はその後に閉じる。
+- 22 件の PR はすべてマージ済みである。手順の 5 の `--migrate --check` は、2026-10-20 に終了コード 0(22 件とも新形式)を返した。#89 はこの確認をもって閉じる。
+- 作業ルートの外の導入先と、別の端末の導入先は、手順の 6 のとおり移行ノートに沿って移行する。
 - 開発者の判断を待っている事項は「判断待ち」にある。
 
 ## 決定済みの判断
@@ -72,28 +73,28 @@ ai-cross-review の #89(上流を変えるたびに、導入先のすべての�
 
 | 導入先 | PR | 状態 |
 |---|---|---|
-| agent-cockpit | ktysne/agent-cockpit#685 | マージ待ち |
-| agent-gc | ktysne/agent-gc#161 | マージ待ち |
-| agent-limit-checker | ktysne/agent-limit-checker#73 | マージ待ち |
-| ai-comment-tidy | ktysne/ai-comment-tidy#69 | マージ待ち |
-| blade-preset-maker | ktysne/blade-preset-maker#28 | マージ待ち |
-| claude-codex-bridge | ktysne/claude-codex-bridge#175 | マージ待ち |
-| cli-updater | ktysne/cli-updater#7 | マージ待ち |
-| clipy-for-windows | ktysne/clipy-for-windows#49 | マージ待ち |
-| ktysne-top | ktysne/ktysne-top#30 | マージ待ち |
-| log-converter | ktysne/log-converter#21 | マージ待ち |
-| rec-studio | ktysne/rec-studio#852 | マージ待ち |
-| riff-trainer | ktysne/riff-trainer#210 | マージ待ち |
-| screen-recorder | ktysne/screen-recorder#124 | マージ待ち |
-| session-score-player | ktysne/session-score-player#421 | マージ待ち |
-| tab-forge | ktysne/tab-forge#23 | マージ待ち |
-| tab-image-maker | ktysne/tab-image-maker#48 | マージ待ち |
-| ux-load-review | ktysne/ux-load-review#15 | マージ待ち |
-| ux-readability-review | ktysne/ux-readability-review#15 | マージ待ち |
-| ux-state-review | ktysne/ux-state-review#22 | マージ待ち |
-| ux-structure-review | ktysne/ux-structure-review#15 | マージ待ち |
-| VOICEVOX Coding | ktysne/voicevox-coding#80 | マージ待ち |
-| YouTubeChatExtension | ktysne/YouTubeChatExtension#17 | マージ待ち |
+| agent-cockpit | ktysne/agent-cockpit#685 | マージ済み(2026-10-20) |
+| agent-gc | ktysne/agent-gc#161 | マージ済み(2026-10-20) |
+| agent-limit-checker | ktysne/agent-limit-checker#73 | マージ済み(2026-10-20) |
+| ai-comment-tidy | ktysne/ai-comment-tidy#69 | マージ済み(2026-10-20) |
+| blade-preset-maker | ktysne/blade-preset-maker#28 | マージ済み(2026-10-20) |
+| claude-codex-bridge | ktysne/claude-codex-bridge#175 | マージ済み(2026-10-20) |
+| cli-updater | ktysne/cli-updater#7 | マージ済み(2026-10-20) |
+| clipy-for-windows | ktysne/clipy-for-windows#49 | マージ済み(2026-10-20) |
+| ktysne-top | ktysne/ktysne-top#30 | マージ済み(2026-10-20) |
+| log-converter | ktysne/log-converter#21 | マージ済み(2026-10-20) |
+| rec-studio | ktysne/rec-studio#852 | マージ済み(2026-10-20) |
+| riff-trainer | ktysne/riff-trainer#210 | マージ済み(2026-10-20) |
+| screen-recorder | ktysne/screen-recorder#124 | マージ済み(2026-10-20) |
+| session-score-player | ktysne/session-score-player#421 | マージ済み(2026-10-20) |
+| tab-forge | ktysne/tab-forge#23 | マージ済み(2026-10-20) |
+| tab-image-maker | ktysne/tab-image-maker#48 | マージ済み(2026-10-20) |
+| ux-load-review | ktysne/ux-load-review#15 | マージ済み(2026-10-20) |
+| ux-readability-review | ktysne/ux-readability-review#15 | マージ済み(2026-10-20) |
+| ux-state-review | ktysne/ux-state-review#22 | マージ済み(2026-10-20) |
+| ux-structure-review | ktysne/ux-structure-review#15 | マージ済み(2026-10-20) |
+| VOICEVOX Coding | ktysne/voicevox-coding#80 | マージ済み(2026-10-20) |
+| YouTubeChatExtension | ktysne/YouTubeChatExtension#17 | マージ済み(2026-10-20) |
 
 - `--migrate` の自動の書き換えのほかに、CLAUDE.md、AGENTS.md、手順書にある `node tools/cross-review.sync.js` を `node tools/cross-review.js sync` に直し、配布物の列挙から消した同期スクリプトを外した。
 - claude-codex-bridge のテストは `tools/cross-review.js` を require して本体の関数を呼んでいたので、`engine` の照会で本体のパスを得てから読む形に直した。導入先のコードが本体の関数を直接呼ぶ箇所は、ほかに無かった。
