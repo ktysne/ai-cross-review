@@ -1106,7 +1106,8 @@ function resolveRoutingPath(deps = {}) {
   return path.join(cockpitHome || path.join(home, '.agent-cockpit'), 'routing.json');
 }
 
-// agent-cockpit の isValidRouting と同じ規則で読み、不正な設定は両方を既定とみなす cockpit の表示に合わせる。
+// 規則の正本は agent-cockpit の docs/contracts/routing.md。検証データは tests/fixtures/agent-cockpit-routing に写して確かめる。
+// 読み取り失敗時は同期 API が null を返し、呼び出し元が経路を指定しないため、既定の手順と同じ default を返す。
 function readReviewRoute(deps = {}) {
   const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
   let routing;

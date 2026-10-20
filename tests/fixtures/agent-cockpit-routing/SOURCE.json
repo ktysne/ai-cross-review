@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/ktysne/agent-cockpit",
+  "revision": "54d7159b97862456638fad5e9dbbb3d4499d9f56",
+  "path": "contracts/routing/read",
+  "contract": "docs/contracts/routing.md"
+}

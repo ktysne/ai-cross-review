@@ -5,3 +5,4 @@
 .claude/skills/cross-review/SKILL.md text eol=lf
 contracts/cross-review-state/** text eol=lf
 tests/fixtures/bridge/** text eol=lf
+tests/fixtures/agent-cockpit-routing/** -text
