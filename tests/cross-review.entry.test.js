@@ -287,6 +287,11 @@ describe('本体の入口対応', () => {
     expect(err.mock.calls.join('')).toContain('未コミット');
     expect(err.mock.calls.join('')).toContain('upstream.ref');
   });
+  it.each(['main', 'refs/heads/main'])('upstream.ref が %s なら ref の無効化を警告しない', (ref) => {
+    const err = vi.fn();
+    engine.main({ argv: ['--help'], projectRoot: temp, entryProtocol: 1, engineSource: 'env', readFile: () => JSON.stringify({ upstream: { ref } }), err, out: vi.fn() });
+    expect(err.mock.calls.join('')).not.toContain('upstream.ref');
+  });
   it.each(['env', 'cache'])('%s では checkout の git 状態を調べない', (engineSource) => {
     const engineGitRun = vi.fn();
     const err = vi.fn();

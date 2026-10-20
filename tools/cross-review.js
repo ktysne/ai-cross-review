@@ -3457,7 +3457,7 @@ function warnEngineCheckout(deps, writeErr) {
     try {
       const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
       const manifest = JSON.parse(readFile(path.join(resolveProjectRoot(deps), 'tools/cross-review.sync.json')));
-      if (manifest.upstream && manifest.upstream.ref && manifest.upstream.ref !== 'main') writeErr('[cross-review] checkout の経路では upstream.ref は効かず、checkout の版で動きます。\n');
+      if (manifest.upstream && manifest.upstream.ref && !['main', 'refs/heads/main'].includes(manifest.upstream.ref)) writeErr('[cross-review] checkout の経路では upstream.ref は効かず、checkout の版で動きます。\n');
     } catch {}
   }
 }
