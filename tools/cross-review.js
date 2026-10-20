@@ -253,14 +253,12 @@ const GENERIC_CHECKLIST = [
 // レビュー観点を解決する。解決順は:
 //   1. 環境変数 CROSS_REVIEW_CHECKLIST (パス)
 //   2. <cwd>/.cross-review.md            (npm run review:* の通常経路。cwd はパッケージ直下)
-//   3. <スクリプト>/../.cross-review.md   (tools/cross-review.js の 1 つ上 = リポジトリ直下。
-//                                          cwd がリポ直下でなくても絶対パス等で起動すれば観点を拾える)
+//   3. <導入先のルート>/.cross-review.md  (resolveProjectRoot。入口経由では上流の checkout の観点を混ぜない)
 //   4. GENERIC_CHECKLIST                  (どれも無ければ汎用観点。起動時に stderr へ警告)
-// deps で env / cwd / scriptDir / fs / 警告出力を差し替え可能にする (テストで再現するため)。
+// deps で env / cwd / projectRoot / scriptDir / fs / 警告出力を差し替え可能にする (テストで再現するため)。
 function loadChecklist(deps = {}) {
   const env = deps.env || process.env;
   const cwd = deps.cwd || process.cwd();
-  const scriptDir = deps.scriptDir || __dirname;
   const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
   const exists = deps.exists || ((p) => fs.existsSync(p));
   const warn = deps.warn || ((m) => process.stderr.write(m));
@@ -268,7 +266,7 @@ function loadChecklist(deps = {}) {
   const candidates = [];
   if (envPath) candidates.push(envPath);
   candidates.push(path.join(cwd, CHECKLIST_FILENAME));
-  candidates.push(path.join(scriptDir, '..', CHECKLIST_FILENAME));
+  candidates.push(path.join(resolveProjectRoot(deps), CHECKLIST_FILENAME));
   const seen = new Set();
   for (const p of candidates) {
     if (seen.has(p)) continue; // cwd == リポ直下のときに同一パスを二重判定しない。
@@ -303,15 +301,13 @@ function loadInstructions(instructionsPath, deps = {}) {
 // 除外パターン (.cross-review-ignore) を解決して読む。解決順は観点 (loadChecklist) と同じ流儀:
 //   1. 環境変数 CROSS_REVIEW_IGNORE (パス)
 //   2. <cwd>/.cross-review-ignore
-//   3. <スクリプト>/../.cross-review-ignore
+//   3. <導入先のルート>/.cross-review-ignore (resolveProjectRoot)
 // 形式は 1 行 1 パターン、`#` 始まりはコメント、空行無視。見つかった最初の 1 つだけを読む。
 // 戻り値は「既定パターン (DEFAULT_EXCLUDE_PATTERNS) + ファイルのパターン」の配列
 // (ファイルが無ければ既定のみ)。env 明示指定が読めない場合は警告して次の候補へ (loadChecklist と同じ流儀)。
-// deps で env / cwd / scriptDir / fs / 警告出力を差し替え可能にする (テスト用)。
 function loadIgnorePatterns(deps = {}) {
   const env = deps.env || process.env;
   const cwd = deps.cwd || process.cwd();
-  const scriptDir = deps.scriptDir || __dirname;
   const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
   const exists = deps.exists || ((p) => fs.existsSync(p));
   const warn = deps.warn || ((m) => process.stderr.write(m));
@@ -319,7 +315,7 @@ function loadIgnorePatterns(deps = {}) {
   const candidates = [];
   if (envPath) candidates.push(envPath);
   candidates.push(path.join(cwd, IGNORE_FILENAME));
-  candidates.push(path.join(scriptDir, '..', IGNORE_FILENAME));
+  candidates.push(path.join(resolveProjectRoot(deps), IGNORE_FILENAME));
   const seen = new Set();
   for (const p of candidates) {
     if (seen.has(p)) continue; // cwd == リポ直下のときに同一パスを二重判定しない。
@@ -1098,10 +1094,9 @@ function shortSha(sha) {
   return String(sha == null ? '' : sha).slice(0, 7);
 }
 
-// 状態ファイルのパス。cwd に依存させず、スクリプト位置からリポジトリ直下に固定する。
+// 起動場所にかかわらず、導入先のルートに状態を保存する。
 function resolveStatePath(deps = {}) {
-  const scriptDir = deps.scriptDir || __dirname;
-  return path.join(scriptDir, '..', STATE_FILENAME);
+  return path.join(resolveProjectRoot(deps), STATE_FILENAME);
 }
 
 function resolveRoutingPath(deps = {}) {
@@ -1697,11 +1692,9 @@ function buildReviewPrompt(diffText, opts, checklist, instructions, excludedFile
   return parts.join('\n');
 }
 
-// レビュー出力と PR コメント生成物の置き場。状態ファイルと同じく cwd に依存させず、
-// スクリプト位置からリポジトリ直下に固定する (サブディレクトリから起動しても同じ場所を使う)。
+// 起動場所にかかわらず、導入先のルートにレビュー生成物を保存する。
 function resolveReviewDir(deps = {}) {
-  const scriptDir = deps.scriptDir || __dirname;
-  return path.join(scriptDir, '..', REVIEW_DIR_NAME);
+  return path.join(resolveProjectRoot(deps), REVIEW_DIR_NAME);
 }
 
 // ブランチ名をディレクトリ名へ安全に変換する。スラッシュなどはハイフンへ置換し、
@@ -3404,11 +3397,116 @@ function runCommentCommand(opts, deps = {}) {
   return outPath;
 }
 
+const ENTRY_PROTOCOL_RANGE = { min: 1, max: 1 };
+
+function resolveProjectRoot(deps = {}) {
+  return deps.projectRoot || path.join(deps.scriptDir || __dirname, '..');
+}
+
+function checkEntryProtocol(protocol, engineSource) {
+  if (!Number.isInteger(protocol)) return { ok: false, message: '入口の ENTRY_PROTOCOL は整数で指定してください。' };
+  if (protocol < ENTRY_PROTOCOL_RANGE.min) return { ok: false, message: '導入先の入口が古いため、導入先で node tools/cross-review.js sync を実行して入口を更新してください。' };
+  if (protocol > ENTRY_PROTOCOL_RANGE.max) {
+    const advice = {
+      registry: '登録した checkout を git pull で更新してください。',
+      env: 'CROSS_REVIEW_ENGINE の指す checkout を更新してください。',
+      cache: '導入先のマニフェストの upstream.ref を対応する版へ上げてください。',
+    };
+    return { ok: false, message: '本体が古いため、' + (advice[engineSource] || advice.registry) };
+  }
+  return { ok: true };
+}
+
+function cleanEngineCache(cacheRoot, engineSha, deps = {}) {
+  const io = deps.fs || fs;
+  try {
+    const engines = path.resolve(cacheRoot, 'engines');
+    const retained = new Set([engineSha]);
+    try {
+      const refs = JSON.parse(io.readFileSync(path.join(cacheRoot, 'refs.json'), 'utf8'));
+      for (const sha of Object.values(refs)) if (typeof sha === 'string') retained.add(sha);
+    } catch {}
+    const dirs = io.readdirSync(engines, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && /^[a-f0-9]{40}$/i.test(d.name))
+      .map((d) => ({ name: d.name, time: io.statSync(path.join(engines, d.name)).mtimeMs }));
+    const older = dirs.filter((d) => !retained.has(d.name)).sort((a, b) => b.time - a.time);
+    const protectedCount = dirs.filter((d) => retained.has(d.name)).length;
+    for (const d of older.slice(Math.max(0, 3 - protectedCount))) {
+      const target = path.resolve(engines, d.name);
+      if (path.dirname(target) !== engines) continue;
+      try { io.rmSync(target, { recursive: true, force: true }); } catch {}
+    }
+  } catch {}
+}
+
+function warnEngineCheckout(deps, writeErr) {
+  const checkout = path.resolve(__dirname, '..');
+  const gitRun = deps.engineGitRun || ((args) => require('child_process').execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+  if (deps.engineSource === 'registry') {
+    let defaultBranch = 'main';
+    try { defaultBranch = gitRun(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']).trim().replace(/^origin\//, ''); } catch {}
+    try {
+      const branch = gitRun(['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+      if (branch === 'HEAD' || branch !== defaultBranch) writeErr('[cross-review] 登録した checkout の HEAD は既定のブランチではありません。\n');
+    } catch {}
+    try {
+      if (gitRun(['status', '--porcelain']).trim()) writeErr('[cross-review] 登録した checkout に未コミットの変更があります。\n');
+    } catch {}
+  }
+  if (['registry', 'env'].includes(deps.engineSource)) {
+    try {
+      const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
+      const manifest = JSON.parse(readFile(path.join(resolveProjectRoot(deps), 'tools/cross-review.sync.json')));
+      if (manifest.upstream && manifest.upstream.ref && !['main', 'refs/heads/main'].includes(manifest.upstream.ref)) writeErr('[cross-review] checkout の経路では upstream.ref は効かず、checkout の版で動きます。\n');
+    } catch {}
+  }
+}
+
+function runEntrySync(args, deps, writeOut, writeErr) {
+  if (!deps.projectRoot) {
+    writeErr('旧形式では node tools/cross-review.sync.js を使ってください。\n');
+    process.exitCode = 2;
+    return;
+  }
+  const sync = deps.syncModule || require('./cross-review.sync.js');
+  const opts = sync.parseArgs(args);
+  if (opts.error || opts.root != null || opts.manifestPath != null) {
+    writeErr((opts.error || 'sync では --root と --manifest は指定できません。') + '\n');
+    process.exitCode = 2;
+    return;
+  }
+  if (opts.help) { writeOut(sync.USAGE + '\n'); return; }
+  opts.root = deps.projectRoot;
+  opts.manifestPath = path.join(deps.projectRoot, 'tools/cross-review.sync.json');
+  const result = sync.runSync(opts, deps);
+  if (result === null && process.exitCode === 1) process.exitCode = 3;
+  return result;
+}
+
 function main(deps = {}) {
   const args = deps.argv || process.argv.slice(2);
   const env = deps.env || process.env;
   const writeOut = deps.out || ((s) => process.stdout.write(s));
   const writeErr = deps.err || ((s) => process.stderr.write(s));
+  if (args[0] === 'sync') return runEntrySync(args.slice(1), deps, writeOut, writeErr);
+  if (args[0] === 'engine') {
+    if (deps.entryProtocol == null) {
+      writeErr('engine は入口から呼ばれたときだけ使えます。\n');
+      process.exitCode = 2;
+      return;
+    }
+    writeOut(JSON.stringify({ schemaVersion: 1, subject: 'engine', engineSource: deps.engineSource,
+      enginePath: __filename, checkout: path.resolve(__dirname, '..'), entryProtocol: deps.entryProtocol,
+      acceptedEntryProtocol: ENTRY_PROTOCOL_RANGE, projectRoot: deps.projectRoot }) + '\n');
+    process.exitCode = 0;
+    return;
+  }
+  if (deps.entryProtocol != null) {
+    const checked = checkEntryProtocol(deps.entryProtocol, deps.engineSource);
+    if (!checked.ok) { writeErr(checked.message + '\n'); process.exitCode = 2; return; }
+    if (deps.engineSource === 'cache' && deps.cacheRoot && deps.engineSha) cleanEngineCache(deps.cacheRoot, deps.engineSha, deps);
+    warnEngineCheckout(deps, writeErr);
+  }
   const opts = parseArgs(args);
   if (opts.help) {
     writeOut(USAGE + '\n');
@@ -3450,6 +3548,10 @@ function main(deps = {}) {
 }
 
 module.exports = {
+  resolveProjectRoot,
+  ENTRY_PROTOCOL_RANGE,
+  checkEntryProtocol,
+  cleanEngineCache,
   parseArgs,
   main,
   codexExecArgs,

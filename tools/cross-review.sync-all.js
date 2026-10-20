@@ -44,6 +44,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { execFileSync } = require('child_process');
 
 const SYNC_MANIFEST_FILENAME = 'cross-review.sync.json';
 const DEFAULT_DEPTH = 4;
@@ -74,7 +75,8 @@ const USAGE = [
   '  --depth <n>     走査の最大深さ (既定 4)',
   '  --list          検出したプロジェクトを列挙するだけ (同期しない)',
   '  --global-skill  CLAUDE_CONFIG_DIR / CODEX_HOME (既定 ~/.claude / ~/.codex)、固定 ~/.codex-subagent の skills へ配る',
-  '  --json          --global-skill --check 単独 (root 無し、--list / --dry-run 無し) の結果を JSON で出す',
+  '  --register      この checkout を ~/.cross-review/engine.json に登録する (--check で照会)',
+  '  --json          --global-skill --check または --register --check 単独の結果を JSON で出す',
   '  -h, --help      このヘルプを表示',
   '',
   '判定: cross-review.sync.json (同期マニフェスト) を持つディレクトリを導入プロジェクトとみなす。',
@@ -105,6 +107,8 @@ function parseArgs(argv) {
       out.list = true;
     } else if (a === '--global-skill') {
       out.globalSkill = true;
+    } else if (a === '--register') {
+      out.register = true;
     } else if (a === '--json') {
       out.json = true;
     } else if (a === '--root') {
@@ -142,8 +146,11 @@ function parseArgs(argv) {
       out.error = `余計な引数: ${a}`;
     }
   }
-  if (out.json && (!out.globalSkill || out.mode !== 'check' || out.root != null || out.list || out.dryRun)) {
-    out.error = '--json は --global-skill --check と root 無しで指定してください (--list / --dry-run は併用不可)';
+  if (out.register && (out.root != null || out.globalSkill || out.list || out.dryRun)) {
+    out.error = '--register は --root / --global-skill / --list / --dry-run と併用できません';
+  }
+  if (out.json && ((!out.globalSkill && !out.register) || (out.globalSkill && out.register) || out.mode !== 'check' || out.root != null || out.list || out.dryRun)) {
+    out.error = '--json は --global-skill --check または --register --check 単独で指定してください (--root / --list / --dry-run は併用不可)';
   }
   return out;
 }
@@ -557,16 +564,125 @@ function runAll(opts, deps = {}) {
   return { items, exitCode };
 }
 
+function probeEngine(enginePath, deps = {}) {
+  const execute = deps.execFileSync || execFileSync;
+  const script = 'const e = require(process.argv[1]); console.log(JSON.stringify({range: e.ENTRY_PROTOCOL_RANGE || null, check: typeof e.checkEntryProtocol === "function"}));';
+  const result = JSON.parse(String(execute(process.execPath, ['-e', script, enginePath], { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] })));
+  if (!result || typeof result.check !== 'boolean' || !Object.hasOwn(result, 'range')) throw new Error('本体の照会出力が不正です');
+  return result;
+}
+
+function inspectRegistration(deps = {}) {
+  const home = deps.home || os.homedir();
+  const exists = deps.exists || pathExists;
+  const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
+  const registryPath = path.resolve(home, '.cross-review/engine.json');
+  const report = { schemaVersion: 1, subject: 'register', result: 'clean', registry: { path: registryPath, exists: false, error: null }, checkout: null, issues: [] };
+  const issue = (code, message, error = true) => {
+    report.issues.push({ code, message });
+    if (error) report.result = 'error';
+    else if (report.result !== 'error') report.result = 'drift';
+  };
+  let checkout;
+  try {
+    report.registry.exists = !!exists(registryPath);
+    if (!report.registry.exists) return report;
+    checkout = JSON.parse(String(readFile(registryPath))).checkout;
+    if (typeof checkout !== 'string' || !path.isAbsolute(checkout)) throw new Error('checkout は絶対パスの文字列が必要です');
+  } catch (err) {
+    report.registry.error = '登録ファイルを読めません: ' + err.message;
+    issue('registry-unreadable', report.registry.error);
+    return report;
+  }
+  const item = { path: checkout, exists: false, engine: null, head: { branch: null, sha: null, defaultBranch: null, onDefaultBranch: null }, dirty: null };
+  report.checkout = item;
+  try { item.exists = !!exists(checkout); } catch {}
+  if (!item.exists) {
+    issue('checkout-missing', '登録した checkout がありません: ' + checkout);
+    return report;
+  }
+  const enginePath = path.join(checkout, 'tools/cross-review.js');
+  item.engine = { path: enginePath, state: 'missing', entryProtocol: null };
+  try {
+    if (!exists(enginePath)) issue('engine-missing', '本体がありません: ' + enginePath);
+    else {
+      item.engine.state = 'unloadable';
+      const result = probeEngine(enginePath, deps);
+      item.engine.entryProtocol = result.range;
+      if (!result.check || !result.range) {
+        item.engine.state = 'no-protocol';
+        issue('protocol-export-missing', '対応外の古い本体です。登録した checkout を更新してください。');
+      } else item.engine.state = 'ok';
+    }
+  } catch (err) {
+    item.engine.state = 'unloadable';
+    issue('engine-unloadable', '本体を読み込めません: ' + err.message);
+  }
+  const gitRun = deps.gitRun || ((args) => execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] }));
+  item.head.defaultBranch = 'main';
+  try { item.head.defaultBranch = String(gitRun(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])).trim().replace(/^origin\//, '') || 'main'; } catch {}
+  try { item.head.sha = String(gitRun(['rev-parse', 'HEAD'])).trim(); }
+  catch { issue('git-failed', '登録した checkout の HEAD の SHA を取得できません。'); }
+  try {
+    const branch = String(gitRun(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    item.head.branch = branch === 'HEAD' ? null : branch;
+    item.head.onDefaultBranch = item.head.branch === item.head.defaultBranch;
+    if (!item.head.onDefaultBranch) issue('not-on-default-branch', '登録した checkout の HEAD は既定のブランチではありません。', false);
+  } catch { issue('git-failed', '登録した checkout の HEAD のブランチを取得できません。'); }
+  try {
+    item.dirty = !!String(gitRun(['status', '--porcelain'])).trim();
+    if (item.dirty) issue('dirty', '登録した checkout に未コミットの変更があります。', false);
+  } catch { issue('git-failed', '登録した checkout の未コミット変更を取得できません。'); }
+  return report;
+}
+
+function runRegister(opts, deps = {}) {
+  const writeOut = deps.out || ((s) => process.stdout.write(s));
+  const writeErr = deps.err || ((s) => process.stderr.write(s));
+  if (opts.mode === 'check') {
+    const report = inspectRegistration(deps);
+    if (opts.json) writeOut(JSON.stringify(report, null, 2) + '\n');
+    else {
+      writeOut('本体の登録: ' + report.result + ' (' + report.registry.path + ')\n');
+      for (const issue of report.issues) writeOut(issue.message + '\n');
+    }
+    process.exitCode = { clean: 0, drift: 1, error: 3 }[report.result];
+    return report;
+  }
+  const checkout = path.resolve(deps.scriptDir || __dirname, '..');
+  const registry = path.resolve(deps.home || os.homedir(), '.cross-review/engine.json');
+  try {
+    (deps.mkdir || ((p) => fs.mkdirSync(p, { recursive: true })))(path.dirname(registry));
+    (deps.writeFile || ((p, body) => fs.writeFileSync(p, body)))(registry, JSON.stringify({ checkout }, null, 2) + '\n');
+  } catch (err) {
+    writeErr('本体を登録できません: ' + registry + ' (' + err.message + ')\n');
+    process.exitCode = 3;
+    return;
+  }
+  const gitRun = deps.gitRun || ((args) => execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+  try {
+    const gitDir = path.resolve(checkout, gitRun(['rev-parse', '--git-dir']).trim());
+    const commonDir = path.resolve(checkout, gitRun(['rev-parse', '--git-common-dir']).trim());
+    if (gitDir !== commonDir) writeErr('[cross-review] worktree を登録した。開発用の checkout を登録すると、全導入先がその作業中の内容で動きます。\n');
+  } catch {}
+  writeOut('本体を登録しました: ' + checkout + '\n');
+  process.exitCode = 0;
+}
+
 function main(argv = process.argv.slice(2), deps = {}) {
   const writeOut = deps.out || ((s) => process.stdout.write(s));
   const writeErr = deps.err || ((s) => process.stderr.write(s));
   const opts = parseArgs(argv);
   if (opts.help) { writeOut(USAGE + '\n'); return; }
   if (opts.error) { writeErr(`${opts.error}\n\n${USAGE}\n`); process.exitCode = 2; return; }
+  if (opts.register) return runRegister(opts, deps);
   runAll(opts, deps);
 }
 
 module.exports = {
+  runRegister,
+  inspectRegistration,
+  probeEngine,
   main,
   parseArgs,
   projectRootForManifest,

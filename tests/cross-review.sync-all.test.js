@@ -896,3 +896,170 @@ describe('runAll のマニフェスト検査', () => {
     expect(seen[1].checkManifest).toBe(false);
   });
 });
+
+const { inspectRegistration, probeEngine } = require('../tools/cross-review.sync-all.js');
+const registrationSha = 'a'.repeat(40);
+
+function registrationHarness({ record = JSON.stringify({ checkout: path.resolve('/registered') }), missing = [], branch = 'main', dirty = '', fail = [], probe = { range: { min: 1, max: 1 }, check: true } } = {}) {
+  const checkout = path.resolve('/registered');
+  const registry = path.resolve('/home/.cross-review/engine.json');
+  const out = [];
+  const err = [];
+  const writes = [];
+  return {
+    out, err, writes, checkout, registry,
+    deps: {
+      home: path.resolve('/home'),
+      out: (s) => out.push(s), err: (s) => err.push(s),
+      exists: (p) => !missing.includes(p),
+      readFile: () => record,
+      mkdir: () => {}, writeFile: (p, body) => writes.push({ p, body }),
+      execFileSync: () => { if (probe instanceof Error) throw probe; return typeof probe === 'string' ? probe : JSON.stringify(probe); },
+      gitRun: (args) => {
+        if (fail.includes(args.join(' '))) throw new Error('git failed');
+        if (args[0] === 'symbolic-ref') return 'origin/main';
+        if (args[1] === '--abbrev-ref') return branch;
+        if (args[0] === 'status') return dirty;
+        return registrationSha;
+      },
+    },
+  };
+}
+
+describe('本体の登録と照会', () => {
+  beforeEach(() => { process.exitCode = 0; });
+
+  it('登録がなくても clean とし、checkout を null にする', () => {
+    const h = registrationHarness({ missing: [path.resolve('/home/.cross-review/engine.json')] });
+    main(['--register', '--check', '--json'], h.deps);
+    expect(JSON.parse(h.out.join(''))).toEqual({ schemaVersion: 1, subject: 'register', result: 'clean', registry: { path: h.registry, exists: false, error: null }, checkout: null, issues: [] });
+    expect(process.exitCode).toBe(0);
+    expect(h.writes).toEqual([]);
+  });
+
+  it('正常な登録の JSON は照会の契約と一致する', () => {
+    const h = registrationHarness();
+    main(['--register', '--check', '--json'], h.deps);
+    expect(JSON.parse(h.out.join(''))).toEqual({ schemaVersion: 1, subject: 'register', result: 'clean', registry: { path: h.registry, exists: true, error: null }, checkout: {
+      path: h.checkout, exists: true,
+      engine: { path: path.join(h.checkout, 'tools/cross-review.js'), state: 'ok', entryProtocol: { min: 1, max: 1 } },
+      head: { branch: 'main', sha: registrationSha, defaultBranch: 'main', onDefaultBranch: true }, dirty: false,
+    }, issues: [] });
+    expect(process.exitCode).toBe(0);
+  });
+
+  it.each([
+    [{ branch: 'feature' }, 'not-on-default-branch'],
+    [{ branch: 'HEAD' }, 'not-on-default-branch'],
+    [{ dirty: ' M tracked' }, 'dirty'],
+    [{ dirty: '?? untracked' }, 'dirty'],
+  ])('開発中の checkout を drift とし、人向け出力でも同じ終了コードにする', (scenario, code) => {
+    for (const json of [true, false]) {
+      const h = registrationHarness(scenario);
+      main(['--register', '--check', ...(json ? ['--json'] : [])], h.deps);
+      expect(process.exitCode).toBe(1);
+      if (json) {
+        const report = JSON.parse(h.out.join(''));
+        expect(report.result).toBe('drift');
+        expect(report.issues.map((i) => i.code)).toContain(code);
+        if (scenario.branch === 'HEAD') expect(report.checkout.head).toMatchObject({ branch: null, onDefaultBranch: false });
+      } else expect(h.out.join('')).toContain('drift');
+    }
+  });
+
+  it.each([
+    [{ missing: [path.resolve('/registered')] }, 'checkout-missing'],
+    [{ missing: [path.resolve('/registered/tools/cross-review.js')] }, 'engine-missing'],
+    [{ probe: { range: null, check: false } }, 'protocol-export-missing'],
+    [{ probe: { range: { min: 1, max: 1 }, check: false } }, 'protocol-export-missing'],
+    [{ probe: new Error('timeout') }, 'engine-unloadable'],
+    [{ probe: 'not json' }, 'engine-unloadable'],
+    [{ probe: '{}' }, 'engine-unloadable'],
+    [{ record: '{broken' }, 'registry-unreadable'],
+    [{ record: '{"checkout":42}' }, 'registry-unreadable'],
+    [{ fail: ['rev-parse HEAD'] }, 'git-failed'],
+    [{ fail: ['rev-parse --abbrev-ref HEAD'] }, 'git-failed'],
+    [{ fail: ['status --porcelain'] }, 'git-failed'],
+  ])('使えない登録を error とする: %s', (scenario, code) => {
+    for (const json of [true, false]) {
+      const h = registrationHarness(scenario);
+      main(['--register', '--check', ...(json ? ['--json'] : [])], h.deps);
+      expect(process.exitCode).toBe(3);
+      if (json) {
+        const report = JSON.parse(h.out.join(''));
+        expect(report.result).toBe('error');
+        expect(report.issues.map((i) => i.code)).toContain(code);
+      } else expect(h.out.join('')).toContain('error');
+    }
+  });
+
+  it('git の各失敗を null として記録し、すべての issue を並べる', () => {
+    const report = inspectRegistration(registrationHarness({ fail: ['rev-parse HEAD', 'rev-parse --abbrev-ref HEAD', 'status --porcelain'] }).deps);
+    expect(report.checkout).toMatchObject({ head: { sha: null, branch: null, onDefaultBranch: null }, dirty: null });
+    expect(report.issues.map((i) => i.code)).toEqual(['git-failed', 'git-failed', 'git-failed']);
+  });
+
+  it('既定ブランチの取得に失敗しても main を使い、error にしない', () => {
+    const report = inspectRegistration(registrationHarness({ fail: ['symbolic-ref --short refs/remotes/origin/HEAD'] }).deps);
+    expect(report.result).toBe('clean');
+    expect(report.checkout.head.defaultBranch).toBe('main');
+  });
+
+  it('登録ファイルを読めなければ registry.error に理由を返す', () => {
+    const h = registrationHarness();
+    h.deps.readFile = () => { throw new Error('denied'); };
+    expect(inspectRegistration(h.deps)).toMatchObject({ result: 'error', checkout: null, registry: { exists: true, error: expect.stringContaining('denied') } });
+  });
+
+  it('checkout が無いとき engine は null にする', () => {
+    const h = registrationHarness({ missing: [path.resolve('/registered')] });
+    expect(inspectRegistration(h.deps).checkout).toMatchObject({ exists: false, engine: null });
+  });
+
+  it('チェックと書き込み先は呼び出した checkout と独立している', () => {
+    const h = registrationHarness();
+    h.deps.scriptDir = path.resolve('/different/tools');
+    const report = inspectRegistration(h.deps);
+    expect(report.checkout.path).toBe(h.checkout);
+    main(['--register'], h.deps);
+    expect(JSON.parse(h.writes[0].body)).toEqual({ checkout: path.resolve('/different') });
+    expect(h.writes[0].p).toBe(h.registry);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('linked worktree を登録したうえで警告する', () => {
+    const h = registrationHarness();
+    h.deps.gitRun = (args) => args[1] === '--git-dir' ? '/checkout/.git/worktrees/test' : '/checkout/.git';
+    main(['--register'], h.deps);
+    expect(h.writes).toHaveLength(1);
+    expect(h.err.join('')).toContain('worktree を登録した');
+  });
+
+  it('通常の checkout は警告せず登録する', () => {
+    const h = registrationHarness();
+    h.deps.gitRun = () => '.git';
+    main(['--register'], h.deps);
+    expect(h.writes).toHaveLength(1);
+    expect(h.err).toEqual([]);
+  });
+
+  it.each([
+    ['--root', '/r'], ['/r'], ['--global-skill'], ['--list'], ['--dry-run'], ['--json'],
+    ['--global-skill', '--check', '--json'],
+  ])('register の併用不可の引数を終了コード 2 にする: %s', (...args) => {
+    const h = registrationHarness();
+    main(['--register', ...args], h.deps);
+    expect(process.exitCode).toBe(2);
+    expect(h.writes).toEqual([]);
+    expect(h.out).toEqual([]);
+  });
+
+  it('本体の export はタイムアウト付きの子プロセスで確認する', () => {
+    const calls = [];
+    const enginePath = path.resolve('/registered/tools/cross-review.js');
+    expect(probeEngine(enginePath, { execFileSync: (...args) => { calls.push(args); return '{"range":{"min":1,"max":1},"check":true}'; } })).toEqual({ range: { min: 1, max: 1 }, check: true });
+    expect(calls[0][0]).toBe(process.execPath);
+    expect(calls[0][1]).toEqual(['-e', expect.stringContaining('require(process.argv[1])'), enginePath]);
+    expect(calls[0][2].timeout).toBeGreaterThan(0);
+  });
+});
