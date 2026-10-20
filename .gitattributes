@@ -3,3 +3,4 @@
 *.md whitespace=-blank-at-eol
 # --global-skill はこの作業ツリーの SKILL をバイト列のまま配って比べるため、端末の autocrlf で正本が変わらないよう LF に固定する。
 .claude/skills/cross-review/SKILL.md text eol=lf
+contracts/cross-review-state/** text eol=lf

@@ -2024,6 +2024,38 @@ describe('cross-review readState / writeState', () => {
     readFile: (p) => files[p],
   });
 
+  it('kind は正常、未存在、構文不正、読み取り不能を区別する', () => {
+    const inputs = [
+      [deps({ [statePath]: '{"branches":{}}' }), 'ok', false],
+      [deps({}), 'missing', false],
+      [{ ...deps({}), exists: () => { throw new Error('EACCES'); } }, 'missing', false],
+      [deps({ [statePath]: '{' }), 'invalid', true],
+      [{ ...deps({ [statePath]: '' }), readFile: () => { throw new Error('EACCES'); } }, 'unreadable', true],
+    ];
+    for (const [input, kind, corrupt] of inputs) {
+      expect(readState(input)).toEqual({ path: statePath, state: { branches: {} }, kind, corrupt, issues: [] });
+    }
+  });
+
+  it('正規化の issues を返しても corrupt にはしない', () => {
+    const out = readState(deps({ [statePath]: '{"branches":{"feature/x":{"round":-1}}}' }));
+    expect(out).toEqual({
+      path: statePath,
+      kind: 'ok',
+      corrupt: false,
+      state: { branches: { 'feature/x': emptyBranchState() } },
+      issues: [{ path: ['branches', 'feature/x', 'round'], code: 'out-of-range' }],
+    });
+  });
+
+  it('branches が配列なら空の記録と型の issue を返す', () => {
+    const out = readState(deps({ [statePath]: '{"branches":[{"round":2}]}' }));
+    expect(out.kind).toBe('ok');
+    expect(out.state).toEqual({ branches: {} });
+    expect(out.issues).toEqual([{ path: ['branches'], code: 'invalid-type' }]);
+    expect(out.corrupt).toBe(false);
+  });
+
   it('ファイルが無ければ空の状態を返す (corrupt:false)', () => {
     const out = readState(deps({}));
     expect(out.state).toEqual({ branches: {} });
