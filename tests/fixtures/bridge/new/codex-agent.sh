@@ -738,7 +738,20 @@ resolve_fail() {
   return 1
 }
 
+# Codex CLI が無くても、定義で GPT 側を止めている理由(codex-disabled、model-unset)はそちらを返す。
+# それ以外は、解決の成否によらず codex-not-found を返し、Codex CLI が無いときの判定順を保つ。
 load_agent_definition() {
+  local load_status=0
+  codex_command_missing=0
+  load_agent_definition_values || load_status=1
+  [ "$codex_command_missing" -eq 1 ] || return "$load_status"
+  if [ "$load_status" -eq 1 ]; then
+    case "$resolve_reason" in codex-disabled|model-unset) return 1 ;; esac
+  fi
+  resolve_fail disabled codex-not-found "codex コマンドが PATH に無い (docs/setup.md の導入手順を参照)" "codex"
+}
+
+load_agent_definition_values() {
   resolve_status=""
   resolve_reason=""
   resolve_message=""
@@ -783,7 +796,7 @@ load_agent_definition() {
     return 1
   }
 
-  check_agent_runtime command || return 1
+  check_agent_runtime command || codex_command_missing=1
   front_matter="$(read_front_matter "$def_file")" || {
     resolve_fail unreadable front-matter-unreadable-user "フロントマターが読めない: $def_file" "$def_file"
     return 1

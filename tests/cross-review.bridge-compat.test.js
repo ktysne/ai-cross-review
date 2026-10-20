@@ -267,6 +267,41 @@ console.log('レビュー本文: 指摘なし');
     expect(fs.existsSync(ctx.record)).toBe(false);
   });
 
+  // 実機の PATH に本物の codex があっても、Codex CLI の無い環境を作るため、codex を含む場所を外す。
+  const pathWithoutCodex = () => process.env.PATH.split(path.delimiter).filter((dir) => dir
+    && !['codex', 'codex.cmd', 'codex.exe', 'codex.ps1'].some((name) => fs.existsSync(path.join(dir, name))))
+    .join(path.delimiter);
+
+  it.each([
+    ['codex-disabled', 'codex_model: fake-model\ncodex_enabled: false'],
+    ['model-unset', 'codex_model:\ncodex_enabled: true'],
+  ])('Codex CLI が無くても、定義で止めた %s は終了コード 75 の代替プロンプトへ進む', (reason, keys) => {
+    const ctx = setup();
+    ctx.deps.env.PATH = pathWithoutCodex();
+    fs.writeFileSync(path.join(ctx.definitions, 'codex-review.md'),
+      `---\ncodex_home: ${ctx.codexHome.replace(/\\/g, '/')}\n${keys}\ncodex_sandbox: read-only\n---\nレビューしてください。\n`);
+    const spawnFn = vi.fn();
+    const written = {};
+    runReview({ ...options, mode: 'base', baseRef: 'main', baseExplicit: true, noState: true, noPrCheck: true }, {
+      ...ctx.deps, reviewRoute: () => null, checklist: '確認観点',
+      ignorePatterns: [],
+      gitRun: (args) => args[0] === 'diff' ? '変更差分' : '', spawnFn,
+      out: () => {}, err: () => {}, tmpdir: ctx.dir,
+      writeFile: (file, body) => { written[file] = body; }, mkdir: () => {},
+    });
+    expect(process.exitCode).toBe(75);
+    expect(spawnFn).not.toHaveBeenCalled();
+    expect(Object.values(written).join('\n')).toContain('変更差分');
+  });
+
+  it('Codex CLI が無く、定義が有効なら codex-not-found として終了コード 1 で止まる', () => {
+    const ctx = setup();
+    ctx.deps.env.PATH = pathWithoutCodex();
+    const inv = reviewerInvocation(options, ctx.deps);
+    expect(inv.error).toContain('codex-not-found');
+    expect(inv.exitCode).toBe(1);
+  });
+
   it('定義が無いと直接起動を選ぶ', () => {
     const ctx = setup();
     fs.unlinkSync(path.join(ctx.definitions, 'codex-review.md'));

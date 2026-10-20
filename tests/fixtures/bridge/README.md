@@ -5,7 +5,7 @@
 
 | 配置先 | revision |
 |---|---|
-| `new/codex-agent.sh` | `18d8949ba0a8a49b9e674dd5dcceb8caa98401d6` |
+| `new/codex-agent.sh` | `ac9df4b0b0ef18badbfc116c16b39f42ac2b1a7c` |
 | `old/codex-agent.sh` | `fa2b4f881521e450fc964d91caac3726e4a0ca1c` |
 
 両リポジトリの作者は同じ ktysne です。
