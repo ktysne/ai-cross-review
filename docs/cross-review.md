@@ -987,13 +987,16 @@ node tools/cross-review.sync-all.js --migrate --check --json --root /Develop
 旧形式の本体、SKILL、手順書の `from` を、それぞれ入口、クラウド向けの SKILL、案内版へ変更します。
 既存の `to` と `replace` は保ち、`.cross-review.example.md` と独自の項目も残します。
 本体の `to` が `tools/cross-review.js` 以外の場合は、`custom-body-location` として移行しません。
+マニフェストが `tools/cross-review.sync.json` 以外(導入先のルート直下など)にある場合は、`custom-manifest-location` として移行しません。
+入口と `sync` サブコマンドは、この場所のマニフェストだけを読むためです。
 SKILL の `to` が `.claude/skills/cross-review/SKILL.md` 以外の場合は項目をそのまま残し、クラウド向けの SKILL を雛形の配置へ足します。
 同期スクリプトと上流テストの項目およびその写しを削除し、除外項目も同じ対応で変換します。
 不足する新形式の配布物は雛形の配置で足しますが、SKILL と手順書を除外していた場合は足しません。
 本体を除外している場合は移行できません。
 `upstream.ref` を変更せず、その ref の入口と本体が互換であることを確認してから書き換えます。
 `package.json` の scripts にある `node tools/cross-review.sync.js` は、引数を保って `node tools/cross-review.js sync` に置き換えます。
-一括同期や削除するテストを呼ぶ scripts は変更せず、「手で修正」として出力します。
+一括同期や削除するテストを呼ぶ scripts、独自の場所へ写した同期スクリプトを呼ぶ scripts、`--root` か `--manifest` を付けた同期の scripts は変更せず、「手で修正」として出力します。
+`sync` サブコマンドは `--root` と `--manifest` を受け付けないためです。
 マニフェストと `package.json` のインデント、行末、末尾の改行の有無を保ちます。
 書き換え後の同期で、入口、SKILL、案内版を配ります。
 途中で書き込みが失敗した導入先はエラーとして報告し、次へ進みます。
@@ -1043,6 +1046,7 @@ SKILL の `to` が `.claude/skills/cross-review/SKILL.md` 以外の場合は項�
 | `duplicate-destination` | 書き換え後の `to` が重複する |
 | `body-excluded` | 本体を除外しており、入口を自動では足せない |
 | `custom-body-location` | 本体の配置が `tools/cross-review.js` 以外で、入口が導入先のルートを解決できない |
+| `custom-manifest-location` | マニフェストが `tools/cross-review.sync.json` 以外にあり、入口が読めない |
 
 照会の `result` は、`form: error` または `migratable: null` の旧形式があれば `error`、そうでなく旧形式があれば `drift`、それ以外は `clean` です。
 導入先が 0 件の場合は `clean`、`projects: []` になります。

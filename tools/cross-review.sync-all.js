@@ -769,6 +769,10 @@ function inspectMigration(manifestPath, acquire, deps) {
   if (manifest.files.some((entry) => entry.from === 'tools/cross-review.js' && entry.to !== 'tools/cross-review.js')) {
     return fail('custom-body-location', '本体の配置が tools/cross-review.js 以外のため移行できません。入口が導入先のルートを解決できる配置へ変更するか判断してください');
   }
+  // 入口と sync サブコマンドは <導入先のルート>/tools/cross-review.sync.json だけを読む。
+  if (path.relative(project.root, project.manifest).split(path.sep).join('/') !== 'tools/cross-review.sync.json') {
+    return fail('custom-manifest-location', 'マニフェストが tools/cross-review.sync.json 以外にあるため移行できません。入口はこの場所のマニフェストだけを読みます');
+  }
   try {
     const example = JSON.parse(fs.readFileSync(path.join(upstream.dir, sync.UPSTREAM_EXAMPLE_MANIFEST), 'utf8'));
     sync.validateManifest(example, null, deps);
@@ -804,9 +808,14 @@ function planMigration(inspection) {
   if (pathExists(packagePath)) {
     packageRaw = fs.readFileSync(packagePath, 'utf8');
     const value = JSON.parse(packageRaw);
+    // 標準の場所の同期スクリプトの呼び出しだけを置き換える。sync サブコマンドは --root と --manifest を受け付けない。
+    const removedCustomPaths = manifest.files
+      .filter((entry) => MIGRATION_REMOVED.has(entry.from) && entry.to !== 'tools/cross-review.sync.js').map((entry) => entry.to);
     for (const [name, command] of Object.entries(value.scripts || {})) {
       if (typeof command !== 'string') continue;
       if (command.includes('cross-review.sync-all.js')
+          || removedCustomPaths.some((to) => command.includes(to))
+          || (/\bnode tools\/cross-review\.sync\.js\b/.test(command) && /(?:^|\s)--(?:root|manifest)(?:[=\s]|$)/.test(command))
           || manifest.files.some((entry) => MIGRATION_REMOVED.has(entry.from) && entry.from.startsWith('tests/') && command.includes(entry.to))
           || [...MIGRATION_REMOVED].some((from) => from.startsWith('tests/') && command.includes(from))) {
         manual.push(`package.json scripts.${name}: ${command}`);

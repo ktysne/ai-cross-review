@@ -25,6 +25,7 @@ node <checkout>/tools/cross-review.sync-all.js --migrate --root <導入先>
 
 移行はマニフェストの既存の配置と置換規則を保ち、同期スクリプトと上流テストの写しを削除します。
 本体を `tools/cross-review.js` 以外へ写している場合は、`custom-body-location` として移行せず、何も変更しません。
+マニフェストを `tools/cross-review.sync.json` 以外に置いている場合も、`custom-manifest-location` として移行せず、何も変更しません。
 SKILL を `.claude/skills/cross-review/SKILL.md` 以外へ写す項目はそのまま残し、クラウド向けの SKILL を `.claude/skills/cross-review/SKILL.md` に足します。
 `package.json` の `node tools/cross-review.sync.js` は `node tools/cross-review.js sync` へ置き換えます。
 一括同期や削除したテストを呼ぶ scripts は自動では直せないため、出力の「手で修正」を確認してください。

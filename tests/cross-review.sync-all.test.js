@@ -1233,6 +1233,41 @@ describe('sync-all --migrate', () => {
     ] });
   });
 
+  it.each([{ args: [] }, { args: ['--dry-run'] }, { args: ['--check', '--json'] }])('ルート直下のマニフェストは custom-manifest-location として変更しない (%j)', ({ args }) => {
+    const root = path.join(roots, 'root-manifest');
+    for (const entry of legacy().files) put(path.join(root, entry.to), `old ${entry.from}`);
+    put(path.join(root, 'cross-review.sync.json'), JSON.stringify(legacy(), null, 2) + '\n');
+    const before = snapshot(root);
+    expect(run(args)).toBe(1);
+    expect(snapshot(root)).toEqual(before);
+    expect(output).toContain('custom-manifest-location');
+    if (args.includes('--json')) expect(JSON.parse(output)).toMatchObject({ result: 'drift', projects: [
+      { form: 'legacy', migratable: false, reason: 'custom-manifest-location' },
+    ] });
+  });
+
+  it('--root か --manifest を付けた同期の scripts は書き換えず、手で直す項目に出す', () => {
+    const p = project('script-options');
+    const scripts = { sync: 'node tools/cross-review.sync.js --root . --check', other: 'node tools/cross-review.sync.js --manifest=tools/cross-review.sync.json', plain: 'node tools/cross-review.sync.js --check' };
+    put(path.join(p.root, 'package.json'), JSON.stringify({ scripts }, null, 2) + '\n');
+    expect(run()).toBe(0);
+    const next = JSON.parse(read(path.join(p.root, 'package.json'))).scripts;
+    expect(next).toEqual({ ...scripts, plain: 'node tools/cross-review.js sync --check' });
+    expect(output).toContain(`手で修正: package.json scripts.sync: ${scripts.sync}`);
+    expect(output).toContain(`手で修正: package.json scripts.other: ${scripts.other}`);
+  });
+
+  it('独自の場所の同期スクリプトを消し、それを呼ぶ scripts を手で直す項目に出す', () => {
+    const m = legacy();
+    m.files.find((entry) => entry.from === 'tools/cross-review.sync.js').to = 'tools/review-sync.js';
+    const p = project('custom-sync', m);
+    put(path.join(p.root, 'package.json'), JSON.stringify({ scripts: { sync: 'node tools/review-sync.js --check' } }, null, 2) + '\n');
+    expect(run()).toBe(0);
+    expect(fs.existsSync(path.join(p.root, 'tools/review-sync.js'))).toBe(false);
+    expect(JSON.parse(read(path.join(p.root, 'package.json'))).scripts.sync).toBe('node tools/review-sync.js --check');
+    expect(output).toContain('手で修正: package.json scripts.sync: node tools/review-sync.js --check');
+  });
+
   it('不足する新形式の配布物だけ雛形の配置で足し、未知の配布物を残す', () => {
     const m = legacy();
     m.files = [m.files[0], { from: 'custom.txt', to: 'own.txt' }];
