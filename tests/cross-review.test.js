@@ -2518,7 +2518,7 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     expect(captured.stdin).toContain('CHECKLIST_MARKER');     // 注入した観点が stdin に乗る
     expect(captured.stdin).toContain(REVIEW_ONLY_INSTRUCTION);
     expect(captured.stdin).not.toContain(FIX_INSTRUCTION);
-    expect(captured.env).toBe(process.env);
+    expect(captured.env).toEqual({ ...process.env, AGENT_COCKPIT_NONINTERACTIVE: '1' });
   });
 
   it('codex --fix: workspace-write + 差分本文 + 修正指示を stdin に渡す', () => {
@@ -2538,17 +2538,17 @@ describe('cross-review runReview (gitRun / spawnFn 注入)', () => {
     expect(captured.stdin).toContain(FIX_INSTRUCTION);
   });
 
-  it('claude 経路は親環境を変えず単発実行の印と差分本文を渡す', () => {
+  it.each(['claude', 'codex'])('%s 経路は親環境を変えず単発実行の印と差分本文を渡す', (reviewer) => {
     const captured = {};
     const parentMarker = process.env.AGENT_COCKPIT_NONINTERACTIVE;
     const spawnFn = (cmd, args, stdin, onExit, env) => { Object.assign(captured, { cmd, args, stdin, env }); return null; };
     const gitRun = (args) => (args[0] === 'diff' ? 'CLAUDE_DIFF\n' : '');
     runReview(
-      { reviewer: 'claude', mode: 'base', baseRef: 'main', fix: false },
+      { reviewer, mode: 'base', baseRef: 'main', fix: false },
       { ...isolated(), gitRun, spawnFn, checklist: 'CHECKLIST_MARKER', exists: () => false },
     );
-    expect(captured.cmd).toBe('claude');
-    expect(captured.args).toEqual(['-p']);
+    expect(captured.cmd).toBe(reviewer);
+    if (reviewer === 'claude') expect(captured.args).toEqual(['-p']);
     expect(captured.stdin).toContain('CLAUDE_DIFF');
     expect(captured.env).toEqual({ ...process.env, AGENT_COCKPIT_NONINTERACTIVE: '1' });
     expect(process.env.AGENT_COCKPIT_NONINTERACTIVE).toBe(parentMarker);

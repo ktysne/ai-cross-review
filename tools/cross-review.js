@@ -2874,9 +2874,7 @@ function runReview(opts, deps = {}) {
       }
     }
     writeOut(invocation.notice);
-    const reviewerEnvironment = resolvedOpts.reviewer === 'claude'
-      ? { ...process.env, AGENT_COCKPIT_NONINTERACTIVE: '1' }
-      : process.env;
+    const reviewerEnvironment = { ...process.env, AGENT_COCKPIT_NONINTERACTIVE: '1' };
     return spawnFn(invocation.cmd, invocation.args, prompt, (result) => {
       const exit = result || {};
       // bridge が未導入 (codex コマンドや定義が無い)、または bash 自体が無い場合は直接起動へ戻す。

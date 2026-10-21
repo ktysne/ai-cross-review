@@ -148,7 +148,7 @@ describe('bridge 公開照会の分類', () => {
   it('照会した cwd を実際のレビュアー起動にも渡す', () => {
     const { spawnFn } = runWithReply(reply(response()));
     expect(spawnFn).toHaveBeenCalledWith('bash',
-      ['/bridge.sh', 'codex-review', '-C', root], expect.any(String), expect.any(Function), process.env, root);
+      ['/bridge.sh', 'codex-review', '-C', root], expect.any(String), expect.any(Function), { ...process.env, AGENT_COCKPIT_NONINTERACTIVE: '1' }, root);
   });
 
   it('照会失敗は終了コード 1 で止まり、起動も代替プロンプトも行わない', () => {
