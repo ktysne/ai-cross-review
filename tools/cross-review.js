@@ -3268,6 +3268,14 @@ function runCommentCommand(opts, deps = {}) {
     writeErr(`[cross-review] ${branch} の結論を記録しました (${round} 往復目 / ${opts.outcome} / ${shortSha(headSha)}): ${statePath}\n`);
     return true;
   };
+  // 下書きの作り直しなど結論を記録しない実行も正当なので、終了コードは変えず知らせるだけにする。
+  // 黙って終えると、収束の判定 (lastTriage) を読む側が往復を対応中のまま扱い続けるため。
+  const warnOutcomeMissing = () => {
+    if (opts.outcome != null) return;
+    writeErr(`[cross-review] 警告: ${round} 往復目の結論を状態ファイルに記録していません。\n`
+      + '  判断を終えた往復は --outcome <fixing|converged|halted> を付けて実行してください'
+      + ' (投稿済みなら --post を外して付け直せば、投稿し直さずに記録できます)。\n');
+  };
 
   // レビュアーは明示が無ければメタ情報から自動で決める。複数あるときに黙って片方を選ぶと、
   // 別のレビュアーの出力を貼ったコメントができてしまうのでエラーにする。
@@ -3379,6 +3387,7 @@ function runCommentCommand(opts, deps = {}) {
     }
     if (!recordTriage(true)) return null;
     writeErr(`[cross-review] PR #${opts.postNumber} へコメントを投稿しました: ${outPath}\n`);
+    warnOutcomeMissing();
     return outPath;
   }
   const prInfoOf = deps.prInfo || createPrInfoReader(deps, isNoFetch(deps.env));
@@ -3393,6 +3402,7 @@ function runCommentCommand(opts, deps = {}) {
   writeErr(`[cross-review] PR コメントの本文を生成しました: ${outPath}\n`
     + `  gh pr comment ${prNumber} --body-file "${outPath}"\n`);
   if (!recordTriage(false)) return null;
+  warnOutcomeMissing();
   return outPath;
 }
 
