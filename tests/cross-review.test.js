@@ -4457,6 +4457,52 @@ describe('cross-review comment サブコマンド', () => {
     expect(writes).toBe(0);
   });
 
+  it('--outcome 省略時は本文を生成し、終了コードを変えずに結論が未記録だと警告する', () => {
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
+    const { deps, written, logs } = commentDeps(files);
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1 }, deps)).toBe(at(names.comment));
+    expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
+    expect(logs.err).toContain('1 往復目の結論を状態ファイルに記録していません');
+    expect(logs.err).toContain('--outcome <fixing|converged|halted>');
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('--outcome 省略で --post したときも、投稿後に結論が未記録だと警告する', () => {
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
+    const { deps, logs } = commentDeps(files, {
+      ghRun: () => ({ status: 0, stdout: '', stderr: '' }),
+    });
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1, postNumber: 42 }, deps)).toBe(at(names.comment));
+    expect(logs.err.indexOf('へコメントを投稿しました')).toBeLessThan(logs.err.indexOf('結論を状態ファイルに記録していません'));
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('--outcome を記録したときと、本文を生成できなかったときは未記録の警告を出さない', () => {
+    const sha = 'c'.repeat(40);
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
+    const recorded = commentDeps(files, {
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return `${branch}\n`;
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+        return '';
+      },
+      readState: () => ({ path: '/repo/.cross-review-state.json', state: { branches: {} }, corrupt: false }),
+      writeState: () => true,
+    });
+    process.exitCode = 0;
+    runCommentCommand({ round: 1, outcome: 'fixing' }, recorded.deps);
+    expect(recorded.logs.err).toContain('結論を記録しました');
+    expect(recorded.logs.err).not.toContain('記録していません');
+
+    const missing = commentDeps({ [at(names.meta)]: '{}' });
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1 }, missing.deps)).toBeNull();
+    expect(missing.logs.err).not.toContain('結論を状態ファイルに記録していません');
+    process.exitCode = 0;
+  });
+
   it('投稿を待つあいだに HEAD が変わったら結論を記録せずエラー終了する', () => {
     let sha = 'b'.repeat(40);
     const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };

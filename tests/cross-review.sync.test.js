@@ -24,6 +24,7 @@ const {
   findMissingManifestEntries,
   findStaleExcludedFiles,
   collectMissingManifestEntries,
+  findStaleCommentInstructions,
   runSync,
   defaultPrepareUpstream,
 } = require('../tools/cross-review.sync.js');
@@ -1274,5 +1275,57 @@ describe('新形式の配布と旧形式との共存', () => {
     for (const { from } of example.files) {
       expect(fs.existsSync(new URL('../' + from, import.meta.url))).toBe(true);
     }
+  });
+});
+
+describe('sync 取り込み先の comment の手順の検査', () => {
+  const current = '裏取りと対応を `.cross-review/branch-<slug>-<hash>/round-<N>-triage.md` に書いて `node tools/cross-review.js comment --round <N>` で生成する。判断を終えた往復は `--outcome <fixing|converged|halted>` を付ける。';
+  const legacy = '> コメント本文は手で組み立てず、裏取りと対応を `.cross-review/round-<N>-triage.md` に書いて `node tools/cross-review.js comment --round <N>` で生成し、`--body-file` で投稿する。';
+
+  it('--outcome の無い行と旧平置きのパスを、ファイル名と行番号つきで拾う', () => {
+    const fsx = makeFs({
+      '/proj/CLAUDE.md': `# 運用\r\n\r\n${legacy}\r\n`,
+      '/proj/AGENTS.md': `# 運用\n${current}\n`,
+    });
+    expect(findStaleCommentInstructions('/proj', fsx)).toEqual([
+      { file: 'CLAUDE.md', line: 3, reasons: ['--outcome がありません', '判断ファイルが旧平置きのパスです'] },
+    ]);
+  });
+
+  it('ファイルが無い、読めない、comment の手順が無いときは何も拾わない', () => {
+    const fsx = makeFs({ '/proj/CLAUDE.md': '# comment の話はしない\n' });
+    expect(findStaleCommentInstructions('/proj', fsx)).toEqual([]);
+    const broken = { exists: () => true, readFile: () => { throw new Error('EACCES'); } };
+    expect(findStaleCommentInstructions('/proj', broken)).toEqual([]);
+  });
+
+  it.each([[[]], [['--check']], [['--dry-run']]])('同期の各モードで古い文面を stderr に知らせ、終了コードは変えない: %j', (args) => {
+    const manifestObj = {
+      upstream: { repo: 'https://example.com/x.git', ref: 'main' },
+      lastSyncedCommit: 'abc',
+      lastSyncedRef: 'main',
+      files: [{ from: 'tools/cross-review.js', to: 'tools/cross-review.js' }],
+    };
+    const fsx = makeFs({
+      '/proj/tools/cross-review.sync.json': JSON.stringify(manifestObj, null, 2),
+      '/up/tools/cross-review.js': 'E',
+      '/proj/tools/cross-review.js': 'E',
+      '/proj/AGENTS.md': `${legacy}\n`,
+    });
+    let errText = '';
+    process.exitCode = 0;
+    runSync(parseArgs(args), {
+      scriptDir: '/proj/tools',
+      readFile: fsx.readFile,
+      writeFile: fsx.writeFile,
+      exists: fsx.exists,
+      out: () => {},
+      err: (s) => { errText += s; },
+      prepareUpstream: () => ({ dir: '/up', commit: 'abc', cleanup: () => {} }),
+    });
+    expect(errText).toContain('AGENTS.md:1 の comment の手順が古い文面です');
+    expect(errText).toContain('docs/migrations/2026-10-comment-outcome.md');
+    expect(process.exitCode).toBe(0);
+    expect(fsx.store.get(path.resolve('/proj/AGENTS.md'))).toBe(`${legacy}\n`);
   });
 });

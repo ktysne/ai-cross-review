@@ -50,6 +50,9 @@ const DEFAULT_MANIFEST_FILENAME = 'cross-review.sync.json';
 const DEFAULT_MIGRATIONS_DIR = 'docs/migrations';
 // 上流にある配布物一式の雛形 (上流ルートからの相対)。--check-manifest は files[] と excludedFiles[] を照合する。
 const UPSTREAM_EXAMPLE_MANIFEST = 'tools/cross-review.sync.example.json';
+// 取り込み先が自分で持つ運用の要約。同期では書き換えないので、古い手順の文面を見つけたら知らせるだけにする。
+const PROJECT_INSTRUCTION_FILES = ['CLAUDE.md', 'AGENTS.md'];
+const COMMENT_OUTCOME_MIGRATION = 'docs/migrations/2026-10-comment-outcome.md';
 
 const USAGE = [
   'ai-cross-review 同期スクリプト (上流の「そのままコピーするファイル」を取り込む)',
@@ -557,6 +560,32 @@ function formatMissingManifestEntries(entries) {
   return lines.join('\n') + '\n';
 }
 
+// comment の手順を 1 行で書く前提で、--outcome の無い行と旧平置きの判断ファイルのパスを拾う。
+// 結論を記録しない手順のままだと、状態ファイルの lastTriage を読む側が収束を判定できないため。
+function findStaleCommentInstructions(destRoot, deps = {}) {
+  const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
+  const exists = deps.exists || ((p) => fs.existsSync(p));
+  const found = [];
+  for (const file of PROJECT_INSTRUCTION_FILES) {
+    const abs = path.join(destRoot, file);
+    let text;
+    try {
+      if (!exists(abs)) continue;
+      text = String(readFile(abs));
+    } catch {
+      continue;
+    }
+    text.split(/\r?\n/).forEach((line, i) => {
+      if (!/cross-review\.js comment --round/.test(line)) return;
+      const reasons = [];
+      if (!line.includes('--outcome')) reasons.push('--outcome がありません');
+      if (line.includes('.cross-review/round-')) reasons.push('判断ファイルが旧平置きのパスです');
+      if (reasons.length) found.push({ file, line: i + 1, reasons });
+    });
+  }
+  return found;
+}
+
 const STATUS_LABEL = { create: '新規', update: '更新', unchanged: '一致' };
 
 // 同期 / 検査を実行する本体。副作用は deps で差し替え可能。
@@ -661,6 +690,11 @@ function runSync(opts, deps = {}) {
       staleExcludedFiles = missing.staleExcludedFiles;
     }
 
+    for (const s of findStaleCommentInstructions(destRoot, { readFile, exists })) {
+      writeErr(`[cross-review] ${s.file}:${s.line} の comment の手順が古い文面です (${s.reasons.join('、')})。`
+        + `上流の ${COMMENT_OUTCOME_MIGRATION} に沿って直してください。\n`);
+    }
+
     writeOut(`上流: ${manifest.upstream.repo} @ ${ref} (${upstream.commit})\n`);
     for (const p of plan) {
       writeOut(`  [${STATUS_LABEL[p.status]}] ${p.to}\n`);
@@ -754,6 +788,7 @@ module.exports = {
   parseMigrationFrontMatter,
   collectMigrationNotes,
   selectMigrationNotes,
+  findStaleCommentInstructions,
   shownMigrationsChanged,
   formatMigrationNotes,
   findMissingManifestEntries,
