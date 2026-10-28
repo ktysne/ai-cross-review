@@ -729,7 +729,7 @@ JSON は schemaVersion、subject（engine）、engineSource（env / registry / c
 - **取り込み元の記録**：取り込んだ実コミットを `lastSyncedCommit`（と `lastSyncedRef`）へ書き戻します（記録値が変わるときだけ。同一コミットの再同期では書き換えません）。どのコミットから取り込んだかが履歴に残り、検査の基準にもなります。
 - **行末の扱い**：上流は利用者の `core.autocrlf` に左右されずに取り出し、行末をそろえてから比べます（行末だけの違いはドリフトにしません）。取り込むファイルと書き戻すマニフェストは、取り込み先の既存のファイルが CRLF を含めば CRLF、それ以外（新規を含む）は LF で書きます。
 - **移行ノートの表示**：上流の `docs/migrations/*.md` のうち、まだ見せていないものを stderr へ全文表示します（後述「移行ノート」）。同期では直せない取り込み先側の作業を人が取りこぼさないようにするためです。
-- **古い `comment` の手順の検査**：取り込み先の `CLAUDE.md` / `AGENTS.md` に、`cross-review.js comment --round` を含みながら `--outcome` の無い行、または旧平置きの `.cross-review/round-` のパスを含む行があれば、ファイル名と行番号を stderr に出します（同期、`--check`、`--dry-run` のどれでも）。書き換えはせず、終了コードにも影響しません。直し方は移行ノート `2026-10-comment-outcome.md` にあります。
+- **古い `comment` の手順の検査**：取り込み先の `CLAUDE.md` / `AGENTS.md` に、`cross-review.js comment --round` を含みながら `--outcome` の無い行、または旧平置きの判断ファイル `.cross-review/round-<N>-triage.md` のパスを含む行があれば、ファイル名と行番号を stderr に出します（同期、`--check`、`--dry-run` のどれでも）。書き換えはせず、終了コードにも影響しません。直し方は移行ノート `2026-10-comment-outcome.md` にあります。
 - **モード**：
   - 既定（同期）：差分のあるファイルだけ上書きし、取り込み元コミットが変わったときだけマニフェストの `lastSyncedCommit` を更新する。
   - `--check`：書き込まず、上流（ref）との差分（ドリフト）だけを報告する。差分があれば **exit 1**（CI のドリフト検知向け）。

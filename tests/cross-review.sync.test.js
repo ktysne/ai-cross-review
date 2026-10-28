@@ -1292,6 +1292,15 @@ describe('sync 取り込み先の comment の手順の検査', () => {
     ]);
   });
 
+  it('旧平置きのパスがコマンドと別の行にあっても拾う', () => {
+    const fsx = makeFs({
+      '/proj/AGENTS.md': '判断ファイル: `.cross-review/round-<N>-triage.md`\nnode tools/cross-review.js comment --round <N> --outcome converged\n',
+    });
+    expect(findStaleCommentInstructions('/proj', fsx)).toEqual([
+      { file: 'AGENTS.md', line: 1, reasons: ['判断ファイルが旧平置きのパスです'] },
+    ]);
+  });
+
   it('ファイルが無い、読めない、comment の手順が無いときは何も拾わない', () => {
     const fsx = makeFs({ '/proj/CLAUDE.md': '# comment の話はしない\n' });
     expect(findStaleCommentInstructions('/proj', fsx)).toEqual([]);

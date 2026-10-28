@@ -11,7 +11,7 @@ since: cf9982c4cb2b3104c1f12e3adc8864e7d7c22c94
 `tools/cross-review.js` と同期スクリプトに次の 2 点を足しました。
 
 - `comment` を `--outcome` なしで実行して本文を生成できたとき、結論を記録していない旨を stderr に警告します。本文の生成と終了コードは変わりません。
-- 同期(`sync`、`--check`、`--dry-run`)は、取り込み先の `CLAUDE.md` / `AGENTS.md` に古い手順の行があれば、ファイル名と行番号を stderr に出します。対象は、`cross-review.js comment --round` を含みながら `--outcome` の無い行と、旧平置きの `.cross-review/round-` のパスを含む行です。書き換えはせず、終了コードにも影響しません。
+- 同期(`sync`、`--check`、`--dry-run`)は、取り込み先の `CLAUDE.md` / `AGENTS.md` に古い手順の行があれば、ファイル名と行番号を stderr に出します。対象は、`cross-review.js comment --round` を含みながら `--outcome` の無い行と、旧平置きの判断ファイル `.cross-review/round-<N>-triage.md` のパスを含む行です(コマンドと別の行でも拾います)。書き換えはせず、終了コードにも影響しません。
 
 ## 取り込み先で必要な作業
 

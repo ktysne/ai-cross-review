@@ -560,7 +560,7 @@ function formatMissingManifestEntries(entries) {
   return lines.join('\n') + '\n';
 }
 
-// comment の手順を 1 行で書く前提で、--outcome の無い行と旧平置きの判断ファイルのパスを拾う。
+// comment の実行例を 1 行で書く前提で --outcome の無い行を拾い、旧平置きの判断ファイルのパスは行を問わず拾う。
 // 結論を記録しない手順のままだと、状態ファイルの lastTriage を読む側が収束を判定できないため。
 function findStaleCommentInstructions(destRoot, deps = {}) {
   const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
@@ -576,10 +576,9 @@ function findStaleCommentInstructions(destRoot, deps = {}) {
       continue;
     }
     text.split(/\r?\n/).forEach((line, i) => {
-      if (!/cross-review\.js comment --round/.test(line)) return;
       const reasons = [];
-      if (!line.includes('--outcome')) reasons.push('--outcome がありません');
-      if (line.includes('.cross-review/round-')) reasons.push('判断ファイルが旧平置きのパスです');
+      if (/cross-review\.js comment --round/.test(line) && !line.includes('--outcome')) reasons.push('--outcome がありません');
+      if (/\.cross-review\/round-\S*triage/.test(line)) reasons.push('判断ファイルが旧平置きのパスです');
       if (reasons.length) found.push({ file, line: i + 1, reasons });
     });
   }
