@@ -1,0 +1,68 @@
+{
+  "description": "旧側の新しい往復を採り共有側の新しい結論を残す",
+  "shared": {
+    "branches": {
+      "x": {
+        "round": 1,
+        "lastReviewedSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "dismissed": [
+          "共有",
+          "共通"
+        ],
+        "lastTriage": {
+          "round": 5,
+          "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "outcome": "halted"
+        }
+      }
+    }
+  },
+  "legacy": {
+    "branches": {
+      "x": {
+        "round": 2,
+        "lastReviewedSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "dismissed": [
+          "共通",
+          "旧",
+          "旧"
+        ],
+        "lastTriage": {
+          "round": 4,
+          "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "outcome": "fixing"
+        }
+      },
+      "y": {
+        "round": 1,
+        "lastReviewedSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "dismissed": [],
+        "lastTriage": null
+      }
+    }
+  },
+  "expected": {
+    "branches": {
+      "x": {
+        "round": 2,
+        "lastReviewedSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "dismissed": [
+          "共有",
+          "共通",
+          "旧"
+        ],
+        "lastTriage": {
+          "round": 5,
+          "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "outcome": "halted"
+        }
+      },
+      "y": {
+        "round": 1,
+        "lastReviewedSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "dismissed": [],
+        "lastTriage": null
+      }
+    }
+  }
+}

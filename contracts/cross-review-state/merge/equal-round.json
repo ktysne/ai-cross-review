@@ -1,0 +1,63 @@
+{
+  "description": "同じ往復は共有側を優先し null の SHA だけ旧側で補う",
+  "shared": {
+    "branches": {
+      "x": {
+        "round": 2,
+        "lastReviewedSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "dismissed": [],
+        "lastTriage": {
+          "round": 2,
+          "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "outcome": "converged"
+        }
+      },
+      "y": {
+        "round": 2,
+        "lastReviewedSha": null,
+        "dismissed": [],
+        "lastTriage": null
+      }
+    }
+  },
+  "legacy": {
+    "branches": {
+      "x": {
+        "round": 2,
+        "lastReviewedSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "dismissed": [],
+        "lastTriage": {
+          "round": 2,
+          "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "outcome": "halted"
+        }
+      },
+      "y": {
+        "round": 2,
+        "lastReviewedSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "dismissed": [],
+        "lastTriage": null
+      }
+    }
+  },
+  "expected": {
+    "branches": {
+      "x": {
+        "round": 2,
+        "lastReviewedSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "dismissed": [],
+        "lastTriage": {
+          "round": 2,
+          "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "outcome": "converged"
+        }
+      },
+      "y": {
+        "round": 2,
+        "lastReviewedSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "dismissed": [],
+        "lastTriage": null
+      }
+    }
+  }
+}

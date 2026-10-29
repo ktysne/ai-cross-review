@@ -65,7 +65,7 @@ node tools/cross-review.js codex --fix --uncommitted --instructions ../review-no
 | `--max-diff-kb <n>` | レビュー差分サイズの上限（KB）。超過時はファイル要約の閾値を段階的に下げて縮退を試み、収まらなければ起動せず中断（既定 256、`0` で無効。環境変数 `CROSS_REVIEW_MAX_DIFF_KB` でも指定可） |
 | `--max-file-diff-kb <n>` | ファイル単位の差分がこの KB を超えたら本文を stat 要約に置換（既定 64、`0` で無効。環境変数 `CROSS_REVIEW_MAX_FILE_DIFF_KB` でも指定可） |
 | `--strict-diff-guard` | 差分サイズ超過時に段階的縮退を試さず、従来どおり即中断する |
-| `--no-state` | 状態ファイル（`.cross-review-state.json`）の読み書きを行わない（CI 等） |
+| `--no-state` | 状態ファイル（Git 共通ディレクトリの `cross-review-state.json`）の読み書きを行わない（CI 等） |
 | `--no-exclude` | 既定除外も含めすべての除外を無効化（生成物、ロックファイルもまとめてレビューしたいとき） |
 | `--instructions <path>` | レビュアーへの申し送り、重点指摘ファイルをプロンプトに追加する（観点 `.cross-review.md` は置き換えず追加。`--fix` と併用すると、その指摘を直接修正させる） |
 | `--no-pr-check` | レビュー実行前の PR 存在確認（`gh pr view`）を省く（既定では PR が無いと分かったときだけ警告し、実行は止めません） |
@@ -80,6 +80,7 @@ node tools/cross-review.js codex --fix --uncommitted --instructions ../review-no
 | `--out <path>` | `comment` 専用。生成した本文の書き出し先（既定はブランチ別ディレクトリの `round-<N>-comment.md`） |
 | `--post <N>` | `comment` 専用。生成本文を PR #N へ `gh pr comment N --body-file -` の標準入力で投稿（1 以上の整数） |
 | `--outcome <fixing\|converged\|halted>` | `comment` 専用。往復の結論を状態ファイルに記録する（値の意味は [cross-review.md](cross-review.md) の「状態ファイル」） |
+| `--allow-round-mismatch` | `comment` 専用。状態ファイルに対象往復のレビュー記録が無くても、結論を記録する |
 | `--reset` | `state` 専用。この枝の記録を消す |
 | `--mark` | `state` 専用。往復を 1 回分記録し、直前レビュー SHA を現在の HEAD にする。`--uncommitted` を併用すると SHA は据え置く（`--uncommitted` のレビューの後に使う） |
 | `--clean-legacy` | `artifacts` 専用。`.cross-review` 直下に残る旧形式の `round-<正整数>-*.md/json` だけを削除 |

@@ -213,11 +213,11 @@ describe('本体の入口対応', () => {
   });
   it('導入先のルートを状態とレビュー出力の基準にする', () => {
     const projectRoot = path.join(temp, 'project');
-    expect(engine.resolveStatePath({ projectRoot, scriptDir: '/upstream/tools' })).toBe(path.join(projectRoot, '.cross-review-state.json'));
+    expect(engine.resolveStatePath({ projectRoot, scriptDir: '/upstream/tools', stateDir: path.join(temp, 'state') })).toBe(path.join(temp, 'state/cross-review-state.json'));
     expect(engine.resolveReviewDir({ projectRoot })).toBe(path.join(projectRoot, '.cross-review'));
     const writeStateFile = vi.fn();
-    engine.writeState({}, { projectRoot, writeStateFile });
-    expect(writeStateFile.mock.calls[0][0]).toBe(path.join(projectRoot, '.cross-review-state.json'));
+    engine.writeState({}, { projectRoot, stateDir: path.join(temp, 'state'), writeStateFile });
+    expect(writeStateFile.mock.calls[0][0]).toBe(path.join(temp, 'state/cross-review-state.json'));
   });
   it('観点と除外の候補に上流のルートを入れない', () => {
     const candidates = [];
@@ -334,13 +334,13 @@ describe('入口と実際の本体の結合', () => {
     put('project/tools/package.json', '{"type":"commonjs"}');
     put('project/tools/cross-review.js', fs.readFileSync(path.join(repoRoot, 'tools/cross-review.entry.js')));
     const executable = path.join(project, 'tools/cross-review.js');
-    const options = { cwd: project, env: { ...process.env, CODEX_AGENT_RUN: '', CROSS_REVIEW_ENGINE: repoRoot }, encoding: 'utf8' };
+    const options = { cwd: project, env: { ...process.env, CODEX_AGENT_RUN: '', CROSS_REVIEW_ENGINE: repoRoot, CROSS_REVIEW_STATE_DIR: path.join(temp, 'state') }, encoding: 'utf8' };
     execFileSync('git', ['init', '--quiet', '-b', 'main', project]);
     execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '--allow-empty', '-m', '検証用'], { cwd: project });
     execFileSync(process.execPath, [executable, 'state', '--reset'], options);
-    expect(fs.existsSync(path.join(project, '.cross-review-state.json'))).toBe(true);
+    expect(fs.existsSync(path.join(temp, 'state/cross-review-state.json'))).toBe(false);
     const state = JSON.parse(execFileSync(process.execPath, [executable, 'state'], options));
-    expect(state.statePath).toBe(path.join(project, '.cross-review-state.json'));
+    expect(state.statePath).toBe(path.join(temp, 'state/cross-review-state.json'));
     const info = JSON.parse(execFileSync(process.execPath, [executable, 'engine'], options));
     expect(info).toMatchObject({ engineSource: 'env', projectRoot: project, enginePath: path.join(repoRoot, 'tools/cross-review.js') });
   });

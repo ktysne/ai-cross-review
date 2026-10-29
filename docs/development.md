@@ -79,7 +79,7 @@ npm run sync:global                          # グローバル SKILL の配布
 | 連携先 | ai-cross-review 側の約束 |
 |---|---|
 | [claude-codex-bridge](https://github.com/ktysne/claude-codex-bridge) | `~/.claude/tools/codex-agent.sh` を探し、定義 `codex-review`（read-only）と `codex-subagent`（workspace-write）で起動する。終了コード 3 は bridge が未導入、75 は GPT 側の事情で使えないことを表す |
-| [agent-cockpit](https://github.com/ktysne/agent-cockpit) | `AGENT_COCKPIT_HOME`（無ければ `~/.agent-cockpit`）の `routing.json` の `review` を読む。agent-cockpit は導入先の worktree のルートの `tools/cross-review.js` で導入を判断し、`.cross-review-state.json` の往復と結論を PR のカードに出す |
+| [agent-cockpit](https://github.com/ktysne/agent-cockpit) | `AGENT_COCKPIT_HOME`（無ければ `~/.agent-cockpit`）の `routing.json` の `review` を読む。agent-cockpit は導入先の worktree のルートの `tools/cross-review.js` で導入を判断し、Git 共通ディレクトリの `cross-review-state.json` の往復と結論を PR のカードに出す |
 
 `routing.json` の読み取り検証データは `tests/fixtures/agent-cockpit-routing/` に置いています。
 agent-cockpit の checkout と完全な SHA を指定して次のコマンドで写し直し、`npm test` で確かめてください。
