@@ -445,6 +445,10 @@ const USAGE = [
   '  --uncommitted         未コミットの作業ツリー差分 (tracked + untracked) をレビュー',
   '  --base <ref>          比較先ブランチ / コミットを指定 (既定: 前回レビュー SHA → PR の base',
   '                        → origin/main → ローカル main の順に解決)',
+  '  --merge-resolution    前回レビュー以降のコミットが base を取り込む merge だけのとき、各 merge の',
+  '                        競合の解消の差分 (git show --remerge-diff) だけをレビューする。条件に合わなければ',
+  '                        通常のレビューを案内して終了コード 1 で止まる。競合が無ければ往復を数えずに終わる。',
+  '                        --uncommitted / --base / --no-state とは併用できない (git 2.36 以上が必要)',
   '  --max-diff-kb <n>     レビュー差分サイズの上限 (KB)。超過時はファイル要約の閾値を段階的に',
   '                        下げて縮退を試み、それでも収まらなければ起動せず中断',
   '                        (既定 256。0 でガード無効。環境変数 CROSS_REVIEW_MAX_DIFF_KB でも指定可)',
@@ -560,6 +564,7 @@ function parseArgs(argv) {
     reset: false, // state --reset (現在の枝の記録を消す)
     mark: false, // state --mark (現在の枝の往復を手で 1 進める)
     noState: false, // --no-state で状態ファイルの読み書きを無効化する (CI 等)
+    mergeResolution: false, // --merge-resolution で base 取り込みの競合の解消の差分だけをレビューする
     strictDiffGuard: false, // --strict-diff-guard で差分ガードを従来の即中断に戻す
     mode: 'base',
     baseRef: 'main',
@@ -604,6 +609,8 @@ function parseArgs(argv) {
       out.noExclude = true;
     } else if (a === '--no-state') {
       out.noState = true;
+    } else if (a === '--merge-resolution') {
+      out.mergeResolution = true;
     } else if (a === '--strict-diff-guard') {
       out.strictDiffGuard = true;
     } else if (a === '--reset') {
@@ -907,6 +914,16 @@ function parseArgs(argv) {
         out.error = `--codex-agent ${CODEX_AGENT_FIX_NAME} は書き込み可能な定義です (--fix 無しでは使えません)`;
       }
     }
+    if (!out.error && out.mergeResolution) {
+      const conflicting = [
+        out.mode === 'uncommitted' && '--uncommitted',
+        out.baseExplicit && '--base',
+        out.noState && '--no-state',
+      ].filter(Boolean);
+      if (conflicting.length > 0) {
+        out.error = `--merge-resolution は ${conflicting.join(' / ')} とは併用できません`;
+      }
+    }
     // --reset / --mark は状態ファイルの操作用なので、レビュアー実行では受け付けない。
     if (!out.error && out.reset) out.error = '--reset は state サブコマンドでのみ使えます';
     if (!out.error && out.mark) out.error = '--mark は state サブコマンドでのみ使えます';
@@ -931,6 +948,9 @@ function parseArgs(argv) {
   }
   if (!out.help && !out.error && out.command !== 'review' && out.command !== 'route' && out.routeOverrideReason != null) {
     out.error = '--override-route はレビュアーのサブコマンドでのみ使えます';
+  }
+  if (!out.help && !out.error && out.command !== 'review' && out.mergeResolution) {
+    out.error = '--merge-resolution はレビュアーのサブコマンドでのみ使えます';
   }
   return out;
 }
@@ -1649,6 +1669,7 @@ const BASE_SOURCE_LABELS = {
   pr: 'PR の base',
   'origin-main': 'origin/main 優先解決',
   'local-main': 'ローカル main',
+  'merge-resolution': '競合の解消の差分',
 };
 
 // source に対応する表記を返す。未知の値はそのまま返す (メタ情報が古い形でも壊さない)。
@@ -1736,6 +1757,129 @@ function resolveBaseSelection(opts, gitRun, deps = {}) {
 // 解決方法まで要る呼び出し側は resolveBaseSelection を使う。
 function resolveBaseRef(opts, gitRun, deps = {}) {
   return resolveBaseSelection(opts, gitRun, deps).ref;
+}
+
+// git show --remerge-diff が入った git のバージョン。
+const REMERGE_DIFF_MIN_GIT = [2, 36];
+
+// git のバージョンが --remerge-diff に対応しているか。読み取れないバージョンは対応とみなし、
+// 実際に非対応なら git show の失敗がそのまま報告される。
+function gitSupportsRemergeDiff(gitRun, deps = {}) {
+  const raw = deps.gitVersion != null ? deps.gitVersion : gitRun(['--version'], { allowFailure: true });
+  const matched = /(\d+)\.(\d+)/.exec(String(raw == null ? '' : raw));
+  if (!matched) return { supported: true, version: null };
+  const [major, minor] = [Number(matched[1]), Number(matched[2])];
+  const [needMajor, needMinor] = REMERGE_DIFF_MIN_GIT;
+  return {
+    supported: major > needMajor || (major === needMajor && minor >= needMinor),
+    version: `${major}.${minor}`,
+  };
+}
+
+// lastSha から HEAD までを第 1 親でたどった鎖が、merge だけでできているかを調べる。
+// 戻り値: { ok: true, merges: [{ sha, extraParents }] (古い順) } | { ok: false, reason }
+function findMergeChain(gitRun, lastSha) {
+  const lastFull = gitRun(['rev-parse', '--verify', '--quiet', `${lastSha}^{commit}`], { allowFailure: true });
+  const listed = gitRun(['rev-list', '--first-parent', '--parents', `${lastSha}..HEAD`], { allowFailure: true });
+  if (lastFull == null || listed == null) {
+    return { ok: false, reason: `前回レビュー時の ${shortSha(lastSha)} を履歴から取得できません` };
+  }
+  const entries = String(listed).split('\n').map((line) => line.trim()).filter(Boolean)
+    .map((line) => line.split(/\s+/));
+  if (entries.length === 0) {
+    return { ok: false, reason: `HEAD は前回レビュー時の ${shortSha(lastSha)} から進んでいません` };
+  }
+  // 範囲の最古のコミットの第 1 親が lastSha でなければ、鎖は lastSha を第 1 親では通っていない。
+  if (entries[entries.length - 1][1] !== String(lastFull).trim()) {
+    return { ok: false, reason: `HEAD から第 1 親をたどっても前回レビュー時の ${shortSha(lastSha)} に着きません` };
+  }
+  const plain = entries.filter((entry) => entry.length < 3);
+  if (plain.length > 0) {
+    return { ok: false, reason: `merge でないコミットが含まれています (${plain.map((entry) => shortSha(entry[0])).join(', ')})` };
+  }
+  return {
+    ok: true,
+    merges: entries.map((entry) => ({ sha: entry[0], extraParents: entry.slice(2) })).reverse(),
+  };
+}
+
+// --merge-resolution を使える状態かを判定し、使えるときは対象の merge を古い順で返す。
+// 戻り値: { ok: true, lastSha, baseRef, merges: [SHA] } | { ok: false, reason }
+// 取り込んだ側は PR の base (既定 base の PR の base → origin/main → main) から到達できること。
+function planMergeResolution(opts, gitRun, deps = {}) {
+  const fail = (reason) => ({ ok: false, reason });
+  const lastSha = deps.branchState && deps.branchState.lastReviewedSha;
+  if (!lastSha) return fail('この枝に前回レビュー時の SHA の記録がありません');
+  if (!commitExists(gitRun, lastSha)) {
+    return fail(`前回レビュー時の ${shortSha(lastSha)} が履歴にありません (rebase や amend で消えた可能性があります)`);
+  }
+  if (deps.checkGitVersion) {
+    const git = gitSupportsRemergeDiff(gitRun, deps);
+    if (!git.supported) {
+      return fail(`git ${git.version} は git show --remerge-diff に対応していません (git ${REMERGE_DIFF_MIN_GIT.join('.')} 以上が必要です)`);
+    }
+  }
+  const chain = findMergeChain(gitRun, lastSha);
+  if (!chain.ok) return fail(chain.reason);
+  const baseDeps = {
+    env: deps.env,
+    ghRun: deps.ghRun,
+    prInfo: deps.prInfo,
+    // 取得失敗などの警告は残し、--base で変えられる前提の「使用します」の通知だけを落とす。
+    err: (message) => {
+      if (!/^\[cross-review\] base として/.test(message)) (deps.err || ((s) => process.stderr.write(s)))(message);
+    },
+  };
+  const base = resolveBaseSelection({ ...opts, mode: 'base', baseExplicit: false }, gitRun, baseDeps);
+  for (const merge of chain.merges) {
+    for (const parent of merge.extraParents) {
+      if (gitRun(['merge-base', '--is-ancestor', parent, base.ref], { allowFailure: true }) == null) {
+        return fail(`merge ${shortSha(merge.sha)} は base (${base.ref}) 以外から取り込んでいます (取り込んだ ${shortSha(parent)} が ${base.ref} から到達できません)`);
+      }
+    }
+  }
+  return { ok: true, lastSha, baseRef: base.ref, merges: chain.merges.map((merge) => merge.sha) };
+}
+
+// 競合の解消の対象を人向けに表す。PR コメントの要約行と差分サイズの行が同じ表記を使う。
+function mergeResolutionTarget(merges) {
+  const list = Array.isArray(merges) ? merges.filter((sha) => typeof sha === 'string' && sha) : [];
+  const label = `対象: ${baseSourceLabel('merge-resolution')}`;
+  if (list.length === 0) return label;
+  return `${label} (merge ${shortSha(list[0])}${list.length > 1 ? ' ほか' : ''})`;
+}
+
+// 鎖の各 merge の git show --remerge-diff を古い順につなぎ、レビューの差分にする。
+// 戻り値: { diffText, excludedFiles, conflictFree }。除外の規則は collectReviewDiff と同じ。
+// conflictFree は、どの merge にも自動マージの結果と違う変更 (手で解いた差分) が無いことを表す。
+function collectMergeResolutionDiff(opts, gitRun, merges) {
+  const excludeSpecs = opts.excludePathspecs || [];
+  const pathspec = excludeSpecs.length > 0 ? ['--', ':/', ...excludeSpecs] : [];
+  const changedFiles = (extra) => {
+    const names = new Set();
+    for (const sha of merges) {
+      const out = gitRun(['show', '--remerge-diff', '--format=', '--name-only', sha, ...extra], {});
+      for (const name of String(out).split('\n')) {
+        if (name.trim()) names.add(name.trim());
+      }
+    }
+    return names;
+  };
+  const all = changedFiles([]);
+  if (all.size === 0) return { diffText: '', excludedFiles: [], conflictFree: true };
+  const parts = [];
+  for (const sha of merges) {
+    const out = String(gitRun(['show', '--remerge-diff', '--format=# merge %H: %s', sha, ...pathspec], {}));
+    const lines = out.split('\n');
+    const body = lines.slice(1).join('\n').trim();
+    if (body) parts.push(`${lines[0]}\n\n${body}`);
+  }
+  let excludedFiles = [];
+  if (pathspec.length > 0) {
+    const kept = changedFiles(pathspec);
+    excludedFiles = [...all].filter((name) => !kept.has(name));
+  }
+  return { diffText: parts.join('\n\n'), excludedFiles, conflictFree: false };
 }
 
 // レビュー差分サイズのガード閾値 (KB) を解決する。優先順:
@@ -1862,7 +2006,9 @@ function buildReviewPrompt(diffText, opts, checklist, instructions, excludedFile
     : GENERIC_CHECKLIST;
   const scope = opts.mode === 'uncommitted'
     ? '未コミットの作業ツリー差分 (tracked: git diff HEAD ＋ untracked 新規ファイル)'
-    : `現在のブランチと ${opts.baseRef} の差分 (git diff ${opts.baseRef}...HEAD)`;
+    : opts.mergeResolution
+      ? `前回レビュー時の ${shortSha(opts.baseRef)} 以降に base を取り込んだ merge の競合の解消の差分 (各 merge の git show --remerge-diff を古い順に連結。取り込んだ base 側の変更は含まない)`
+      : `現在のブランチと ${opts.baseRef} の差分 (git diff ${opts.baseRef}...HEAD)`;
   const parts = [
     reviewPoints,
     '',
@@ -2028,7 +2174,10 @@ function buildMetaRouteSummary(meta) {
   }
   const via = VIA_LABELS[meta.via] || (meta.via ? String(meta.via) : '不明');
   const base = meta.base && typeof meta.base === 'object' ? meta.base : {};
-  const scope = base.source === 'uncommitted'
+  const mergeResolution = meta.mergeResolution && typeof meta.mergeResolution === 'object' ? meta.mergeResolution : null;
+  const scope = mergeResolution
+    ? mergeResolutionTarget(mergeResolution.merges)
+    : base.source === 'uncommitted'
     ? `対象: ${baseSourceLabel('uncommitted')}`
     : `base: ${base.ref ? `${base.ref} (${baseSourceLabel(base.source)})` : '不明'}`;
   const size = typeof meta.diffKb === 'number' && Number.isFinite(meta.diffKb)
@@ -2045,8 +2194,9 @@ function buildRoundComment({ round, reviewer, meta, triage, verify, triageRecord
     throw new Error(`結論の値が不正です: ${triageRecord.outcome}`);
   }
   const routeOverride = meta && meta.routeOverride;
+  const isMergeResolution = !!(meta && meta.mergeResolution && typeof meta.mergeResolution === 'object');
   const parts = [
-    `## クロスレビュー ${round} 往復目: ${reviewerDisplayName(reviewer)} の指摘と対応`,
+    `## クロスレビュー ${round} 往復目${isMergeResolution ? '(競合の解消のレビュー)' : ''}: ${reviewerDisplayName(reviewer)} の指摘と対応`,
     '',
     buildMetaSummary(meta, triageRecord),
   ];
@@ -2839,7 +2989,36 @@ function runReview(opts, deps = {}) {
   // 既定 base (--base 未指定、コミット済み差分) は「前回レビュー SHA → PR の base →
   // origin/main → ローカル main」の順に解決する。opts を直接書き換えず、解決後の base を
   // 以降のスコープ表記、差分収集で使う。
-  const baseSelection = resolveBaseSelection(opts, gitRun, { ...invDeps, branchState, prInfo: prInfoOf });
+  const planDeps = { ...invDeps, branchState, prInfo: prInfoOf, err: writeErr };
+  let mergeResolution = null;
+  if (opts.mergeResolution) {
+    const plan = planMergeResolution(opts, gitRun, { ...planDeps, checkGitVersion: true });
+    if (!plan.ok) {
+      writeErr(`[cross-review] --merge-resolution を使えません: ${plan.reason}\n`
+        + '  通常のレビュー (--merge-resolution を外して実行) を回してください。\n');
+      process.exitCode = 1;
+      return null;
+    }
+    mergeResolution = plan;
+  }
+  const baseSelection = mergeResolution
+    ? {
+      ref: mergeResolution.lastSha,
+      source: 'merge-resolution',
+      label: baseSourceLabel('merge-resolution'),
+      display: mergeResolutionTarget(mergeResolution.merges),
+    }
+    : resolveBaseSelection(opts, gitRun, { ...invDeps, branchState, prInfo: prInfoOf });
+  if (baseSelection.source === 'state') {
+    // 案内のための判定なので、失敗しても通常のレビューを妨げない。
+    try {
+      if (planMergeResolution(opts, gitRun, planDeps).ok) {
+        writeErr('[cross-review] 前回レビュー以降のコミットは base を取り込む merge だけです。--merge-resolution を付けると競合の解消の差分だけをレビューできます。\n');
+      }
+    } catch {
+      // 案内を出さないだけにする。
+    }
+  }
   const resolvedBaseRef = baseSelection.ref;
   // 除外パススペックを解決する (--no-exclude 指定時は無効化)。観点と同じ流儀で .cross-review-ignore を読む。
   const excludePatterns = opts.noExclude
@@ -2854,7 +3033,15 @@ function runReview(opts, deps = {}) {
   let diffText;
   let excludedFiles = [];
   try {
-    const collected = collectReviewDiff(resolvedOpts, gitRun);
+    const collected = mergeResolution
+      ? collectMergeResolutionDiff(resolvedOpts, gitRun, mergeResolution.merges)
+      : collectReviewDiff(resolvedOpts, gitRun);
+    if (collected.conflictFree) {
+      (opts.reviewer === 'subagent' ? writeErr : writeOut)(
+        '競合の解消は無いので、レビューは不要です (往復は数えず、状態も変えていません)。\n',
+      );
+      return null;
+    }
     diffText = collected.diffText.trim();
     excludedFiles = collected.excludedFiles || [];
   } catch (err) {
@@ -2894,8 +3081,8 @@ function runReview(opts, deps = {}) {
   // どの base とどの解決方法で比較したのかを同じ行に出し、比較対象が分からないまま
   // レビューが回ることを防ぐ。
   const diffKb = Buffer.byteLength(diffText, 'utf8') / 1024;
-  const scopeLine = baseSelection.source === 'uncommitted'
-    ? `対象: ${baseSelection.label}`
+  const scopeLine = baseSelection.source === 'uncommitted' || mergeResolution
+    ? (mergeResolution ? baseSelection.display : `対象: ${baseSelection.label}`)
     : `base: ${baseSelection.display} (${baseSelection.label})`;
   writeErr(`[cross-review] ${scopeLine} / レビュー差分サイズ: ${diffKb.toFixed(1)}KB\n`);
   if (overGuard(diffText)) {
@@ -2974,6 +3161,7 @@ function runReview(opts, deps = {}) {
         base: { ref: baseSelection.ref, source: baseSelection.source },
         diffKb: Number(diffKb.toFixed(1)),
         headSha,
+        ...(mergeResolution ? { mergeResolution: { merges: mergeResolution.merges } } : {}),
         recordedAt: nowIso(),
         ...(routeOverride ? { routeOverride } : {}),
         ...(fallback ? { fallback: true } : {}),
@@ -3779,6 +3967,11 @@ module.exports = {
   collectReviewDiff,
   resolveBaseRef,
   resolveBaseSelection,
+  planMergeResolution,
+  findMergeChain,
+  collectMergeResolutionDiff,
+  gitSupportsRemergeDiff,
+  mergeResolutionTarget,
   resolveMaxDiffKb,
   resolveMaxFileDiffKb,
   summarizeLargeFileDiffs,
