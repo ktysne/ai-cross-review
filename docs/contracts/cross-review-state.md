@@ -4,7 +4,7 @@
 
 `.cross-review-state.json` の形式の正本は ai-cross-review です。
 書き手は ai-cross-review の CLI だけです。
-ファイルはリポジトリのルートの `.cross-review-state.json` に置きます。
+ファイルは Git の共通ディレクトリの `cross-review-state.json` に置き、同じリポジトリの全 worktree で共有します。
 文字コードは UTF-8、BOM なしとし、書き手は 2 空白のインデントと末尾改行（LF）を付けます。
 現在は `version` フィールドを持ちません。
 
@@ -28,6 +28,65 @@
 `branches` はブランチ名をキーにしたオブジェクトです。
 ブランチ名に `/` や `.` を含められます。
 未知のキーは、トップレベルと各フィールドのオブジェクトのいずれでも無視します。
+
+## 保存先の解決
+
+読み手も書き手も checkout のルートを cwd にして `git rev-parse --path-format=absolute --git-common-dir` を実行し、その下の `cross-review-state.json` を使います。
+古い Git が `--path-format` を受け付けない場合は `git rev-parse --git-common-dir` に落とし、出力を checkout のルートから絶対パスへ変換します。
+CLI は解決結果をプロセス内で checkout のルートごとにキャッシュします。
+
+共通ディレクトリは通常の checkout と worktree では本体の `.git`、bare リポジトリでは `repo.git`、サブモジュールでは `.git/modules/<name>` です。
+`GIT_DIR` などの環境変数が別のリポジトリを指していれば、Git が返すそちらの共通ディレクトリを使います。
+Git が使えない場合やリポジトリでない場合は、従来の `<checkout のルート>/.cross-review-state.json` を使います。
+
+`deps.stateDir` または環境変数 `CROSS_REVIEW_STATE_DIR` があれば、そのディレクトリの `cross-review-state.json` を使い、Git は実行しません。
+両方あれば `deps.stateDir` を優先します。
+
+## 排他と書き込み
+
+書き手だけが `cross-review-state.json.lock` を `wx` で作り、pid、時刻、hostname を書いて直ちに close します。
+取得できなければ待って再試行し、5 秒で失敗します。
+mtime が 30 秒より古く、本文を読めないか、同じ hostname の pid が `process.kill(pid, 0)` の `ESRCH` で不在と分かったロックだけを放棄済みと扱います。
+放棄したロックは直接 unlink せず、一意な `.lock.stale-<pid>-<time>` 名へ rename してから消します。
+別ホストの pid や権限不足で生存を確かめられない pid のロックは奪いません。
+
+ロック内で旧ファイルを取り込み、共有ファイルを読み直してから状態遷移を適用します。
+壊れた共有ファイルには書き戻しません。
+変更があれば同じディレクトリの一意な一時ファイルへ書き、fsync してから rename で置換します。
+rename の `EPERM`、`EBUSY`、`EACCES` は合計約 1 秒まで再試行し、失敗した一時ファイルを消します。
+読み手は rename 前後の本文を読むため、ロックを取る必要がありません。
+
+## 旧ファイルの取り込み
+
+共有側を正とし、各 checkout の `.cross-review-state.json` は未取り込みの記録としてだけ扱います。
+表示だけの `state` と `--outcome` のない `comment` は取り込まず、旧ファイルがあれば stderr に 1 行警告します。
+書く可能性のあるコマンドは状態を使う前にロック内で取り込みます。
+レビューの base 解決にも取り込み後の `lastReviewedSha` を使います。
+
+ブランチごとの統合規則は次のとおりです。
+
+- `round` は大きいほうを使います。
+- `lastReviewedSha` は `round` の大きい側を使います。同じなら共有側を使いますが、共有側が `null` で旧側が非 `null` なら旧側を使います。
+- `dismissed` は共有側の順序を保ち、旧側にしかない要約を後ろへ追加します。
+- `lastTriage` は `round` と独立に `lastTriage.round` の大きい側を使います。同じなら共有側を使い、片方だけにあればそれを使います。
+
+取り込みは冪等です。
+取り込んだ旧ファイルは削除せず、共有ディレクトリの `cross-review-state.imported/<checkout の絶対パスの sha256 先頭 16 桁>.json` へ移します。
+同名があれば置き換えてかまいません。
+移動に失敗したら警告します。
+壊れた旧ファイルは取り込まず警告し、その場所に残してコマンドを続けます。
+
+同じリポジトリで新旧の CLI を混在させる運用は非対応です。
+旧版が旧ファイルを作り直すと、`state --reset` した記録が再取り込みで戻る可能性があります。
+全 worktree を同じ新しい版へそろえてください。
+
+## 結論の記録時の検査
+
+`comment --outcome` は本文の生成や投稿の前に、ブランチの `round` が `--round` 以上であることを検査します。
+足りなければ終了コード 1 で止め、レビューを実行した worktree または `node tools/cross-review.js state` で記録を確認する手順を示します。
+意図した記録なら `--allow-round-mismatch` でこの検査を許可できます。
+ロック内の記録直前にも同じ検査を行います。
+`lastReviewedSha` が HEAD と異なれば両方の短縮 SHA を警告し、この警告は `--allow-round-mismatch` でも残します。
 
 ## 書き手が書く値の保証
 
@@ -114,9 +173,10 @@ agent-cockpit のように、CLI の正規化より厳しい読み取り方針�
 
 検証データは上流の `contracts/cross-review-state/` に置きます。
 `parse/*.json` は説明、入力本文、手書きの期待結果を持ち、BOM は入力文字列中の `\ufeff` で表します。
+`merge/*.json` は説明、共有側、旧側、統合結果を持ち、`mergeStates` の統合規則と冪等性を確かめます。
 `writer/*.json` は CLI の状態遷移と書き込みを通したファイル本文です。
 再生成の手順は `tests/cross-review.state-contract.test.js` にあり、テストは期待値を自動更新せず、書き手の出力とバイト単位で比較します。
-`npx vitest run tests/cross-review.state-contract.test.js` で両方を検証できます。
+`npx vitest run tests/cross-review.state-contract.test.js` ですべてを検証できます。
 
 ほかの読み手は上流の revision を固定して文書と検証データを取り込み、自分のパーサーの解釈を確かめます。
 この文書、検証データ、契約テストは雛形マニフェストには含めず、導入先へ自動配布しません。

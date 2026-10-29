@@ -284,7 +284,7 @@ ai-cross-review 側で追加する設定はありません。次の点だけ合�
 - `node tools/cross-review.js route` は、agent-cockpit の `routing.json` からレビュアーの設定を読み、`codex`、`claude`、`default` のどれかを出します。`AGENT_COCKPIT_HOME` が設定されていればそのディレクトリの、無ければ `~/.agent-cockpit/` の `routing.json` を読みます。agent-cockpit の保存先を変えたときは、ai-cross-review を実行する環境にも同じ `AGENT_COCKPIT_HOME` を設定します。
 - 経路の設定が `codex` か `claude` のとき、レビュアーのサブコマンドは設定に反する起動を拒否して、終了コード 2 で止まります。会話で別のレビュアーを指定したときは、`--override-route <理由>` を付けて実行します。
 - agent-cockpit は、導入先の worktree のルートに `tools/cross-review.js` があるかで、ai-cross-review の導入を判断します。手順 1 の置き場（`tools/`）を変えないでください。
-- PR のカードの往復と結論は、導入先のルートの `.cross-review-state.json` から読まれます。判断を終えた往復は、`comment --outcome <fixing|converged|halted>` で結論を記録します（[usage.md](usage.md) の「PR コメントを生成する」）。agent-cockpit の「レビュー収束後マージ」は、`converged` を記録した head の SHA でマージします。
+- PR のカードの往復と結論は、導入先の Git 共通ディレクトリの `cross-review-state.json`（同じリポジトリの全 worktree で共有）から読まれます。判断を終えた往復は、`comment --outcome <fixing|converged|halted>` で結論を記録します（[usage.md](usage.md) の「PR コメントを生成する」）。agent-cockpit の「レビュー収束後マージ」は、`converged` を記録した head の SHA でマージします。
 
 ### 確認
 

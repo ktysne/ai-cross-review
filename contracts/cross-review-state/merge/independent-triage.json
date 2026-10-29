@@ -1,0 +1,41 @@
+{
+  "description": "往復の大きい共有側と旧側の結論を独立に残す",
+  "shared": {
+    "branches": {
+      "x": {
+        "round": 3,
+        "lastReviewedSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "dismissed": [],
+        "lastTriage": null
+      }
+    }
+  },
+  "legacy": {
+    "branches": {
+      "x": {
+        "round": 0,
+        "lastReviewedSha": null,
+        "dismissed": [],
+        "lastTriage": {
+          "round": 3,
+          "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "outcome": "converged"
+        }
+      }
+    }
+  },
+  "expected": {
+    "branches": {
+      "x": {
+        "round": 3,
+        "lastReviewedSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "dismissed": [],
+        "lastTriage": {
+          "round": 3,
+          "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "outcome": "converged"
+        }
+      }
+    }
+  }
+}

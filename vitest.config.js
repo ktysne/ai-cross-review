@@ -6,6 +6,7 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    setupFiles: ['tests/state-isolation.js'],
     exclude: ['.claude/**', 'node_modules/**'],
   },
 });

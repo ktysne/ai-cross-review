@@ -58,15 +58,8 @@
 //   (.cross-review.md) を置き換えず、それに加えてプロンプトへ添える別系統。一方のレビュアーが
 //   出した指摘をファイルに書き、`codex --fix --instructions <path>` で他方に直接修正させる用途を
 //   一級でサポートする (この目的で CROSS_REVIEW_CHECKLIST を流用すると観点が消えるため非推奨)。
-// - 往復回数、直前レビュー時の HEAD、非対応と判断した指摘、最後に判断した結論は、リポジトリ直下の
-//   `.cross-review-state.json` にブランチ単位で記録する。これらはブランチごとに決まる値で、
-//   会話の外に置かないと妥当性確認のたびに人が SHA を控え直すことになるため。状態遷移は純粋関数
-//   (nextState / withDismissed / withTriage / withoutBranch) に閉じ、読み書きだけを I/O 側 (readState /
-//   writeState) に置く。ファイルが壊れているときは警告して無視し、書き戻さない (記録を消さない)。
-//   書き込みは必ず「書く直前に読み直した状態」を基にする。レビュアーの実行中に別プロセスが
-//   dismiss や別ブランチのレビュー完了を書いていることがあり、起動前のスナップショットで
-//   上書きするとその更新が消えるため。往復を CLI が観測できない経路 (GPT 側使用不能のフォールバック) は
-//   記録せず、レビューを終えた利用者が `state --mark` で進める。
+// - 状態の保存先、排他、移行の契約は docs/contracts/cross-review-state.md を参照。
+//   CLI がレビューの成立を観測できない経路は記録せず、利用者が state --mark で進める。
 // - 既定 base は「前回レビュー SHA → PR の base ブランチ → origin/main → ローカル main」の順で
 //   解決する。前者ほど差分が小さく、かつ人の指定なしで決まる情報だから。決めた base と解決方法は
 //   差分サイズと同じ stderr 行に必ず出し、stale な比較に気づけるようにする。
@@ -111,13 +104,10 @@ const CHECKLIST_FILENAME = '.cross-review.md';
 // 除外パターンファイル名。観点 (.cross-review.md) と同じ解決順で探す。
 const IGNORE_FILENAME = '.cross-review-ignore';
 
-// 状態ファイル名。ブランチ単位で往復回数、直前レビュー SHA、非対応指摘、最後の結論を持つ。
-// 観点と違い cwd では探さず、スクリプト位置からリポジトリ直下に固定して解決する
-// (サブディレクトリから起動しても同じ枝の記録を読み書きするため。resolveStatePath 参照)。
-// git 管理下に置かない前提なので、取り込み先でも .gitignore へ追加する。
+// git が使えない環境と移行前の状態ファイル名。
 const STATE_FILENAME = '.cross-review-state.json';
 
-// レビュー出力と PR コメント生成物の置き場 (リポジトリ直下)。状態ファイルと同じく
+// レビュー出力と PR コメント生成物の置き場 (リポジトリ直下)。
 // スクリプト位置から解決し、cwd に依存させない (resolveReviewDir 参照)。
 // 生成物なので git 管理下に置かない前提。取り込み先でも .gitignore へ追加する。
 const REVIEW_DIR_NAME = '.cross-review';
@@ -462,7 +452,7 @@ const USAGE = [
   '                        (既定 64。0 で無効 = 段階的縮退も行わない。',
   '                        環境変数 CROSS_REVIEW_MAX_FILE_DIFF_KB でも指定可)',
   '  --strict-diff-guard   差分サイズ超過時に段階的縮退を試さず、従来どおり即中断する',
-  '  --no-state            状態ファイル (.cross-review-state.json) の読み書きを行わない (CI 等)',
+  '  --no-state            状態ファイル (Git 共通ディレクトリの cross-review-state.json) の読み書きを行わない (CI 等)',
   '  --no-exclude          既定除外も含めすべての除外を無効化 (緊急時の逃げ道)',
   '  --override-route <理由> agent-cockpit の経路設定を上書きしてレビューを実行する',
   '  --instructions <path> レビュアーからの申し送り・重点指摘ファイルをプロンプトへ添付',
@@ -478,6 +468,7 @@ const USAGE = [
   '  --out <path>          comment: 生成した本文の書き出し先 (既定はブランチ別ディレクトリの round-<N>-comment.md)',
   '  --post <N>            comment: 生成本文を gh pr comment <N> --body-file - で投稿する (1 以上の整数)',
   '  --outcome <value>     comment: fixing / converged / halted の結論を本文生成後に状態へ記録する',
+  '  --allow-round-mismatch comment: 状態ファイルに対象往復のレビュー記録がなくても結論を記録する',
   '  --allow-dirty         comment: converged を未コミット変更がある状態でも記録する',
   '  --clean-legacy        artifacts: .cross-review 直下の旧形式出力を削除する',
   '  --fallback-prompt <path> GPT 側使用不能時に出力する代替プロンプトの書き出し先',
@@ -593,6 +584,7 @@ function parseArgs(argv) {
     round: null,
     outcome: null,
     allowDirty: false,
+    allowRoundMismatch: false,
     reviewerName: null,
     verifyPath: null, // --verify の検証出力ファイル
     outPath: null, // --out の書き出し先 (未指定はブランチ別ディレクトリの round-<N>-comment.md)
@@ -624,6 +616,8 @@ function parseArgs(argv) {
       out.noFallback = true;
     } else if (a === '--no-pr-check') {
       out.noPrCheck = true;
+    } else if (a === '--allow-round-mismatch') {
+      out.allowRoundMismatch = true;
     } else if (a === '--allow-dirty') {
       out.allowDirty = true;
     } else if (a === '--override-route' || a.startsWith('--override-route=')) {
@@ -835,6 +829,7 @@ function parseArgs(argv) {
       out.round != null && '--round',
       out.outcome != null && '--outcome',
       out.allowDirty && '--allow-dirty',
+      out.allowRoundMismatch && '--allow-round-mismatch',
       out.reviewerName != null && '--reviewer',
       out.verifyPath != null && '--verify',
       out.outPath != null && '--out',
@@ -878,6 +873,7 @@ function parseArgs(argv) {
         out.postNumber != null ? '--post' : null,
         out.outcome != null ? '--outcome' : null,
         out.allowDirty && '--allow-dirty',
+        out.allowRoundMismatch && '--allow-round-mismatch',
       ].filter(Boolean);
       if (commentOnly.length > 0) {
         out.error = `${commentOnly.join(' / ')} は comment サブコマンドでのみ使えます`;
@@ -925,6 +921,7 @@ function parseArgs(argv) {
       out.postNumber != null ? '--post' : null,
       out.outcome != null ? '--outcome' : null,
       out.allowDirty && '--allow-dirty',
+      out.allowRoundMismatch && '--allow-round-mismatch',
     ].filter(Boolean);
     if (given.length > 0) {
       out.error = `${given.join(' / ')} は comment サブコマンドでのみ使えます`;
@@ -1094,9 +1091,187 @@ function shortSha(sha) {
   return String(sha == null ? '' : sha).slice(0, 7);
 }
 
-// 起動場所にかかわらず、導入先のルートに状態を保存する。
+const stateDirectories = new Map();
+const stateWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
+
 function resolveStatePath(deps = {}) {
-  return path.join(resolveProjectRoot(deps), STATE_FILENAME);
+  const env = deps.env || process.env;
+  const override = deps.stateDir || env.CROSS_REVIEW_STATE_DIR;
+  if (override) return path.resolve(override, 'cross-review-state.json');
+  const projectRoot = path.resolve(resolveProjectRoot(deps));
+  if (!stateDirectories.has(projectRoot)) {
+    const run = deps.stateGitRun || ((args) => {
+      const result = spawnSync('git', args, { cwd: projectRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      return result.status === 0 ? result.stdout : null;
+    });
+    let directory = null;
+    for (const args of [['rev-parse', '--path-format=absolute', '--git-common-dir'], ['rev-parse', '--git-common-dir']]) {
+      try {
+        const out = run(args, { cwd: projectRoot });
+        if (out && !String(out).trim().startsWith('--')) {
+          directory = path.resolve(projectRoot, String(out).trim());
+          break;
+        }
+      } catch { /* git が使えなければ旧位置を使う。 */ }
+    }
+    stateDirectories.set(projectRoot, directory);
+  }
+  const directory = stateDirectories.get(projectRoot);
+  return directory ? path.join(directory, 'cross-review-state.json') : path.join(projectRoot, STATE_FILENAME);
+}
+
+function mergeStates(shared, legacy) {
+  const merged = normalizeState(shared);
+  for (const [branch, incoming] of Object.entries(normalizeState(legacy).branches)) {
+    const current = merged.branches[branch];
+    if (!current) {
+      merged.branches[branch] = incoming;
+      continue;
+    }
+    merged.branches[branch] = {
+      round: Math.max(current.round, incoming.round),
+      lastReviewedSha: incoming.round > current.round ? incoming.lastReviewedSha
+        : incoming.round === current.round ? current.lastReviewedSha || incoming.lastReviewedSha : current.lastReviewedSha,
+      dismissed: current.dismissed.concat(incoming.dismissed.filter((value, index, values) => !current.dismissed.includes(value) && values.indexOf(value) === index)),
+      lastTriage: !current.lastTriage || (incoming.lastTriage && incoming.lastTriage.round > current.lastTriage.round)
+        ? incoming.lastTriage : current.lastTriage,
+    };
+  }
+  return merged;
+}
+
+function warnLegacyState(deps) {
+  const legacy = path.resolve(resolveProjectRoot(deps), STATE_FILENAME);
+  if (legacy !== resolveStatePath(deps) && fs.existsSync(legacy)) {
+    (deps.warn || ((m) => process.stderr.write(m)))(`[cross-review] 未取り込みの旧ファイルがあります: ${legacy}\n`);
+  }
+}
+
+function waitForState(ms) {
+  Atomics.wait(stateWaitBuffer, 0, 0, ms);
+}
+
+function acquireStateLock(statePath, deps) {
+  const lock = `${statePath}.lock`;
+  const deadline = Date.now() + (deps.lockTimeoutMs ?? 5000);
+  while (true) {
+    let created = false;
+    // fd を開いたまま削除すると、Windows では名前が削除保留で残り、他の書き手の wx が失敗し続けるため、書いたらすぐ閉じる。
+    try {
+      const fd = fs.openSync(lock, 'wx');
+      created = true;
+      try {
+        fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, time: Date.now(), hostname: os.hostname() }));
+      } finally {
+        fs.closeSync(fd);
+      }
+      return () => fs.unlinkSync(lock);
+    } catch (err) {
+      if (created) {
+        fs.unlinkSync(lock);
+        throw err;
+      }
+      if (!['EEXIST', 'EPERM', 'EBUSY', 'EACCES'].includes(err.code)) throw err;
+    }
+    try {
+      if (Date.now() - fs.statSync(lock).mtimeMs > 30000) {
+        let abandoned = false;
+        try {
+          const owner = JSON.parse(fs.readFileSync(lock, 'utf8'));
+          if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0 || typeof owner.hostname !== 'string') {
+            abandoned = true;
+          } else if (owner.hostname === os.hostname()) {
+            try { process.kill(owner.pid, 0); } catch (err) { abandoned = err.code === 'ESRCH'; }
+          }
+        } catch { abandoned = true; }
+        if (abandoned) {
+          // 直接消すと、同時に放棄と判定した 2 つの書き手が順に取り直して二重に持つ。rename は 1 つだけが成功する。
+          const stale = `${lock}.stale-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+          fs.renameSync(lock, stale);
+          fs.unlinkSync(stale);
+          continue;
+        }
+      }
+    } catch { /* 他の書き手によるロックの移動も再試行する。 */ }
+    if (Date.now() >= deadline) throw new Error(`ロックを取得できません: ${lock}`);
+    waitForState(Math.min(50, deadline - Date.now()));
+  }
+}
+
+function replaceStateFile(state, statePath) {
+  const temporary = `${statePath}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  try {
+    const fd = fs.openSync(temporary, 'wx');
+    try {
+      fs.writeFileSync(fd, `${JSON.stringify(normalizeState(state), null, 2)}\n`, 'utf8');
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+    const deadline = Date.now() + 1000;
+    while (true) {
+      try { fs.renameSync(temporary, statePath); break; } catch (err) {
+        if (!['EPERM', 'EBUSY', 'EACCES'].includes(err.code) || Date.now() >= deadline) throw err;
+        waitForState(50);
+      }
+    }
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+}
+
+function updateState(transform, deps = {}) {
+  const warn = deps.warn || ((m) => process.stderr.write(m));
+  const statePath = resolveStatePath(deps);
+  let release;
+  try {
+    const injected = deps.readState || deps.writeState || deps.writeStateFile;
+    if (!injected) {
+      fs.mkdirSync(path.dirname(statePath), { recursive: true });
+      release = acquireStateLock(statePath, deps);
+      const legacy = path.resolve(resolveProjectRoot(deps), STATE_FILENAME);
+      if (legacy !== statePath && fs.existsSync(legacy)) {
+        let parsed;
+        try { parsed = parseStateText(fs.readFileSync(legacy, 'utf8')); } catch { parsed = { kind: 'invalid' }; }
+        const shared = readState(deps);
+        if (shared.corrupt) throw new Error(`状態ファイルを読めません: ${statePath}`);
+        if (parsed.kind !== 'ok') {
+          warn(`[cross-review] 旧ファイルを読めないため取り込みません: ${legacy}\n`);
+        } else {
+          const merged = mergeStates(shared.state, parsed.state);
+          if (JSON.stringify(shared.state) !== JSON.stringify(merged)) replaceStateFile(merged, statePath);
+          const imported = path.join(path.dirname(statePath), 'cross-review-state.imported');
+          const name = crypto.createHash('sha256').update(path.resolve(resolveProjectRoot(deps))).digest('hex').slice(0, 16);
+          try {
+            fs.mkdirSync(imported, { recursive: true });
+            fs.renameSync(legacy, path.join(imported, `${name}.json`));
+          } catch (err) { warn(`[cross-review] 取り込んだ旧ファイルを移せません: ${legacy} (${err.message})\n`); }
+        }
+      }
+    }
+    const loaded = (deps.readState || readState)(deps);
+    if (loaded.corrupt) throw new Error(`状態ファイルを読めません (JSON 不正): ${loaded.path}`);
+    const update = transform(loaded.state);
+    if (update.changed !== false) {
+      if (deps.writeState) {
+        if (deps.writeState(update.state, deps) === false) throw new Error('状態ファイルへ書けません');
+      } else if (deps.writeStateFile) {
+        deps.writeStateFile(statePath, `${JSON.stringify(normalizeState(update.state), null, 2)}\n`);
+      } else { replaceStateFile(update.state, statePath); }
+    }
+    return update;
+  } catch (err) {
+    if (deps.stateError) deps.stateError(err);
+    else warn(`[cross-review] 状態ファイルを書けません: ${statePath} (${err.message || 'write error'})\n`);
+    return false;
+  } finally {
+    if (release) {
+      try { release(); } catch (err) { warn(`[cross-review] ロックを削除できません: ${statePath}.lock (${err.message})\n`); }
+    }
+  }
+}
+
+function importLegacyState(deps) {
+  if (deps.readState || deps.writeState || deps.writeStateFile) return true;
+  return updateState((state) => ({ state, changed: false }), deps) !== false;
 }
 
 function resolveRoutingPath(deps = {}) {
@@ -1312,20 +1487,8 @@ function readState(deps = {}) {
   return { ...parsed, path: statePath, state: parsed.state || normalizeState(null), corrupt: parsed.kind === 'invalid' };
 }
 
-// 状態ファイルを書く。書けなくてもレビュー自体は続けたいので、失敗は警告 1 行で false を返す。
-// 書き込みの差し替えは deps.writeStateFile。deps.writeFile (GPT 側使用不能時の代替プロンプト) とは
-// 別の口にして、片方のテスト注入がもう片方を巻き込まないようにする。
 function writeState(state, deps = {}) {
-  const writeFile = deps.writeStateFile || ((p, body) => fs.writeFileSync(p, body, 'utf8'));
-  const warn = deps.warn || ((m) => process.stderr.write(m));
-  const statePath = resolveStatePath(deps);
-  try {
-    writeFile(statePath, `${JSON.stringify(normalizeState(state), null, 2)}\n`);
-    return true;
-  } catch (err) {
-    warn(`[cross-review] 状態ファイルを書けません: ${statePath} (${(err && err.message) || 'write error'})\n`);
-    return false;
-  }
+  return updateState(() => ({ state, changed: true }), deps) !== false;
 }
 
 // 現在のブランチ名。detached HEAD では git が 'HEAD' を返すので、それをそのままキーに使う。
@@ -2605,13 +2768,13 @@ function runReview(opts, deps = {}) {
   // 状態ファイル (往復回数 / 直前レビュー SHA / 非対応指摘 / 最後の結論) を読む。
   // --no-state、ブランチ名を取れない、ファイルが壊れているときは記録を使わず読み書きもしない。
   const readStateFn = deps.readState || readState;
-  const writeStateFn = deps.writeState || writeState;
   const branch = opts.noState ? null : currentBranchName(gitRun);
+  const importedState = !branch || importLegacyState(invDeps);
   const loadedState = branch ? readStateFn(invDeps) : null;
   if (loadedState && loadedState.corrupt) {
     writeErr(`[cross-review] 状態ファイルを読めません (JSON 不正)。無視して続行します: ${loadedState.path}\n`);
   }
-  const stateUsable = !!(loadedState && !loadedState.corrupt);
+  const stateUsable = !!(importedState && loadedState && !loadedState.corrupt);
   const branchState = stateUsable ? branchStateOf(loadedState.state, branch) : null;
   // レビュアーを起動する前の HEAD を控える。--fix は作業ツリーしか触らないので、
   // 起動前後で HEAD は変わらない。
@@ -2739,20 +2902,11 @@ function runReview(opts, deps = {}) {
     if (roundRecorded) return null;
     roundRecorded = true;
     if (!stateUsable) return null;
-    // 書き込む直前に状態を読み直す (read-modify-write)。レビュアーの実行中に別プロセスが
-    // dismiss や別ブランチのレビュー完了を書いていることがあり、起動前のスナップショットを
-    // 基に書くとその更新を消してしまうため。
-    const latest = readStateFn(invDeps);
-    if (latest.corrupt) {
-      // 壊れたファイルへ書き戻すと他の枝の記録まで消える。往復は記録せず警告に留める。
-      writeErr(`[cross-review] 状態ファイルを読めません (JSON 不正)。往復を記録しません: ${latest.path}\n`);
-      return null;
-    }
-    const updated = nextState(latest.state, { branch, sha: headSha, reviewer: opts.reviewer });
-    // 状態を書けなかったら往復番号が確定しないので、レビュー出力も保存しない
-    // (次回の実行で同じ番号のファイルを上書きしてしまうため)。
-    if (!writeStateFn(updated, invDeps)) return null;
-    return branchStateOf(updated, branch).round;
+    const recorded = updateState((state) => {
+      const updated = nextState(state, { branch, sha: headSha, reviewer: opts.reviewer });
+      return { state: updated, result: branchStateOf(updated, branch).round, changed: true };
+    }, { ...invDeps, stateError: (err) => writeErr(`[cross-review] 往復を記録しません: ${err.message}\n`) });
+    return recorded === false ? null : recorded.result;
   };
   // レビュー出力 (codex / claude) か、サブエージェントへ渡したプロンプト (subagent) を
   // `.cross-review/` へ保存する。往復番号が確定したときだけ保存し、失敗しても警告に留める。
@@ -2932,10 +3086,13 @@ function runStateCommand(opts, deps = {}) {
   const writeErr = deps.err || ((s) => process.stderr.write(s));
   const stateDeps = deps.warn ? deps : { ...deps, warn: writeErr };
   const readStateFn = deps.readState || readState;
-  const writeStateFn = deps.writeState || writeState;
   const branch = currentBranchName(gitRun);
   if (!branch) {
     writeErr('[cross-review] 現在のブランチ名を取得できません (git リポジトリの中で実行してください)。\n');
+    process.exitCode = 1;
+    return null;
+  }
+  if ((opts.mark || opts.reset) && !importLegacyState(stateDeps)) {
     process.exitCode = 1;
     return null;
   }
@@ -2947,15 +3104,14 @@ function runStateCommand(opts, deps = {}) {
     return null;
   }
   if (opts.mark) {
-    // 直前に読んだ状態へ 1 往復分の遷移を適用する。SHA を取れなければ nextState が
-    // lastReviewedSha を据え置くので、往復だけが進む。
-    // --uncommitted 付きなら SHA を据え置く (レビュー実行の --uncommitted と同じ規則。作業ツリー差分の
-    // レビューは「この SHA 以降の増分」の意味を持たず、HEAD まで進めると未レビューのコミットが
-    // 次回の既定差分から抜けるため)。
+    // 作業ツリー差分はコミット境界を表さないため、--uncommitted では SHA を据え置く。
     const headSha = opts.mode === 'uncommitted' ? null : currentHeadSha(gitRun);
-    const updated = nextState(loaded.state, { branch, sha: headSha });
-    // 書けていないのに「記録しました」とは言わない (失敗理由は writeState が警告済み)。
-    if (!writeStateFn(updated, stateDeps)) {
+    let updated;
+    const recorded = updateState((state) => {
+      updated = nextState(state, { branch, sha: headSha });
+      return { state: updated, changed: true };
+    }, stateDeps);
+    if (recorded === false) {
       process.exitCode = 1;
       return null;
     }
@@ -2964,14 +3120,14 @@ function runStateCommand(opts, deps = {}) {
     return null;
   }
   if (opts.reset) {
-    // 書けていないのに「消しました」とは言わない (失敗理由は writeState が警告済み)。
-    if (!writeStateFn(withoutBranch(loaded.state, branch), stateDeps)) {
+    if (updateState((state) => ({ state: withoutBranch(state, branch), changed: !!state.branches[branch] }), stateDeps) === false) {
       process.exitCode = 1;
       return null;
     }
     writeErr(`[cross-review] ${branch} の記録を消しました: ${loaded.path}\n`);
     return null;
   }
+  warnLegacyState(stateDeps);
   const current = branchStateOf(loaded.state, branch);
   writeOut(`${JSON.stringify({ branch, statePath: loaded.path, ...current }, null, 2)}\n`);
   return null;
@@ -2983,10 +3139,13 @@ function runDismissCommand(opts, deps = {}) {
   const writeErr = deps.err || ((s) => process.stderr.write(s));
   const stateDeps = deps.warn ? deps : { ...deps, warn: writeErr };
   const readStateFn = deps.readState || readState;
-  const writeStateFn = deps.writeState || writeState;
   const branch = currentBranchName(gitRun);
   if (!branch) {
     writeErr('[cross-review] 現在のブランチ名を取得できません (git リポジトリの中で実行してください)。\n');
+    process.exitCode = 1;
+    return null;
+  }
+  if (!importLegacyState(stateDeps)) {
     process.exitCode = 1;
     return null;
   }
@@ -2997,16 +3156,17 @@ function runDismissCommand(opts, deps = {}) {
     return null;
   }
   const text = String(opts.dismissText == null ? '' : opts.dismissText).trim();
-  const before = branchStateOf(loaded.state, branch).dismissed.length;
-  const updated = withDismissed(loaded.state, branch, text);
-  const after = branchStateOf(updated, branch).dismissed.length;
-  if (after === before) {
-    writeErr(`[cross-review] 同じ要約が既に記録されています (${branch}): ${text}\n`);
+  const recorded = updateState((state) => {
+    const updated = withDismissed(state, branch, text);
+    const changed = branchStateOf(updated, branch).dismissed.length !== branchStateOf(state, branch).dismissed.length;
+    return { state: updated, changed };
+  }, stateDeps);
+  if (recorded === false) {
+    process.exitCode = 1;
     return null;
   }
-  // 書けていないのに「記録しました」とは言わない (失敗理由は writeState が警告済み)。
-  if (!writeStateFn(updated, stateDeps)) {
-    process.exitCode = 1;
+  if (!recorded.changed) {
+    writeErr(`[cross-review] 同じ要約が既に記録されています (${branch}): ${text}\n`);
     return null;
   }
   writeErr(`[cross-review] 非対応と判断した指摘を記録しました (${branch}): ${text}\n`);
@@ -3133,7 +3293,6 @@ function runCommentCommand(opts, deps = {}) {
   const readFile = deps.readFile || ((p) => fs.readFileSync(p, 'utf8'));
   const writeReviewFile = deps.writeReviewFile || defaultReviewFileWriter;
   const readStateFn = deps.readState || readState;
-  const writeStateFn = deps.writeState || writeState;
   const round = opts.round;
   let branch;
   try {
@@ -3201,64 +3360,57 @@ function runCommentCommand(opts, deps = {}) {
       return fail(`[cross-review] ${branch} に追跡ファイルの未コミット変更があります。変更をコミットしてから実行し直してください。\n`);
     }
   }
-  if (opts.outcome != null) startHeadSha = safeGitValue(currentHeadSha);
+  const stateDeps = deps.warn ? deps : { ...deps, warn: writeErr };
+  const roundMismatch = (state) => !opts.allowRoundMismatch && branchStateOf(state, branch).round < round;
+  const mismatchMessage = () => `このブランチの ${round} 往復目のレビューの記録が状態ファイル (${resolveStatePath(stateDeps)}) にありません。レビューを実行した worktree か node tools/cross-review.js state で記録を確かめてから実行し直してください。意図した記録なら --allow-round-mismatch を付けてください。`;
+  let commentStatePath = resolveStatePath(stateDeps);
+  if (opts.outcome != null) {
+    startHeadSha = safeGitValue(currentHeadSha);
+    if (!importLegacyState(stateDeps)) return fail('[cross-review] 状態ファイルを取り込めないため結論を記録しません。\n');
+    let loaded;
+    try { loaded = readStateFn(stateDeps); } catch { loaded = null; }
+    if (loaded && loaded.path) commentStatePath = loaded.path;
+    if (loaded && !loaded.corrupt) {
+      if (roundMismatch(loaded.state)) return fail(`[cross-review] ${mismatchMessage()}\n`);
+      const reviewed = branchStateOf(loaded.state, branch).lastReviewedSha;
+      if (reviewed && startHeadSha && reviewed !== startHeadSha) {
+        writeErr(`[cross-review] 直前レビュー SHA ${shortSha(reviewed)} と HEAD ${shortSha(startHeadSha)} が異なります。\n`);
+      }
+    }
+  } else { warnLegacyState(stateDeps); }
   const recordTriage = (posted) => {
     if (opts.outcome == null) return true;
-    const stateDeps = deps.warn ? deps : { ...deps, warn: writeErr };
-    let loaded;
-    try {
-      loaded = readStateFn(stateDeps);
-    } catch (err) {
-      loaded = { path: resolveStatePath(stateDeps), corrupt: true, error: err };
-    }
-    const statePath = loaded && loaded.path ? loaded.path : resolveStatePath(stateDeps);
+    const statePath = commentStatePath;
     const context = posted ? `PR #${opts.postNumber} へ投稿しましたが` : '本文は生成しましたが';
-    if (!loaded || loaded.corrupt) {
-      writeErr(`[cross-review] ${context}結論は記録していません: 状態ファイルを読めません (${statePath})\n`);
-      process.exitCode = 1;
-      return false;
-    }
-    if (!startHeadSha) {
-      writeErr(`[cross-review] ${context}結論は記録していません: HEAD の SHA を取得できません (${statePath})\n`);
-      process.exitCode = 1;
-      return false;
-    }
-    // 投稿を待つあいだにコミットやブランチ切替があると、確かめていない SHA を結論に残すため。
-    if (safeGitValue(currentBranchName) !== branch || safeGitValue(currentHeadSha) !== startHeadSha) {
-      writeErr(`[cross-review] ${context}結論は記録していません: 実行中にブランチか HEAD が変わりました (${statePath})\n`);
+    const recordedUpdate = updateState((state) => {
+      if (roundMismatch(state)) throw new Error(mismatchMessage());
+      if (!startHeadSha) {
+        throw new Error(`HEAD の SHA を取得できません (${statePath})`);
+      }
+      // 投稿を待つあいだにコミットやブランチ切替があると、確かめていない SHA を結論に残すため。
+      if (safeGitValue(currentBranchName) !== branch || safeGitValue(currentHeadSha) !== startHeadSha) {
+        throw new Error(`実行中にブランチか HEAD が変わりました (${statePath})`);
+      }
+      const recorded = branchStateOf(state, branch).lastTriage;
+      if (recorded && round < recorded.round) {
+        throw new Error(`${recorded.round} 往復目の結論が既にあります (${statePath})`);
+      }
+      if (opts.outcome === 'converged' && !opts.allowDirty) {
+        const status = trackedStatus();
+        const reason = status == null
+          ? 'git status を取得できません'
+          : String(status).trim() ? '追跡ファイルに未コミット変更があります' : null;
+        if (reason) {
+          throw new Error(reason);
+        }
+      }
+      return { state: withTriage(state, branch, { round, sha: startHeadSha, outcome: opts.outcome }), changed: true };
+    }, { ...stateDeps, stateError: (err) => writeErr(`[cross-review] ${context}結論は記録していません: ${err.message} (${statePath})\n`) });
+    if (recordedUpdate === false) {
       process.exitCode = 1;
       return false;
     }
     const headSha = startHeadSha;
-    const recorded = branchStateOf(loaded.state, branch).lastTriage;
-    if (recorded && round < recorded.round) {
-      writeErr(`[cross-review] ${context}結論は記録していません: ${recorded.round} 往復目の結論が既にあります (${statePath})\n`);
-      process.exitCode = 1;
-      return false;
-    }
-    if (opts.outcome === 'converged' && !opts.allowDirty) {
-      const status = trackedStatus();
-      const reason = status == null
-        ? 'git status を取得できません'
-        : String(status).trim() ? '追跡ファイルに未コミット変更があります' : null;
-      if (reason) {
-        writeErr(`[cross-review] ${context}結論は記録していません: ${reason}\n`);
-        process.exitCode = 1;
-        return false;
-      }
-    }
-    const updated = withTriage(loaded.state, branch, { round, sha: headSha, outcome: opts.outcome });
-    try {
-      if (writeStateFn(updated, stateDeps) === false) {
-        writeErr(`[cross-review] ${context}結論は記録していません: 状態ファイルへ書けません (${statePath})\n`);
-        process.exitCode = 1;
-        return false;
-      }
-    } catch {
-      writeErr(`[cross-review] ${context}結論は記録していません: 状態ファイルへ書けません (${statePath})\n`);
-      process.exitCode = 1;
-      return false;
-    }
     if (opts.outcome === 'converged' && opts.allowDirty) {
       const status = trackedStatus();
       if (status != null && String(status).trim()) {
@@ -3600,6 +3752,8 @@ module.exports = {
   withTriage,
   withoutBranch,
   readState,
+  mergeStates,
+  updateState,
   writeState,
   currentBranchName,
   currentHeadSha,

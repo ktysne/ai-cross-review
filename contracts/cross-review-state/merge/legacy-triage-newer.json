@@ -1,0 +1,45 @@
+{
+  "description": "旧側の新しい結論を残し小さい往復の SHA は採らない",
+  "shared": {
+    "branches": {
+      "x": {
+        "round": 4,
+        "lastReviewedSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "dismissed": [],
+        "lastTriage": {
+          "round": 1,
+          "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "outcome": "fixing"
+        }
+      }
+    }
+  },
+  "legacy": {
+    "branches": {
+      "x": {
+        "round": 1,
+        "lastReviewedSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "dismissed": [],
+        "lastTriage": {
+          "round": 3,
+          "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "outcome": "converged"
+        }
+      }
+    }
+  },
+  "expected": {
+    "branches": {
+      "x": {
+        "round": 4,
+        "lastReviewedSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "dismissed": [],
+        "lastTriage": {
+          "round": 3,
+          "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "outcome": "converged"
+        }
+      }
+    }
+  }
+}

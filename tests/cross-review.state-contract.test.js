@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { parseStateText, normalizeState, nextState, withTriage, withDismissed, withoutBranch, writeState } = require('../tools/cross-review.js');
+const { mergeStates, parseStateText, normalizeState, nextState, withTriage, withDismissed, withoutBranch, writeState } = require('../tools/cross-review.js');
 const fixtures = new URL('../contracts/cross-review-state/', import.meta.url);
 const sha = 'a'.repeat(40);
 
@@ -40,6 +40,17 @@ describe('状態ファイルの書き手契約', () => {
       })).toBe(true);
       expect(written).toEqual(fs.readFileSync(new URL(`writer/${name}`, fixtures)));
       expect(parseStateText(written.toString('utf8'))).toEqual({ kind: 'ok', state: steps(), issues: [] });
+    });
+  }
+});
+
+describe('状態ファイルの統合契約', () => {
+  for (const name of fs.readdirSync(new URL('merge/', fixtures)).filter((name) => name.endsWith('.json')).sort()) {
+    const fixture = JSON.parse(fs.readFileSync(new URL(`merge/${name}`, fixtures), 'utf8'));
+    it(`${name}: ${fixture.description}`, () => {
+      const merged = mergeStates(fixture.shared, fixture.legacy);
+      expect(merged).toEqual(fixture.expected);
+      expect(mergeStates(merged, fixture.legacy)).toEqual(merged);
     });
   }
 });

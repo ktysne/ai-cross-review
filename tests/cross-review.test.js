@@ -2020,8 +2020,9 @@ describe('cross-review 状態ファイルの純粋関数', () => {
 });
 
 describe('cross-review readState / writeState', () => {
-  const statePath = path.join('/repo', STATE_FILENAME);
+  const statePath = path.resolve('/repo', STATE_FILENAME);
   const deps = (files) => ({
+    env: {},
     scriptDir: path.join('/repo', 'tools'),
     exists: (p) => Object.prototype.hasOwnProperty.call(files, p),
     readFile: (p) => files[p],
@@ -2081,7 +2082,8 @@ describe('cross-review readState / writeState', () => {
   it('writeState は正規化した JSON を書き、失敗しても例外を投げず警告する', () => {
     const written = {};
     const ok = writeState({ branches: { x: { round: 1, lastReviewedSha: null, dismissed: [] } } }, {
-      scriptDir: path.join('/repo', 'tools'),
+      env: {},
+    scriptDir: path.join('/repo', 'tools'),
       writeStateFile: (p, body) => { written[p] = body; },
     });
     expect(ok).toBe(true);
@@ -2089,7 +2091,8 @@ describe('cross-review readState / writeState', () => {
 
     let warned = '';
     const ng = writeState({ branches: {} }, {
-      scriptDir: path.join('/repo', 'tools'),
+      env: {},
+    scriptDir: path.join('/repo', 'tools'),
       writeStateFile: () => { throw new Error('EACCES'); },
       warn: (s) => { warned += s; },
     });
@@ -4024,7 +4027,7 @@ describe('cross-review レビュー出力の保存 (.cross-review/)', () => {
     const readdir = (targetDir) => Object.keys(mem.store.files)
       .filter((filePath) => path.dirname(filePath) === targetDir)
       .map((filePath) => path.basename(filePath));
-    const commentPath = runCommentCommand({ round: 3, outcome: 'converged' }, {
+    const commentPath = runCommentCommand({ allowRoundMismatch: true, round: 3, outcome: 'converged' }, {
       ...mem,
       scriptDir,
       gitRun: (args) => {
@@ -4173,7 +4176,7 @@ describe('cross-review レビュー出力の保存 (.cross-review/)', () => {
 
     files[path.join(dir, roundFileNames(1, 'triage').triage)] = '対応内容';
     let err = '';
-    runCommentCommand({ round: 1, outcome: 'fixing' }, {
+    runCommentCommand({ allowRoundMismatch: true, round: 1, outcome: 'fixing' }, {
       scriptDir,
       env: {},
       gitRun: (args) => {
@@ -4434,7 +4437,7 @@ describe('cross-review comment サブコマンド', () => {
       writeState: (state) => { events.push('state'); writes.push(state); return true; },
     });
     process.exitCode = 0;
-    expect(runCommentCommand({ round: 4, postNumber: 42, outcome: 'converged' }, deps)).toBe(at(round4.comment));
+    expect(runCommentCommand({ allowRoundMismatch: true, round: 4, postNumber: 42, outcome: 'converged' }, deps)).toBe(at(round4.comment));
     expect(events).toEqual(['body', 'post', 'state']);
     expect(written[at(round4.comment)]).toContain('## クロスレビュー 4 往復目');
     expect(writes).toHaveLength(1);
@@ -4492,7 +4495,7 @@ describe('cross-review comment サブコマンド', () => {
       writeState: () => true,
     });
     process.exitCode = 0;
-    runCommentCommand({ round: 1, outcome: 'fixing' }, recorded.deps);
+    runCommentCommand({ allowRoundMismatch: true, round: 1, outcome: 'fixing' }, recorded.deps);
     expect(recorded.logs.err).toContain('結論を記録しました');
     expect(recorded.logs.err).not.toContain('記録していません');
 
@@ -4518,7 +4521,7 @@ describe('cross-review comment サブコマンド', () => {
       writeState: () => { writes += 1; return true; },
     });
     process.exitCode = 0;
-    expect(runCommentCommand({ round: 1, postNumber: 42, outcome: 'converged' }, deps)).toBeNull();
+    expect(runCommentCommand({ allowRoundMismatch: true, round: 1, postNumber: 42, outcome: 'converged' }, deps)).toBeNull();
     expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
     expect(files[at(names.comment)]).toBe(written[at(names.comment)]);
     expect(writes).toBe(0);
@@ -4545,7 +4548,7 @@ describe('cross-review comment サブコマンド', () => {
       writeState: () => { writes += 1; return true; },
     });
     process.exitCode = 0;
-    expect(runCommentCommand({ round: 1, outcome: 'fixing' }, deps)).toBeNull();
+    expect(runCommentCommand({ allowRoundMismatch: true, round: 1, outcome: 'fixing' }, deps)).toBeNull();
     expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
     expect(writes).toBe(0);
     expect(logs.err).toContain('2 往復目の結論が既にあります');
@@ -4567,7 +4570,7 @@ describe('cross-review comment サブコマンド', () => {
       writeState: () => { writes += 1; return true; },
     });
     process.exitCode = 0;
-    expect(runCommentCommand({ round: 1, outcome: 'halted' }, deps)).toBeNull();
+    expect(runCommentCommand({ allowRoundMismatch: true, round: 1, outcome: 'halted' }, deps)).toBeNull();
     expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
     expect(files[at(names.comment)]).toBe(written[at(names.comment)]);
     expect(writes).toBe(0);
@@ -4586,7 +4589,7 @@ describe('cross-review comment サブコマンド', () => {
       writeState: () => false,
     });
     process.exitCode = 0;
-    expect(runCommentCommand({ round: 1, outcome: 'fixing' }, deps)).toBeNull();
+    expect(runCommentCommand({ allowRoundMismatch: true, round: 1, outcome: 'fixing' }, deps)).toBeNull();
     expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
     expect(files[at(names.comment)]).toBe(written[at(names.comment)]);
     expect(logs.err).toContain('本文は生成しましたが結論は記録していません');
@@ -4603,7 +4606,7 @@ describe('cross-review comment サブコマンド', () => {
       readState: () => ({ path: '/repo/.cross-review-state.json', state: { branches: {} }, corrupt: true }),
     });
     process.exitCode = 0;
-    expect(runCommentCommand({ round: 1, postNumber: 42, outcome: 'halted' }, deps)).toBeNull();
+    expect(runCommentCommand({ allowRoundMismatch: true, round: 1, postNumber: 42, outcome: 'halted' }, deps)).toBeNull();
     expect(posts).toBe(1);
     expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
     expect(files[at(names.comment)]).toBe(written[at(names.comment)]);
@@ -4634,7 +4637,7 @@ describe('cross-review comment サブコマンド', () => {
       ghRun: () => { posts += 1; return { status: 0, stdout: '', stderr: '' }; },
     });
     process.exitCode = 0;
-    expect(runCommentCommand({ round: 1, outcome: 'converged', postNumber: 42, outPath: 'custom-comment.md' }, deps)).toBeNull();
+    expect(runCommentCommand({ allowRoundMismatch: true, round: 1, outcome: 'converged', postNumber: 42, outPath: 'custom-comment.md' }, deps)).toBeNull();
     const statusCall = gitCalls.find(({ args }) => args[0] === 'status');
     expect(statusCall).toEqual({
       args: ['status', '--porcelain', '--untracked-files=no'], options: { allowFailure: true },
@@ -4675,7 +4678,7 @@ describe('cross-review comment サブコマンド', () => {
       ghRun: () => { posts += 1; return { status: 0, stdout: '', stderr: '' }; },
     });
     process.exitCode = 0;
-    expect(runCommentCommand({ round: 1, outcome: 'converged', postNumber: 42, outPath: 'custom-comment.md' }, deps)).toBeNull();
+    expect(runCommentCommand({ allowRoundMismatch: true, round: 1, outcome: 'converged', postNumber: 42, outPath: 'custom-comment.md' }, deps)).toBeNull();
     expect(written).toEqual({});
     expect(files['custom-comment.md']).toBe('KEEP');
     expect(stateReads).toBe(0);
@@ -4706,7 +4709,7 @@ describe('cross-review comment サブコマンド', () => {
       ghRun: () => { posts += 1; return { status: 0, stdout: '', stderr: '' }; },
     });
     process.exitCode = 0;
-    expect(runCommentCommand({ round: 1, outcome: 'converged', postNumber: 42 }, deps)).toBeNull();
+    expect(runCommentCommand({ allowRoundMismatch: true, round: 1, outcome: 'converged', postNumber: 42 }, deps)).toBeNull();
     expect(posts).toBe(1);
     expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
     expect(stateWrites).toBe(0);
@@ -4731,7 +4734,7 @@ describe('cross-review comment サブコマンド', () => {
       writeState: (state) => { writes.push(state); return true; },
     });
     process.exitCode = 0;
-    runCommentCommand({ round: 1, outcome: 'converged', allowDirty: true }, deps);
+    runCommentCommand({ allowRoundMismatch: true, round: 1, outcome: 'converged', allowDirty: true }, deps);
     expect(writes).toHaveLength(1);
     expect(writes[0].branches[branch].lastTriage).toEqual({ round: 1, sha, outcome: 'converged' });
     expect(logs.err).toContain('未コミット変更があります');
@@ -4755,7 +4758,7 @@ describe('cross-review comment サブコマンド', () => {
       writeState: (state) => { writes.push(state); return true; },
     });
     process.exitCode = 0;
-    runCommentCommand({ round: 1, outcome: 'fixing' }, deps);
+    runCommentCommand({ allowRoundMismatch: true, round: 1, outcome: 'fixing' }, deps);
     expect(statusCalls).toBe(0);
     expect(writes).toHaveLength(1);
     expect(writes[0].branches[branch].lastTriage).toEqual({ round: 1, sha, outcome: 'fixing' });
@@ -4862,8 +4865,8 @@ describe('cross-review comment サブコマンド', () => {
       writeState: () => { writes += 1; return true; },
     });
     process.exitCode = 0;
-    runCommentCommand({ round: 1, outcome: 'fixing' }, deps);
-    expect(reads).toBe(0);
+    runCommentCommand({ allowRoundMismatch: true, round: 1, outcome: 'fixing' }, deps);
+    expect(reads).toBe(1);
     expect(writes).toBe(0);
     process.exitCode = 0;
   });
@@ -4992,12 +4995,12 @@ describe('cross-review comment サブコマンド', () => {
       writeState: () => { stateWrites += 1; return true; },
     });
     process.exitCode = 0;
-    expect(runCommentCommand({ round: 1, postNumber: 42, outcome: 'fixing' }, deps)).toBeNull();
+    expect(runCommentCommand({ allowRoundMismatch: true, round: 1, postNumber: 42, outcome: 'fixing' }, deps)).toBeNull();
     expect(written[at(names.comment)]).toContain('## クロスレビュー 1 往復目');
     expect(remaining[at(names.comment)]).toBeUndefined();
     expect(removed).toEqual([at(names.comment), at(names.comment)]);
     expect(logs.err).toContain('post failed');
-    expect(stateReads).toBe(0);
+    expect(stateReads).toBe(1);
     expect(stateWrites).toBe(0);
     expect(process.exitCode).toBe(1);
     process.exitCode = 0;
