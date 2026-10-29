@@ -8,7 +8,8 @@ agent-cockpit 側の #717 から #720 は別のセッションが並行して対
 
 ## 現在地と次にやること
 
-- B1(#106)を実装中である。
+- B1(#106)は PR #109 で、Codex のクロスレビューが 2 往復目で収束した(c33107a)。マージ待ちである。
+- B2(#108)を実装中である。
 - 導入先への同期(`cross-review.sync-all.js` など)は、この計画では行わない。
 - PR のマージは開発者が判断する。セッションはマージしない。
 
@@ -28,14 +29,18 @@ agent-cockpit 側の #717 から #720 は別のセッションが並行して対
 
 | 順 | Issue | 主な変更先 | ブランチ | PR | base | 状態 |
 |---|---|---|---|---|---|---|
-| B1 | #106 | `tools/cross-review.js`(状態の置き場、ロック、記録時の検査)、`docs/contracts/cross-review-state.md`、`docs/migrations/` | `feat/shared-review-state` | 未作成 | main | 実装中(2026-10-30) |
-| B2 | #108 | `tools/cross-review.js`(`buildRoundComment`、`buildMetaSummary`)、契約 | 未作成 | 未作成 | B1 | 未着手 |
+| B1 | #106 | `tools/cross-review.js`(状態の置き場、ロック、記録時の検査)、`docs/contracts/cross-review-state.md`、`docs/migrations/` | `feat/shared-review-state` | #109 | main | 収束、マージ待ち(2026-10-30) |
+| B2 | #108 | `tools/cross-review.js`(`buildRoundComment`、`buildMetaSummary`)、契約 | `feat/round-comment-head` | 未作成 | B1 | 実装中(2026-10-30) |
 | B3 | #107 | `tools/cross-review.js`(`resolveBaseSelection`)、`.claude/skills/cross-review/SKILL.md`、`docs/cross-review.md` | 未作成 | 未作成 | B2 | 未着手 |
 
 ## 判断待ちと受け渡し
 
-- B1 で決めた共有の状態ファイルの置き場とロックの方式は、2026-10-30 に管理セッションへ知らせた(PR 番号は作成後に知らせる)。agent-cockpit#717 がこれを読む。
-- B3 の SKILL の手順「競合が無いときは何も記録しなくてよい」は、agent-cockpit#718 の判定が Issue の通りに入ることを前提にする。変更があれば管理セッションから知らせが来る。
+- B1 で決めた共有の状態ファイルの置き場とロックの方式と、PR #109 の番号は、2026-10-30 に管理セッションへ知らせた。agent-cockpit#717 がこれを読む。
+- B3 の SKILL の手順の前提の agent-cockpit#718 は、ktysne/agent-cockpit#722 で Issue のとおりにマージされた(2026-10-29T18:36Z、管理セッションから連絡)。手順に書く振る舞いは次のとおりである。
+  - 競合の無い base の取り込みは記録が要らない。札は「収束 <C> の後に base を取り込み(競合なし)」で、マージの条件を満たす。
+  - 競合を解いた取り込みは、札が「競合の解消の確認待ち」になり、解消の差分だけのレビューか `cockpit_skip_review` を求める。解消のレビューで今の head の収束を記録すれば、通常の収束になる。
+  - merge でないコミットや base 以外からの merge があるとき、分類できないときは「収束の後に変更あり」のままである。
+  - 「収束後マージ」の予約は収束を記録した head の SHA で照合するので、競合の無い取り込みの後の head では動かない。開発者が手でマージする。手順に一言添える。
 
 ## 落とし穴
 

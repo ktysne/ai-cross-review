@@ -1338,7 +1338,13 @@ function emptyBranchState() {
   return { round: 0, lastReviewedSha: null, dismissed: [], lastTriage: null };
 }
 
-const TRIAGE_OUTCOMES = new Set(['fixing', 'converged', 'halted']);
+// 判断の結論の値と PR コメントの表示の対応。値の集合はここから作り、状態ファイルと --outcome の検査で共有する。
+const TRIAGE_OUTCOME_LABELS = {
+  fixing: '指摘の対応中',
+  converged: '収束',
+  halted: '開発者の判断待ち',
+};
+const TRIAGE_OUTCOMES = new Set(Object.keys(TRIAGE_OUTCOME_LABELS));
 
 function stateIssue(issues, path, code, value) {
   if (value !== undefined) issues.push({ path, code });
@@ -2009,7 +2015,14 @@ function fenceFor(text) {
 // メタ情報 (round-<N>-<reviewer>.json) を PR コメント冒頭の 1 行にまとめる純粋関数。
 // runCommentCommand は入力の欠落や JSON 不正を先に失敗扱いにするが、既存の呼び出し元が
 // この純粋関数だけを使う場合は、欠落した項目を「不明」として安全に表示する。
-function buildMetaSummary(meta) {
+function buildMetaSummary(meta, triageRecord = null) {
+  const route = buildMetaRouteSummary(meta);
+  if (!triageRecord) return route;
+  const label = TRIAGE_OUTCOME_LABELS[triageRecord.outcome];
+  return `${route} / head: ${shortSha(triageRecord.sha)} / 結論: ${label} (${triageRecord.outcome})`;
+}
+
+function buildMetaRouteSummary(meta) {
   if (!meta || typeof meta !== 'object') {
     return '実行経路: 不明 / base: 不明 / 差分サイズ: 不明 (メタ情報が読めませんでした)';
   }
@@ -2024,18 +2037,18 @@ function buildMetaSummary(meta) {
   return `実行経路: ${via} / ${scope} / 差分サイズ: ${size}`;
 }
 
-// 1 往復分の PR コメント本文を組み立てる純粋関数 (I/O は持たない)。
-//   - round / reviewer: 見出しに使う往復番号とレビュアー。
-//   - meta:    round-<N>-<reviewer>.json の内容 (無ければ null)。
-//   - triage:  判断ファイルの本文 (無ければ null。指摘の節は空にして、その旨を書く)。
-//   - verify:  検証コマンドの出力 (無ければ節ごと省く)。長ければ末尾 VERIFY_TAIL_LINES 行に切る。
-// 見出しは運用で使ってきた「## クロスレビュー N 往復目: <レビュアー> の指摘と対応」に合わせる。
-function buildRoundComment({ round, reviewer, meta, triage, verify } = {}) {
+// 1 往復分の PR コメント本文を組み立てる純粋関数 (I/O は持たない)。引数と本文の構成は
+// docs/cross-review.md の「PR コメント本文を生成する」節が正本。
+// triageRecord ({ sha, outcome }) は結論を記録する往復だけ渡す。sha は状態ファイルの lastTriage.sha と同じ値にする。
+function buildRoundComment({ round, reviewer, meta, triage, verify, triageRecord = null } = {}) {
+  if (triageRecord && !TRIAGE_OUTCOMES.has(triageRecord.outcome)) {
+    throw new Error(`結論の値が不正です: ${triageRecord.outcome}`);
+  }
   const routeOverride = meta && meta.routeOverride;
   const parts = [
     `## クロスレビュー ${round} 往復目: ${reviewerDisplayName(reviewer)} の指摘と対応`,
     '',
-    buildMetaSummary(meta),
+    buildMetaSummary(meta, triageRecord),
   ];
   if (routeOverride) {
     const reason = String(routeOverride.reason).replace(/[\r\n]+/g, ' ');
@@ -2058,6 +2071,9 @@ function buildRoundComment({ round, reviewer, meta, triage, verify } = {}) {
     }
     const fence = fenceFor(verifyBody);
     parts.push(`${fence}text`, shown.join('\n'), fence, '');
+  }
+  if (triageRecord) {
+    parts.push(`<!-- cross-review round=${round} sha=${triageRecord.sha} outcome=${triageRecord.outcome} -->`);
   }
   return `${parts.join('\n')}\n`;
 }
@@ -3528,9 +3544,13 @@ function runCommentCommand(opts, deps = {}) {
     }
   }
 
+  // 本文の head と結論は状態ファイルへ記録する値と同じにする。HEAD を取れなければ本文にも出さない。
+  const triageRecord = opts.outcome != null && startHeadSha
+    ? { sha: startHeadSha, outcome: opts.outcome }
+    : null;
   let body;
   try {
-    body = buildRoundComment({ round, reviewer, meta, triage, verify });
+    body = buildRoundComment({ round, reviewer, meta, triage, verify, triageRecord });
   } catch (err) {
     return fail(`[cross-review] PR コメント本文を生成できません: ${outPath} (${(err && err.message) || 'build error'})\n`);
   }
