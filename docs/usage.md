@@ -61,6 +61,7 @@ node tools/cross-review.js codex --fix --uncommitted --instructions ../review-no
 |------------|------|
 | `--fix` | 修正まで依頼する（`codex` は `-s workspace-write` で直接修正 / `subagent` は FIX 指示付きでプロンプト出力。`claude` CLI 経路は非対応） |
 | `--uncommitted` | 未コミットの作業ツリー差分（tracked + untracked）をレビュー |
+| `--merge-resolution` | 前回レビュー以降のコミットが base を取り込む merge だけのとき、各 merge の競合の解消の差分（`git show --remerge-diff`）だけをレビューする。条件に合わなければ通常のレビューを案内して終了コード 1 で止まり、競合が無ければ往復を数えずに終わる。`--uncommitted` / `--base` / `--no-state` とは併用できない（git 2.36 以上。詳細は [cross-review.md](cross-review.md)「収束の後に base を取り込んだとき」） |
 | `--base <ref>` | 比較先のブランチまたはコミットを指定（既定：未指定なら 前回レビュー SHA → PR の base → `origin/main` → ローカル `main` の順に解決） |
 | `--max-diff-kb <n>` | レビュー差分サイズの上限（KB）。超過時はファイル要約の閾値を段階的に下げて縮退を試み、収まらなければ起動せず中断（既定 256、`0` で無効。環境変数 `CROSS_REVIEW_MAX_DIFF_KB` でも指定可） |
 | `--max-file-diff-kb <n>` | ファイル単位の差分がこの KB を超えたら本文を stat 要約に置換（既定 64、`0` で無効。環境変数 `CROSS_REVIEW_MAX_FILE_DIFF_KB` でも指定可） |

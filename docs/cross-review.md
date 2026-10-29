@@ -327,6 +327,7 @@ Claude と Codex の単発レビューでは、子プロセスに `AGENT_COCKPIT
   codex v0.137.0 で `--uncommitted` / `--base` が `[PROMPT]` と併用できなくなり、観点チェックリストを同時に渡せなくなったため、汎用の `exec` と差分の埋め込みに統一しました。  
 - 差分の対象範囲：
   - 既定：`git diff <base>...HEAD`（ブランチ vs base）。**既定の base は「前回レビュー SHA → PR の base → `origin/main` → ローカル `main`」の順に解決**します（後述「既定 base の解決と差分サイズのガード」）。
+  - `--merge-resolution`：前回レビュー以降が base を取り込む merge だけのとき、各 merge の `git show --remerge-diff` をつないだ競合の解消の差分（後述「収束の後に base を取り込んだとき」）。
   - `--uncommitted`：tracked（`git diff HEAD`）＋ untracked
     （`git ls-files --others --exclude-standard -z` の各ファイルを `git diff --no-index` で新規ファイル差分にする。`-z`（NUL 区切り）で空白入りパスでも壊れない）
 - 申し送り（`--instructions <path>`）：レビュアー個別の重点指摘を**観点とは別系統**で足します（`REVIEWER_NOTES_HEADER` の見出し付きでプロンプトに追加。`.cross-review.md` は置き換えない）。  
@@ -506,6 +507,46 @@ node tools/cross-review.js dismiss "運用上到達しない入力への指摘" 
 環境変数 **`CROSS_REVIEW_NO_FETCH=1`** で fetch と `gh` の呼び出しを省けます（オフライン作業でタイムアウトを待たされないため）。
 
 **stale なローカル `main` の落とし穴**：ローカル `main` が古いと merge-base が過去にずれ、HEAD が既に取り込んだ `main` 側のコミットまで `git diff main...HEAD` に混入します（実例：89 コミット、792KB に肥大。`git fetch origin main` + `--base origin/main` で 65KB に正常化）。上の優先解決はこれを自動で避けるための既定挙動です。
+
+### 収束の後に base を取り込んだとき（`--merge-resolution`）
+
+収束を記録した後に base（PR の base ブランチ）を取り込む merge を足すと、既定 base の解決（`lastReviewedSha`）では、取り込んだ base 側の変更がすべて次の往復の差分に入ります。  
+取り込みで新しく入る判断は、競合を解いた部分だけです。base 側の変更は、それぞれの PR でレビューを経ています。  
+`--merge-resolution` は、その解消の差分だけをレビューに送ります。
+
+```bash
+npm run review:codex -- --merge-resolution
+node tools/cross-review.js subagent --merge-resolution
+```
+
+**使える条件**
+
+- 状態ファイルのそのブランチに `lastReviewedSha` があること。
+- HEAD から第 1 親をたどって `lastReviewedSha` にちょうど着き、その間のコミットがすべて merge であること。
+- 各 merge の第 2 親以降が、PR の base から到達できること（`git merge-base --is-ancestor <第 2 親> <base>`）。base は既定 base の解決の「PR の base → `origin/main` → ローカル `main`」と同じ順で決めます（`lastReviewedSha` の段は使いません）。
+- git が `git show --remerge-diff` に対応していること（git 2.36 以上）。
+
+条件に合わないときは、理由と「通常のレビュー（`--merge-resolution` を外して実行）」の案内を stderr に出し、終了コード 1 で止まります。  
+`--uncommitted`、`--base`、`--no-state` とは併用できません。
+
+**差分と記録**
+
+- 鎖の各 merge について `git show --remerge-diff` を古い順に取り、つなげて 1 つの差分にします。差分ガード、除外の規則、差分サイズの表示は通常のレビューと同じです。
+- どの merge にも競合の解消が無いときは、「競合の解消は無いので、レビューは不要」と出し、往復を数えず、状態ファイルも変えずに終了コード 0 で終わります。
+- 解消の差分のレビューは通常と同じく 1 往復として数え、`lastReviewedSha` を HEAD にします。これで `comment --outcome converged` を今の HEAD の結論として記録できます。
+- メタ情報（`round-<N>-<reviewer>.json`）に `mergeResolution.merges`（対象の merge の SHA、古い順）を残し、`base.source` は `merge-resolution` になります。
+- PR コメントの見出しは「クロスレビュー N 往復目(競合の解消のレビュー): …」、要約行の base の部分は「対象: 競合の解消の差分 (merge <短縮 SHA> ほか)」になります。
+- `--merge-resolution` なしで、既定 base が前回レビュー SHA になった実行が上の条件に合う head だったときは、stderr に `--merge-resolution` を使える旨を 1 行出します（通常のレビューはそのまま続きます。判定に失敗したときは黙って無視します）。
+
+**収束の後の扱い**
+
+| 状況 | 扱い |
+|---|---|
+| 競合が無い取り込み | 何も記録しなくてよい。agent-cockpit は取り込みだけの head を収束の引き継ぎとして扱い、札は「収束 `<C>` の後に base を取り込み(競合なし)」でマージの条件を満たす（agent-cockpit#718）。ただし「収束後マージ」の予約は収束を記録した head の SHA で照合するので、取り込みの後の head では予約マージは動かず、開発者が手でマージする。agent-cockpit を使わないときは、PR のコメントに取り込みを記録する |
+| 競合を解いた取り込み | `--merge-resolution` で解消の差分をレビューし、`comment --outcome` で結論を記録する。agent-cockpit の札は「競合の解消の確認待ち」になり、今の head の収束を記録すれば通常の収束になる。レビューを省くなら `cockpit_skip_review` を記録する |
+| merge でないコミットを足した / base 以外から取り込んだ | `--merge-resolution` を付けず、通常のレビューを回す |
+
+`--base` に取り込んだ main の SHA を渡す回避策は使いません。merge の解き方が差分に正しく現れないためです。
 
 ### 差分サイズの表示とガード（超過時は段階的に縮退する）
 
@@ -1197,7 +1238,7 @@ JSON を付けない照会でも同じ判定と終了コードを使い、導入
 |---|---|---|
 | `round-<N>-<reviewer>.md` | CLI（`codex` / `claude`）<br>主セッション（`subagent`） | レビュアーの出力全文。`subagent` 経路はサブエージェントの出力を**任意で貼っておくと記録として残せます（`comment` は読みません）** |
 | `round-<N>-<reviewer>-prompt.md` | CLI（`subagent` のみ） | サブエージェントへ渡したプロンプト |
-| `round-<N>-<reviewer>.json` | CLI | 実行経路（bridge 経由 / 直接起動 / subagent）、base とその解決方法、差分サイズ、`HEAD` |
+| `round-<N>-<reviewer>.json` | CLI | 実行経路（bridge 経由 / 直接起動 / subagent）、base とその解決方法、差分サイズ、`HEAD`。競合の解消のレビューなら対象の merge の SHA（`mergeResolution.merges`） |
 | `round-<N>-triage.md` | 主セッション | 指摘ごとの裏取りと対応（判断ファイル。後述） |
 | `round-<N>-comment.md` | CLI（`comment`） | 生成した PR コメント本文 |
 
