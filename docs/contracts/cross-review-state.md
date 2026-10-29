@@ -171,6 +171,30 @@ agent-cockpit のように、CLI の正規化より厳しい読み取り方針�
 `lastReviewedSha` が PR の head と異なる記録や、すでに base に入った古い記録かどうかの判定も読み手の責任です。
 書き手の正規化は head や base を参照せず、`lastReviewedSha` の前後の空白を除く以外に SHA の値を変えません。
 
+## PR コメントの結論の注記
+
+`comment --round <N> --outcome <値>` で作る PR コメント本文の末尾には、次の形の HTML コメントを 1 行だけ置きます。
+
+```text
+<!-- cross-review round=<N> sha=<完全な SHA> outcome=<値> -->
+```
+
+- `round` は往復番号です。
+- `sha` は結論を記録した HEAD で、状態ファイルの `lastTriage.sha` と同じ値です。40 桁か 64 桁の小文字の 16 進文字列です。
+- `outcome` は `fixing`、`converged`、`halted` のいずれかで、意味は `lastTriage.outcome` と同じです。
+
+1 行の正規表現で読めます。
+
+```text
+^<!-- cross-review round=([0-9]+) sha=([0-9a-f]{40}|[0-9a-f]{64}) outcome=(fixing|converged|halted) -->$
+```
+
+- 判断ファイルの本文に同じ形の行が引用されることがあるため、複数あるときは本文の末尾にあるものを使います。
+- `--outcome` を省いた本文には注記を置きません。注記の無い本文（旧版の本文を含む）は無視します。
+- 注記は状態ファイルの `lastTriage` の写しです。両者が食い違うときは状態ファイルを正本とします。
+- PR の head と比べるときは完全一致で比べ、短縮した SHA は使いません。
+- 本文の要約行にある `head`（7 桁）と `結論` は人向けの表示です。機械で読むときは注記を使います。
+
 ## 検証データと互換性
 
 検証データは上流の `contracts/cross-review-state/` に置きます。

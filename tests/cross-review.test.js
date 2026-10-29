@@ -3766,6 +3766,44 @@ describe('cross-review buildRoundComment (PR コメントの定型)', () => {
     expect(body).not.toContain('経路設定の上書き:');
   });
 
+  it('結論を渡すと要約行の末尾に head と結論を足し、本文の末尾に注記を置く', () => {
+    const sha = 'd'.repeat(40);
+    const body = buildRoundComment({
+      round: 2,
+      reviewer: 'codex',
+      meta,
+      triage: 'T',
+      triageRecord: { sha, outcome: 'converged' },
+    });
+    expect(body).toContain('実行経路: bridge 経由 / base: origin/main (origin/main 優先解決) / 差分サイズ: 12.3KB / head: ddddddd / 結論: 収束 (converged)\n');
+    expect(body.trimEnd().split('\n').pop()).toBe(`<!-- cross-review round=2 sha=${sha} outcome=converged -->`);
+  });
+
+  it('結論の表示は fixing と halted も対応する語にする', () => {
+    const sha = 'e'.repeat(40);
+    const fixing = buildRoundComment({ round: 1, reviewer: 'codex', meta, triage: 'T', triageRecord: { sha, outcome: 'fixing' } });
+    const halted = buildRoundComment({ round: 1, reviewer: 'codex', meta, triage: 'T', triageRecord: { sha, outcome: 'halted' } });
+    expect(fixing).toContain('/ 結論: 指摘の対応中 (fixing)\n');
+    expect(halted).toContain('/ 結論: 開発者の判断待ち (halted)\n');
+  });
+
+  it('結論を渡さなければ head、結論、注記のどれも出さない', () => {
+    const body = buildRoundComment({ round: 2, reviewer: 'codex', meta, triage: 'T' });
+    expect(body).not.toContain('head:');
+    expect(body).not.toContain('結論:');
+    expect(body).not.toContain('<!-- cross-review');
+  });
+
+  it('表に無い結論の値では本文を作らない', () => {
+    expect(() => buildRoundComment({
+      round: 1,
+      reviewer: 'codex',
+      meta,
+      triage: 'T',
+      triageRecord: { sha: 'a'.repeat(40), outcome: 'done' },
+    })).toThrow('結論の値が不正です');
+  });
+
   it('レビュー出力を渡してもコメント本文に載せない', () => {
     const body = buildRoundComment({
       round: 2,
@@ -4445,6 +4483,62 @@ describe('cross-review comment サブコマンド', () => {
     expect(logs.err).toContain('4 往復目 / converged / eeeeeee');
     expect(logs.err).toContain('/repo/.cross-review-state.json');
     expect(process.exitCode).toBe(0);
+  });
+
+  it('--outcome の本文には記録と同じ head と結論を入れる', () => {
+    const sha = 'f'.repeat(40);
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
+    const { deps, written, logs } = commentDeps(files, {
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return `${branch}\n`;
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${sha}\n`;
+        return '';
+      },
+      readState: () => ({ path: '/repo/.cross-review-state.json', state: { branches: {} }, corrupt: false }),
+      writeState: () => true,
+    });
+    process.exitCode = 0;
+    expect(runCommentCommand({ allowRoundMismatch: true, round: 1, outcome: 'converged' }, deps)).toBe(at(names.comment));
+    expect(written[at(names.comment)]).toContain('head: fffffff / 結論: 収束 (converged)');
+    expect(written[at(names.comment)]).toContain(`<!-- cross-review round=1 sha=${sha} outcome=converged -->`);
+    expect(logs.err).toContain('1 往復目 / converged / fffffff');
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('--outcome 省略の本文には head も結論も注記も入れず、状態ファイルも読まない', () => {
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
+    let reads = 0;
+    const { deps, written } = commentDeps(files, {
+      gitRun: (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return `${branch}\n`;
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return `${'a'.repeat(40)}\n`;
+        return '';
+      },
+      readState: () => { reads += 1; throw new Error('呼ばない'); },
+    });
+    process.exitCode = 0;
+    expect(runCommentCommand({ round: 1 }, deps)).toBe(at(names.comment));
+    expect(written[at(names.comment)]).not.toContain('head:');
+    expect(written[at(names.comment)]).not.toContain('結論:');
+    expect(written[at(names.comment)]).not.toContain('<!-- cross-review');
+    expect(reads).toBe(0);
+  });
+
+  it('HEAD を取れなければ本文に結論を入れず、記録もしない', () => {
+    const files = { [at(names.meta)]: '{}', [at(names.triage)]: 'T' };
+    let writes = 0;
+    const { deps, written, logs } = commentDeps(files, {
+      gitRun: (args) => (args[0] === 'rev-parse' && args[1] === '--abbrev-ref' ? `${branch}\n` : ''),
+      readState: () => ({ path: '/repo/.cross-review-state.json', state: { branches: {} }, corrupt: false }),
+      writeState: () => { writes += 1; return true; },
+    });
+    process.exitCode = 0;
+    expect(runCommentCommand({ allowRoundMismatch: true, round: 1, outcome: 'fixing' }, deps)).toBeNull();
+    expect(written[at(names.comment)]).not.toContain('head:');
+    expect(written[at(names.comment)]).not.toContain('<!-- cross-review');
+    expect(writes).toBe(0);
+    expect(logs.err).toContain('HEAD の SHA を取得できません');
+    process.exitCode = 0;
   });
 
   it('--outcome 省略時は状態ファイルを読まず書かない', () => {
