@@ -1151,6 +1151,33 @@ function waitForState(ms) {
   Atomics.wait(stateWaitBuffer, 0, 0, ms);
 }
 
+// 判定だけを行い、ロックは消さない。判定から削除までの間に別の書き手が新しいロックを取ると、その持ち主のロックまで消してしまうため。
+function isAbandonedLock(lock) {
+  let stat;
+  try { stat = fs.statSync(lock); } catch { return false; }
+  if (Date.now() - stat.mtimeMs <= 30000) return false;
+  let owner;
+  try {
+    owner = JSON.parse(fs.readFileSync(lock, 'utf8'));
+  } catch (err) {
+    return err.code !== 'ENOENT';
+  }
+  if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || typeof owner.hostname !== 'string') return true;
+  if (owner.hostname !== os.hostname()) return false;
+  try {
+    process.kill(owner.pid, 0);
+    return false;
+  } catch (err) {
+    return err.code === 'ESRCH';
+  }
+}
+
+function lockTimeoutError(lock) {
+  const message = `ロックを取得できません: ${lock}`;
+  if (!isAbandonedLock(lock)) return new Error(message);
+  return new Error(`${message}\n放棄されたロックの可能性があります。ほかの cross-review が動いていないことを確かめてから、このロックファイルを手で削除し、コマンドを実行し直してください。`);
+}
+
 function acquireStateLock(statePath, deps) {
   const lock = `${statePath}.lock`;
   const deadline = Date.now() + (deps.lockTimeoutMs ?? 5000);
@@ -1173,27 +1200,7 @@ function acquireStateLock(statePath, deps) {
       }
       if (!['EEXIST', 'EPERM', 'EBUSY', 'EACCES'].includes(err.code)) throw err;
     }
-    try {
-      if (Date.now() - fs.statSync(lock).mtimeMs > 30000) {
-        let abandoned = false;
-        try {
-          const owner = JSON.parse(fs.readFileSync(lock, 'utf8'));
-          if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0 || typeof owner.hostname !== 'string') {
-            abandoned = true;
-          } else if (owner.hostname === os.hostname()) {
-            try { process.kill(owner.pid, 0); } catch (err) { abandoned = err.code === 'ESRCH'; }
-          }
-        } catch { abandoned = true; }
-        if (abandoned) {
-          // 直接消すと、同時に放棄と判定した 2 つの書き手が順に取り直して二重に持つ。rename は 1 つだけが成功する。
-          const stale = `${lock}.stale-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-          fs.renameSync(lock, stale);
-          fs.unlinkSync(stale);
-          continue;
-        }
-      }
-    } catch { /* 他の書き手によるロックの移動も再試行する。 */ }
-    if (Date.now() >= deadline) throw new Error(`ロックを取得できません: ${lock}`);
+    if (Date.now() >= deadline) throw lockTimeoutError(lock);
     waitForState(Math.min(50, deadline - Date.now()));
   }
 }
@@ -1218,6 +1225,21 @@ function replaceStateFile(state, statePath) {
   }
 }
 
+// 旧ファイルを共有ディレクトリへ移す。別ボリュームへの rename (EXDEV) は複製してから消す。
+function archiveLegacyState(legacy, target, deps) {
+  const renameFile = deps.renameFile || fs.renameSync;
+  const copyFile = deps.copyFile || fs.copyFileSync;
+  const removeFile = deps.removeFile || fs.unlinkSync;
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  try {
+    renameFile(legacy, target);
+  } catch (err) {
+    if (err.code !== 'EXDEV') throw err;
+    copyFile(legacy, target);
+    removeFile(legacy);
+  }
+}
+
 function updateState(transform, deps = {}) {
   const warn = deps.warn || ((m) => process.stderr.write(m));
   const statePath = resolveStatePath(deps);
@@ -1230,7 +1252,10 @@ function updateState(transform, deps = {}) {
       const legacy = path.resolve(resolveProjectRoot(deps), STATE_FILENAME);
       if (legacy !== statePath && fs.existsSync(legacy)) {
         let parsed;
-        try { parsed = parseStateText(fs.readFileSync(legacy, 'utf8')); } catch { parsed = { kind: 'invalid' }; }
+        // 一時的に読めない旧ファイルを残したまま変更を書くと、後で読めたときに再取り込みで記録が戻るため、書かずに失敗する。
+        try { parsed = parseStateText(fs.readFileSync(legacy, 'utf8')); } catch (err) {
+          throw new Error(`旧ファイルを読めません: ${legacy} (${err.message})`);
+        }
         const shared = readState(deps);
         if (shared.corrupt) throw new Error(`状態ファイルを読めません: ${statePath}`);
         if (parsed.kind !== 'ok') {
@@ -1240,10 +1265,12 @@ function updateState(transform, deps = {}) {
           if (JSON.stringify(shared.state) !== JSON.stringify(merged)) replaceStateFile(merged, statePath);
           const imported = path.join(path.dirname(statePath), 'cross-review-state.imported');
           const name = crypto.createHash('sha256').update(path.resolve(resolveProjectRoot(deps))).digest('hex').slice(0, 16);
+          // 統合を書いてから移し、移動に失敗したら例外で状態遷移を止める。旧ファイルが残ったまま適用すると次の取り込みで reset の記録が戻るため。
           try {
-            fs.mkdirSync(imported, { recursive: true });
-            fs.renameSync(legacy, path.join(imported, `${name}.json`));
-          } catch (err) { warn(`[cross-review] 取り込んだ旧ファイルを移せません: ${legacy} (${err.message})\n`); }
+            archiveLegacyState(legacy, path.join(imported, `${name}.json`), deps);
+          } catch (err) {
+            throw new Error(`旧ファイルを移せません: ${legacy} (${err.message})`);
+          }
         }
       }
     }

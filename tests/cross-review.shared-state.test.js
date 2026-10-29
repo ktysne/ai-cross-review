@@ -96,16 +96,20 @@ describe('共有状態の更新と取り込み', () => {
     expect(fs.existsSync(resolveStatePath(deps))).toBe(false);
   });
 
-  it.each(['読めない本文', '生存していない pid'])('30 秒より古い放棄ロックを取り直す: %s', (kind) => {
+  it.each(['読めない本文', '生存していない pid'])('30 秒より古い放棄ロックは自動で消さず、案内付きで失敗する: %s', (kind) => {
     fs.mkdirSync(deps.stateDir);
     const lock = `${resolveStatePath(deps)}.lock`;
     fs.writeFileSync(lock, kind === '読めない本文' ? '{' : JSON.stringify({ pid: 123456, hostname: os.hostname() }));
     if (kind !== '読めない本文') vi.spyOn(process, 'kill').mockImplementation(() => { throw Object.assign(new Error('dead'), { code: 'ESRCH' }); });
     const old = new Date(Date.now() - 31000);
     fs.utimesSync(lock, old, old);
-    expect(record()).not.toBe(false);
-    expect(fs.existsSync(lock)).toBe(false);
-    expect(fs.readdirSync(deps.stateDir)).toEqual(['cross-review-state.json']);
+    expect(record({ ...deps, lockTimeoutMs: 0 })).toBe(false);
+    expect(fs.existsSync(lock)).toBe(true);
+    expect(fs.existsSync(resolveStatePath(deps))).toBe(false);
+    const message = deps.warn.mock.calls.flat().join('');
+    expect(message).toContain('放棄されたロックの可能性');
+    expect(message).toContain(lock);
+    expect(fs.readdirSync(deps.stateDir)).toEqual(['cross-review-state.json.lock']);
   });
 
   it.each(['生存中', '別ホスト', '確認権限なし'])('古くても生存を否定できないロックは奪わない: %s', (kind) => {
@@ -117,6 +121,7 @@ describe('共有状態の更新と取り込み', () => {
     if (kind === '確認権限なし') vi.spyOn(process, 'kill').mockImplementation(() => { throw Object.assign(new Error('denied'), { code: 'EPERM' }); });
     expect(record({ ...deps, lockTimeoutMs: 0 })).toBe(false);
     expect(fs.existsSync(lock)).toBe(true);
+    expect(deps.warn.mock.calls.flat().join('')).not.toContain('放棄されたロックの可能性');
   });
 
   it('壊れた共有ファイルは旧ファイルがあっても変更しない', () => {
@@ -155,6 +160,42 @@ describe('共有状態の更新と取り込み', () => {
     expect(fs.existsSync(legacy)).toBe(false);
     const hash = crypto.createHash('sha256').update(root).digest('hex').slice(0, 16);
     expect(JSON.parse(fs.readFileSync(path.join(deps.stateDir, 'cross-review-state.imported', `${hash}.json`)))).toEqual(state);
+  });
+
+  it('EXDEV では旧ファイルを複製してから消す', () => {
+    const legacy = path.join(root, '.cross-review-state.json');
+    const state = nextState(null, { branch: 'legacy', sha });
+    fs.writeFileSync(legacy, JSON.stringify(state));
+    deps.renameFile = () => { throw Object.assign(new Error('cross-device'), { code: 'EXDEV' }); };
+    expect(record()).not.toBe(false);
+    expect(readState(deps).state.branches.legacy.round).toBe(1);
+    expect(fs.existsSync(legacy)).toBe(false);
+    const hash = crypto.createHash('sha256').update(root).digest('hex').slice(0, 16);
+    expect(JSON.parse(fs.readFileSync(path.join(deps.stateDir, 'cross-review-state.imported', `${hash}.json`)))).toEqual(state);
+  });
+
+  it.each([['複製', 'copyFile'], ['削除', 'removeFile']])('EXDEV で旧ファイルの%s に失敗したら reset を適用せず、後の reset で記録が戻らない', (_label, failing) => {
+    deps.gitRun = (args) => args.includes('--abbrev-ref') ? 'feature/test' : sha;
+    record();
+    record();
+    const legacy = path.join(root, '.cross-review-state.json');
+    fs.writeFileSync(legacy, JSON.stringify(nextState(null, { branch: 'feature/test', sha })));
+    deps.renameFile = () => { throw Object.assign(new Error('cross-device'), { code: 'EXDEV' }); };
+    deps[failing] = () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); };
+    runStateCommand({ reset: true }, deps);
+    expect(process.exitCode).toBe(1);
+    expect(deps.warn.mock.calls.flat().join('')).toContain('旧ファイルを移せません');
+    expect(readState(deps).state.branches['feature/test'].round).toBe(2);
+    expect(fs.existsSync(legacy)).toBe(true);
+    delete deps.renameFile;
+    delete deps[failing];
+    process.exitCode = 0;
+    runStateCommand({ reset: true }, deps);
+    expect(process.exitCode).toBe(0);
+    expect(fs.existsSync(legacy)).toBe(false);
+    expect(readState(deps).state.branches['feature/test']).toBeUndefined();
+    expect(record()).not.toBe(false);
+    expect(readState(deps).state.branches['feature/test'].round).toBe(1);
   });
 
   it('壊れた旧ファイルは残して警告し共有状態へ記録する', () => {
@@ -290,4 +331,21 @@ describe('状態の統合', () => {
     expect(merged.branches['feature/test'].lastTriage.outcome).toBe('converged');
     expect(mergeStates(merged, legacy)).toEqual(merged);
   });
+});
+
+it('旧ファイルを一時的に読めなければ書かずに失敗し、読めるようになった後の取り込みで reset した記録が戻らない', () => {
+  const legacy = path.join(root, '.cross-review-state.json');
+  fs.writeFileSync(legacy, `${JSON.stringify({ branches: { 'feature/test': { round: 2, lastReviewedSha: sha } } })}\n`);
+  const original = fs.readFileSync;
+  const spy = vi.spyOn(fs, 'readFileSync').mockImplementation((file, ...rest) => {
+    if (path.resolve(String(file)) === legacy) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+    return original(file, ...rest);
+  });
+  expect(record()).toBe(false);
+  expect(fs.existsSync(path.join(deps.stateDir, 'cross-review-state.json'))).toBe(false);
+  expect(fs.existsSync(legacy)).toBe(true);
+  spy.mockRestore();
+  expect(record()).not.toBe(false);
+  expect(readState(deps).state.branches['feature/test'].round).toBe(3);
+  expect(fs.existsSync(legacy)).toBe(false);
 });
