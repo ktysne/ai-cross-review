@@ -10,8 +10,9 @@ agent-cockpit 側の #717 から #720 は別のセッションが並行して対
 
 - B1(#106)は PR #109 で、Codex のクロスレビューが 2 往復目で収束し(c33107a)、2026-10-29T19:06Z に main へマージされた。
 - B2(#108)は PR #110 で、Codex のクロスレビューが 1 往復目で収束し(ba52ded)、2026-10-29T19:07Z に main へマージされた。B3 の base は main になる。
-- B3(#107)は PR #111 で、Codex のクロスレビューが 1 往復目で収束した。マージ待ちである。
-- 3 件とも完了した。残りは開発者による #111 のマージだけである。
+- B3(#107)は PR #111 で、Codex のクロスレビューが 1 往復目で収束し(7a3cd97)、2026-10-29T19:20Z に main へマージされた。
+- 3 件ともマージ済みで、この計画は完了した。
+- 導入先への同期は、agent-cockpit#717 が入るまで行わない(管理セッションの指示)。
 - 導入先への同期(`cross-review.sync-all.js` など)は、この計画では行わない。
 - PR のマージは開発者が判断する。セッションはマージしない。
 
@@ -33,7 +34,7 @@ agent-cockpit 側の #717 から #720 は別のセッションが並行して対
 |---|---|---|---|---|---|---|
 | B1 | #106 | `tools/cross-review.js`(状態の置き場、ロック、記録時の検査)、`docs/contracts/cross-review-state.md`、`docs/migrations/` | `feat/shared-review-state` | #109 | main | マージ済み(2026-10-29T19:06Z) |
 | B2 | #108 | `tools/cross-review.js`(`buildRoundComment`、`buildMetaSummary`)、契約 | `feat/round-comment-head` | #110 | B1 | マージ済み(2026-10-29T19:07Z) |
-| B3 | #107 | `tools/cross-review.js`(`resolveBaseSelection`)、`.claude/skills/cross-review/SKILL.md`、`docs/cross-review.md` | `feat/merge-resolution-review` | #111 | main | 収束、マージ待ち(2026-10-30) |
+| B3 | #107 | `tools/cross-review.js`(`resolveBaseSelection`)、`.claude/skills/cross-review/SKILL.md`、`docs/cross-review.md` | `feat/merge-resolution-review` | #111 | main | マージ済み(2026-10-29T19:20Z) |
 
 ## 判断待ちと受け渡し
 
