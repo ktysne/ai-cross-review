@@ -68,12 +68,12 @@ function resolveCachedEngine(projectRoot, deps = {}) {
   const key = repo + '#' + ref;
   let sha = SHA_PATTERN.test(ref) ? ref.toLowerCase() : null;
   let offline = isNoFetch(env);
+  let resolvedFromRemote = false;
   if (!sha && !offline) {
     try {
       sha = resolveRemoteSha(gitRun(['ls-remote', repo, ref]), ref);
       if (!sha) throw new Error('ref が見つかりません');
-      refs[key] = sha;
-      writeRefs(cacheRoot, refs, io, deps.platform || process.platform);
+      resolvedFromRemote = true;
     } catch { offline = true; }
   }
   if (!sha && SHA_PATTERN.test(refs[key])) sha = refs[key].toLowerCase();
@@ -102,6 +102,11 @@ function resolveCachedEngine(projectRoot, deps = {}) {
         try { io.rmSync(target, { recursive: true, force: true }); } catch {}
       }
     }
+  }
+  // refs.json はオフライン時に使う本体を指すため、本体がキャッシュにある SHA だけを記録する。
+  if (resolvedFromRemote && refs[key] !== sha) {
+    refs[key] = sha;
+    writeRefs(cacheRoot, refs, io, deps.platform || process.platform);
   }
   return { engineSource: 'cache', enginePath, cacheRoot, engineSha: sha };
 }

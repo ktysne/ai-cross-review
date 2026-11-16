@@ -140,6 +140,34 @@ describe('キャッシュの取得と再利用', () => {
     put('cache/ai-cross-review/refs.json', '{broken');
     expect(entry.resolveEngine(path.join(temp, 'project'), cacheDeps({ gitRun: () => sha + '\trefs/heads/main' })).engineSha).toBe(sha);
   });
+  it('本体の取得に失敗したら最後の SHA の記録を保ち、オフラインでその本体を使う', () => {
+    manifest();
+    cacheEngine();
+    const record = JSON.stringify({ 'https://example.test/upstream.git#main': sha });
+    const refsPath = put('cache/ai-cross-review/refs.json', record);
+    const gitRun = (args) => {
+      if (args[0] === 'ls-remote') return otherSha + '\trefs/heads/main\n';
+      if (args.includes('fetch')) throw new Error('offline');
+      return '';
+    };
+    expect(() => entry.resolveEngine(path.join(temp, 'project'), cacheDeps({ gitRun }))).toThrow(/取得できません/);
+    expect(fs.readFileSync(refsPath, 'utf8')).toBe(record);
+    expect(entry.resolveEngine(path.join(temp, 'project'), cacheDeps({ gitRun: () => { throw new Error('offline'); } })).engineSha).toBe(sha);
+  });
+  it('取得して配置できた SHA を記録する', () => {
+    manifest();
+    put('cache/ai-cross-review/refs.json', JSON.stringify({ 'https://example.test/upstream.git#main': sha }));
+    const gitRun = (args) => {
+      if (args[0] === 'ls-remote') return otherSha + '\trefs/heads/main\n';
+      if (args.includes('FETCH_HEAD')) {
+        fs.mkdirSync(path.join(args[1], 'tools'), { recursive: true });
+        fs.writeFileSync(path.join(args[1], 'tools/cross-review.js'), '');
+      }
+      return '';
+    };
+    expect(entry.resolveEngine(path.join(temp, 'project'), cacheDeps({ gitRun })).engineSha).toBe(otherSha);
+    expect(JSON.parse(fs.readFileSync(path.join(temp, 'cache/ai-cross-review/refs.json')))).toEqual({ 'https://example.test/upstream.git#main': otherSha });
+  });
   it.each([false, true])('木全体を一時名に fetch して配置する (rename の競合: %s)', (race) => {
     manifest(sha);
     const calls = [];
