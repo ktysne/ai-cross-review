@@ -58,26 +58,42 @@ function resolveCachedEngine(projectRoot, deps = {}) {
   const env = deps.env || process.env;
   const gitRun = deps.gitRun || ((args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
   const cacheRoot = resolveCacheRoot(deps);
+  const warn = deps.err || ((s) => process.stderr.write(s));
   let upstream;
+  let syncedCommit;
   try {
-    upstream = JSON.parse(io.readFileSync(path.join(projectRoot, 'tools/cross-review.sync.json'), 'utf8')).upstream;
+    const manifest = JSON.parse(io.readFileSync(path.join(projectRoot, 'tools/cross-review.sync.json'), 'utf8'));
+    upstream = manifest.upstream;
+    syncedCommit = typeof manifest.lastSyncedCommit === 'string' ? manifest.lastSyncedCommit.toLowerCase() : null;
     if (!upstream || typeof upstream.repo !== 'string' || !upstream.repo || typeof upstream.ref !== 'string' || !upstream.ref) throw new Error('upstream.repo と upstream.ref が必要です');
   } catch (err) { throw new Error('導入先のマニフェストを読めません。tools/cross-review.sync.json の upstream.repo と upstream.ref を確認してください: ' + err.message); }
   const { repo, ref } = upstream;
   const refs = readRefs(cacheRoot, io);
   const key = repo + '#' + ref;
-  let sha = SHA_PATTERN.test(ref) ? ref.toLowerCase() : null;
+  const pinned = SHA_PATTERN.test(ref);
+  let sha = pinned ? ref.toLowerCase() : null;
   let offline = isNoFetch(env);
   let resolvedFromRemote = false;
+  let remoteFailed = false;
   if (!sha && !offline) {
     try {
       sha = resolveRemoteSha(gitRun(['ls-remote', repo, ref]), ref);
       if (!sha) throw new Error('ref が見つかりません');
       resolvedFromRemote = true;
-    } catch { offline = true; }
+    } catch { offline = true; remoteFailed = true; }
   }
-  if (!sha && SHA_PATTERN.test(refs[key])) sha = refs[key].toLowerCase();
+  if (!sha && SHA_PATTERN.test(refs[key])) {
+    sha = refs[key].toLowerCase();
+    if (remoteFailed) warn('[cross-review] 上流の ' + ref + ' を問い合わせできないため、記録済みの SHA の本体に切り替える: ' + sha + '\n');
+  }
   if (!sha) throw new Error('本体の ref を解決できず、最後の SHA の記録もありません。ネットワークにつなぐか checkout を --register で登録してください。');
+  // ブランチやタグの指す先は上流への push で変わるため、sync が記録したコミットと同じ本体だけを実行する。
+  // sync は新しい版を取り込んで記録を進める経路なので対象外にする。述語は本体の振り分け (先頭の引数が sync) とそろえる。
+  if (!pinned && (deps.argv || process.argv.slice(2))[0] !== 'sync' && sha !== syncedCommit) {
+    throw new Error(syncedCommit
+      ? 'upstream.ref ' + ref + ' の本体 (' + sha + ') が、同期済みのコミット (' + syncedCommit + ') と一致しないため、実行しません。上流の変更を確かめてから node tools/cross-review.js sync (npm run sync) で取り込んでください。'
+      : 'マニフェストに lastSyncedCommit の記録が無いため、upstream.ref ' + ref + ' の本体 (' + sha + ') を実行しません。node tools/cross-review.js sync (npm run sync) で取り込んでから再実行してください。');
+  }
   const engines = path.join(cacheRoot, 'engines');
   const checkout = path.join(engines, sha);
   const enginePath = path.join(checkout, 'tools/cross-review.js');
@@ -94,7 +110,7 @@ function resolveCachedEngine(projectRoot, deps = {}) {
       try { io.renameSync(temp, checkout); } catch (err) {
         if (!io.existsSync(enginePath)) throw err;
       }
-      (deps.err || ((s) => process.stderr.write(s)))('[cross-review] 本体を取得した: ' + sha + '\n');
+      warn('[cross-review] 本体を取得した: ' + sha + '\n');
     } catch (err) { throw new Error('本体を取得できません。ネットワークと upstream.ref を確認してください: ' + err.message); }
     finally {
       const target = path.resolve(temp);

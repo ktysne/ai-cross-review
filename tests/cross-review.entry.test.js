@@ -23,14 +23,24 @@ function put(relative, body = '') {
 function deps(extra = {}) {
   return { env: {}, homedir: () => path.join(temp, 'home'), scriptDir: path.join(temp, 'project/tools'), err: vi.fn(), ...extra };
 }
-function manifest(ref = 'main') {
-  put('project/tools/cross-review.sync.json', JSON.stringify({ upstream: { repo: 'https://example.test/upstream.git', ref } }));
+function manifest(ref = 'main', lastSyncedCommit = sha) {
+  put('project/tools/cross-review.sync.json', JSON.stringify({ upstream: { repo: 'https://example.test/upstream.git', ref }, lastSyncedCommit }));
+}
+function fetchStub(commit) {
+  return vi.fn((args) => {
+    if (args[0] === 'ls-remote') return commit + '\trefs/heads/main\n';
+    if (args.includes('FETCH_HEAD')) {
+      fs.mkdirSync(path.join(args[1], 'tools'), { recursive: true });
+      fs.writeFileSync(path.join(args[1], 'tools/cross-review.js'), '');
+    }
+    return '';
+  });
 }
 function cacheEngine(commit = sha) {
   return put('cache/ai-cross-review/engines/' + commit + '/tools/cross-review.js', '');
 }
 function cacheDeps(extra = {}) {
-  return deps({ env: { XDG_CACHE_HOME: path.join(temp, 'cache') }, ...extra });
+  return deps({ env: { XDG_CACHE_HOME: path.join(temp, 'cache') }, argv: ['state'], ...extra });
 }
 
 beforeEach(() => {
@@ -150,7 +160,7 @@ describe('キャッシュの取得と再利用', () => {
       if (args.includes('fetch')) throw new Error('offline');
       return '';
     };
-    expect(() => entry.resolveEngine(path.join(temp, 'project'), cacheDeps({ gitRun }))).toThrow(/取得できません/);
+    expect(() => entry.resolveEngine(path.join(temp, 'project'), cacheDeps({ gitRun, argv: ['sync'] }))).toThrow(/取得できません/);
     expect(fs.readFileSync(refsPath, 'utf8')).toBe(record);
     expect(entry.resolveEngine(path.join(temp, 'project'), cacheDeps({ gitRun: () => { throw new Error('offline'); } })).engineSha).toBe(sha);
   });
@@ -165,7 +175,7 @@ describe('キャッシュの取得と再利用', () => {
       }
       return '';
     };
-    expect(entry.resolveEngine(path.join(temp, 'project'), cacheDeps({ gitRun })).engineSha).toBe(otherSha);
+    expect(entry.resolveEngine(path.join(temp, 'project'), cacheDeps({ gitRun, argv: ['sync'] })).engineSha).toBe(otherSha);
     expect(JSON.parse(fs.readFileSync(path.join(temp, 'cache/ai-cross-review/refs.json')))).toEqual({ 'https://example.test/upstream.git#main': otherSha });
   });
   it.each([false, true])('木全体を一時名に fetch して配置する (rename の競合: %s)', (race) => {
@@ -221,6 +231,77 @@ describe('キャッシュの取得と再利用', () => {
     entry.writeRefs(temp, {}, { ...fs, renameSync: rename }, 'win32');
     expect(rename).toHaveBeenCalledTimes(3);
     expect(fs.readdirSync(temp)).toEqual([]);
+  });
+});
+
+describe('同期済みのコミットとの照合', () => {
+  const project = () => path.join(temp, 'project');
+  const refsPath = () => path.join(temp, 'cache/ai-cross-review/refs.json');
+
+  it('ls-remote の SHA が lastSyncedCommit と違えば、取得も記録もせずに sync を促して止まる', () => {
+    manifest();
+    cacheEngine();
+    const gitRun = fetchStub(otherSha);
+    expect(() => entry.resolveCachedEngine(project(), cacheDeps({ gitRun }))).toThrow(/一致しない.*cross-review\.js sync/);
+    expect(gitRun.mock.calls.map((call) => call[0][0])).toEqual(['ls-remote']);
+    expect(fs.existsSync(refsPath())).toBe(false);
+    expect(fs.existsSync(path.join(temp, 'cache/ai-cross-review/engines', otherSha))).toBe(false);
+  });
+  it('照合で止まると本体を読み込まず終了コード 2 にする', () => {
+    manifest();
+    const load = vi.fn();
+    const h = cacheDeps({ gitRun: fetchStub(otherSha), require: load, argv: ['codex'] });
+    entry.main(h);
+    expect(process.exitCode).toBe(2);
+    expect(load).not.toHaveBeenCalled();
+    expect(h.err.mock.calls.join('')).toContain(otherSha);
+    expect(h.err.mock.calls.join('')).toContain(sha);
+  });
+  it('lastSyncedCommit と一致すれば、大文字と小文字の違いを問わず本体を選ぶ', () => {
+    manifest('main', sha.toUpperCase());
+    cacheEngine();
+    expect(entry.resolveCachedEngine(project(), cacheDeps({ gitRun: fetchStub(sha) }))).toMatchObject({ engineSource: 'cache', engineSha: sha });
+  });
+  it.each([[['sync']], [['sync', '--check']]])('sync は照合の対象外で、新しい SHA の本体を取得して選ぶ: %j', (argv) => {
+    manifest();
+    expect(entry.resolveCachedEngine(project(), cacheDeps({ gitRun: fetchStub(otherSha), argv })).engineSha).toBe(otherSha);
+  });
+  it('先頭以外の引数に sync があっても照合する', () => {
+    manifest();
+    expect(() => entry.resolveCachedEngine(project(), cacheDeps({ gitRun: fetchStub(otherSha), argv: ['codex', 'sync'] }))).toThrow(/一致しない/);
+  });
+  it.each([null, '', 123])('lastSyncedCommit の記録が無ければ sync を促して止まる: %s', (recorded) => {
+    manifest('main', recorded);
+    cacheEngine();
+    expect(() => entry.resolveCachedEngine(project(), cacheDeps({ gitRun: fetchStub(sha) }))).toThrow(/lastSyncedCommit の記録が無い.*cross-review\.js sync/);
+    expect(entry.resolveCachedEngine(project(), cacheDeps({ gitRun: fetchStub(sha), argv: ['sync'] })).engineSha).toBe(sha);
+  });
+  it('sync --check が記録した未同期の SHA を、オフラインの実行でも拒む', () => {
+    manifest();
+    cacheEngine();
+    entry.resolveCachedEngine(project(), cacheDeps({ gitRun: fetchStub(otherSha), argv: ['sync', '--check'] }));
+    expect(JSON.parse(fs.readFileSync(refsPath()))).toEqual({ 'https://example.test/upstream.git#main': otherSha });
+    const offline = cacheDeps({ env: { XDG_CACHE_HOME: path.join(temp, 'cache'), CROSS_REVIEW_NO_FETCH: '1' }, gitRun: vi.fn() });
+    expect(() => entry.resolveCachedEngine(project(), offline)).toThrow(/一致しない/);
+    expect(() => entry.resolveCachedEngine(project(), cacheDeps({ gitRun: () => { throw new Error('offline'); } }))).toThrow(/一致しない/);
+  });
+  it('40 桁の SHA を指定した ref は照合しない', () => {
+    manifest(sha, otherSha);
+    cacheEngine();
+    const gitRun = vi.fn();
+    expect(entry.resolveCachedEngine(project(), cacheDeps({ gitRun })).engineSha).toBe(sha);
+    expect(gitRun).not.toHaveBeenCalled();
+  });
+  it('ls-remote の失敗で記録済みの SHA に切り替えたことを stderr に出す', () => {
+    manifest();
+    cacheEngine();
+    put('cache/ai-cross-review/refs.json', JSON.stringify({ 'https://example.test/upstream.git#main': sha }));
+    const failed = cacheDeps({ gitRun: () => { throw new Error('offline'); } });
+    expect(entry.resolveCachedEngine(project(), failed).engineSha).toBe(sha);
+    expect(failed.err.mock.calls.join('')).toBe('[cross-review] 上流の main を問い合わせできないため、記録済みの SHA の本体に切り替える: ' + sha + '\n');
+    const noFetch = cacheDeps({ env: { XDG_CACHE_HOME: path.join(temp, 'cache'), CROSS_REVIEW_NO_FETCH: '1' }, gitRun: vi.fn() });
+    expect(entry.resolveCachedEngine(project(), noFetch).engineSha).toBe(sha);
+    expect(noFetch.err).not.toHaveBeenCalled();
   });
 });
 
