@@ -91,8 +91,8 @@ function resolveCachedEngine(projectRoot, deps = {}) {
   // sync は新しい版を取り込んで記録を進める経路なので対象外にする。述語は本体の振り分け (先頭の引数が sync) とそろえる。
   if (!pinned && (deps.argv || process.argv.slice(2))[0] !== 'sync' && sha !== syncedCommit) {
     throw new Error(syncedCommit
-      ? 'upstream.ref ' + ref + ' の本体 (' + sha + ') が、同期済みのコミット (' + syncedCommit + ') と一致しないため、実行しません。上流の変更を確かめてから node tools/cross-review.js sync (npm run sync) で取り込んでください。'
-      : 'マニフェストに lastSyncedCommit の記録が無いため、upstream.ref ' + ref + ' の本体 (' + sha + ') を実行しません。node tools/cross-review.js sync (npm run sync) で取り込んでから再実行してください。');
+      ? 'upstream.ref ' + ref + ' の本体 (' + sha + ') が、同期済みのコミット (' + syncedCommit + ') と一致しないため、実行しません。上流の変更を確かめてから 導入先で node tools/cross-review.js sync を実行して取り込んでください。'
+      : 'マニフェストに lastSyncedCommit の記録が無いため、upstream.ref ' + ref + ' の本体 (' + sha + ') を実行しません。導入先で node tools/cross-review.js sync を実行して取り込んでから再実行してください。');
   }
   const engines = path.join(cacheRoot, 'engines');
   const checkout = path.join(engines, sha);
